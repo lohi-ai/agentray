@@ -75,9 +75,8 @@ func TestNoStoreNoTools(t *testing.T) {
 	}
 }
 
-// A store that cannot revise entries still gets learn — capture needs only
-// Remember — but not memory_edit.
-func TestNonCuratorStoreGetsLearnOnly(t *testing.T) {
+// A store that cannot revise entries still gets recall and learn, but no edit.
+func TestNonCuratorStoreGetsRecallAndLearn(t *testing.T) {
 	ext, err := Plugin{Store: &fakeStore{}}.BeginRun(context.Background(), runInfo())
 	if err != nil {
 		t.Fatalf("BeginRun: %v", err)
@@ -89,6 +88,9 @@ func TestNonCuratorStoreGetsLearnOnly(t *testing.T) {
 	names := map[string]bool{}
 	for _, tool := range tc.Tools() {
 		names[tool.Name()] = true
+	}
+	if !names[ToolMemoryRecall] {
+		t.Error("memory_recall missing for a store that can Recall")
 	}
 	if !names[ToolLearn] {
 		t.Error("learn missing for a store that can Remember")

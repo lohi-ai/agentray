@@ -10,24 +10,79 @@ TypeScript source, worker transport, fixture generators and Bun build tooling
 have been removed. Go tests consume recorded JSON fixtures; source hashes and
 licenses remain in [`third_party/pi`](../third_party/pi/README.md).
 
-The root contracts, plugins and legacy Go driver still have active callers.
-They remain available for explicit legacy-session compatibility. Package
-boundaries follow ownership and dependency direction; no additional interface
-hierarchy is needed.
+The root owns host composition, governed tool dispatch and plugins. All run
+entry points execute the native engine. Provider contracts live in
+`ai/protocol` so the facade can depend on the engine without an import cycle.
+Package boundaries follow ownership and dependency direction; no additional
+interface hierarchy is needed.
+
+
+## Native migration and consumer compatibility
+
+The server and Soot use the native engine. The old root loop, configurable
+`Driver`, server legacy dispatch and runtime-selection flag are removed.
+`Prompt`, `PromptStream`, `Continue` and `ContinueStream` now require
+`Config.NativeProvider`. `Continue` accepts newly authored host input; resume
+provider history through `RunNative` and `RunResult.NativeState`. Durable
+execution uses the native session host. Legacy provider/session test fixtures
+are still being migrated; the full historical test suite is not yet green.
+Native integration tests cover memory, compaction, todo and advisor. Native retry/fallback orchestration now lives in
+`ai.FallbackProvider`. The runtime binds durable selection and accounting to
+its callbacks. `ai.NativeProvider` owns native transport dispatch, and
+`engine.StreamFn` aliases the shared `ai.StreamFn` contract.
+
+`engine` owns native scheduling and provider events. The root still supplies
+composition, governed tools and plugins. A new
+engine does not itself replace the host's context compaction or session policy.
+
+The process bridge (`NewPi`, `PiAgent`) and its root-level configuration types
+(`PiConfig`, `PiCallback`, `PiError`) have been removed. Native consumers use
+`engine.AgentOptions`/`engine.NewAgent`; the application's JSON callback binding
+is owned by `internal/runtime.NativeAgentConfig`. Sessions now hold the concrete
+native agent, without the temporary worker/native function table or production
+string-command dispatcher. Recorded worker commands are decoded only by tests.
+
+The earlier port also removed `LabStepDiff`, `DiffStep`, and the observe helpers
+`AggregateRunSummaries`/`AggregateRunCoverage`. Existing `Plugin`, `Tool`,
+`LLMProvider`, `SessionStore` and extension interface method sets are unchanged;
+no plugin package has been removed. Provider contracts are now owned by
+`ai/protocol` and re-exported by the root package while callers migrate. Native integrations use `Hooks.PiContext`
+for native transcripts and `subagent.Settings.RunFork` for native child runs.
+
+The sibling Soot consumer uses `New` with `Config.NativeProvider` and
+`RunNative` for both case work and conversations. Its provider factory builds
+`ai.NativeClient` candidates under `ai.FallbackProvider`; the store atomically
+persists `RunResult.NativeState` with the public answer. Legacy context arrays
+are imported once as untrusted source facts, never replayed as provider history.
+
+`RunNative` accepts an opaque prior checkpoint and newly authored user/system
+input. It composes the existing plugins and governed tools around `engine.Agent`,
+with native compaction and explicit-parent telemetry. Display `Messages` are
+output only. Durable sessions use the application's native session host for
+in-flight effects, leases and parked delegations. Ephemeral native subagents
+continue corrections from `NativeState`, preserving their original transcript.
+
+Shared native compaction and transcript-checkpoint utilities live in
+[`host/`](host/); application persistence and credentials remain in the consumer.
+The same package owns host-input conversion and display projections. Native
+request observers receive the final transformed provider view; successful
+compaction emits a rebase before the request observation, and settled messages
+emit append observations. This keeps advisor and other existing `RunObserver`
+plugins informed without giving them control over native history. Integration
+tests exercise memory, todo, advisor and compaction through the native engine.
 
 The existing kernel is one flat package. The native Go replacement lives in
 [`engine/`](engine/); the other subdirectories are ejectable
 [`plugins/`](plugins/) and black-box [`integration/`](integration/) tests.
 The existing root package has a hard dependency rule in both directions:
 
-> **The kernel names no plugin, and depends on nothing else in this module.**
-> `agentcore` imports only the standard library plus focused Unicode and JSON
-> Schema libraries. Delete every package under `plugins/` and this package still
+> **Composition names no plugin and imports only shared runtime modules.**
+> Provider contracts live in `ai/protocol`, below the agent facade; the native
+> loop lives in `engine`, and reusable host policy lives in `host`. Delete every package under `plugins/` and this package still
 > compiles, still runs, and still passes its tests — it just does less.
 
-Both halves are tests, not prose: [`boundary_test.go`](boundary_test.go) reads
-the package's own imports and fails on a `plugins/` import or on any other
-package in this module. That is what makes the kernel publishable on its own and
+These boundaries are tested: [`boundary_test.go`](boundary_test.go) reads
+the package's own imports and fails on a plugin or application import. That is what makes the kernel publishable on its own and
 what makes [`plugins/README.md`](plugins/README.md)'s ejectability claim true.
 
 Everything structural on this page is enforced the same way, because a rule that
@@ -36,8 +91,8 @@ only this file knows is a rule that drifts:
 | test | holds |
 |---|---|
 | `TestKernelNamesNoPlugin` | no `plugins/` import from the root package |
-| `TestKernelIsAModuleLeaf` | no in-module import at all |
-| `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only the declared `engine/`, `plugins/`, and `integration/` boundaries sit below the root |
+| `TestKernelRuntimeDependencies` | only AI, engine, host, telemetry and shared JSON dependencies |
+| `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only the declared `engine/`, `host/`, `plugins/`, and `integration/` boundaries sit below the root |
 | `TestNativeEngineNamesNoHost` | the native engine directly imports only AI/telemetry modules, the shared JSON value codec, and libraries; it cannot launch a subprocess or import host policy |
 | `TestEveryKernelFileJustifiesItself` | every root `.go` file has a row below |
 | `TestPluginsDoNotNameEachOther` | no plugin imports a sibling (except `preset`) |
@@ -91,7 +146,6 @@ cannot give one belongs in a plugin, or belongs nowhere.
 |---|---|
 | [`doc.go`](doc.go) | **contract** — the package doc: the two boundary rules, the three kinds of plugin contribution, and the layer map below rendered where `go doc` can see it. No code. |
 | [`provider.go`](provider.go) | **contract** — `LLMProvider`, `ChatRequest/ChatResponse`, `Usage`, and provider-neutral text/image `ContentPart`s. The wire seam every model call goes through, kept small enough that an implementation is a translation layer and nothing more. |
-| [`pi.go`](pi.go) | **contract** — native JSON options, callbacks and errors shared with the Go host; no process bridge. |
 | [`provider_session.go`](provider_session.go) | **contract + seam default** — provider-private conversation state with selective account-rotation reset, plus the bounded lease-aware in-process registry. The loop carries the session on every request; providers own the concrete records, and a cache miss may cost discovery but never change correctness. |
 | [`plugin.go`](plugin.go) | **loop** — `Plugin`, `Registry`, `Priority`. The composition surface itself: seam setters, additive contributions, per-plugin `Unload`. |
 | [`compose.go`](compose.go) | **loop** — `Build`, `BuildRegistry`, `ApplyConfig`, and `Limits`/`DefaultLimits`: the run's bounds are chosen at composition, read every turn, and published to extensions through `RunInfo`. There is no composition in which a run is unbounded. |
@@ -103,15 +157,19 @@ cannot give one belongs in a plugin, or belongs nowhere.
 
 | file | why core |
 |---|---|
-| [`loop.go`](loop.go) | **loop + seam default** — the `Driver` seam (control flow as a replaceable service; without it the loop is the one thing you could not change without forking) and `DefaultDriver`'s body: reason → act, parallel batches, compaction bracketing, the graceful-stop protocol. Also the **only** writer of the durable log: it commits tool-call intent before effects and journals each settled parallel outcome immediately, while canonical tool messages still land in source order. A tool result that exists only because the run was cancelled is not a settled fact and is not written, because a call with a recorded result is answered forever and nothing would ever retry it. For the same reason a cancelled call does not count against the circuit breaker — every call in a wide batch fails when the parent dies, and the breaker's verdict is durable, so counting them left a resumed run with a working tool permanently disabled. |
+| `run_policy.go` | Shared native-run ceiling messages and bookkeeping classification. |
 | [`turn.go`](turn.go) | **loop** — one turn against the model: capability shaping (including copy-on-write request-wide image budgets), `ProviderError` classification, same-rung retry, then escalation down the ladder, plus the streaming path. Retry lives with the loop, not in a provider, so failure behaviour cannot differ per vendor. That includes reading usage off the stream: a delta's `Usage` is a running total that may arrive at any point (Anthropic states input tokens before the first output token; OpenAI sends a usage-only chunk *after* the terminal one), so the turn keeps the newest non-zero value of each field rather than whatever rode `Done`. Getting it wrong is silent — the answer is still correct and only the number the budget gate meters on is zero. |
 | [`tooldispatch.go`](tooldispatch.go) | **loop** — one tool call end to end: lookup → prepare → validate → gate → execute → bound → trace. The trust boundary, applied in exactly one place so it is unskippable rather than usually-called. Also the two context stamps a call carries: the idempotency key derived from `(sessionID, toolCallID)` — stable across crash-resume because both already survive in the log — and the provider-assigned tool-call id a spawn tool derives the child's deterministic session from. |
 | [`result.go`](result.go) | **contract** — `RunResult`, `StreamEvent` and the event vocabulary, `ResultCard`. The loop's output side, which consumers render and plugins observe. (`ToolTrace` sits with the code that fills it, in `tooldispatch.go`.) |
+| [`background.go`](background.go) | **contract** — run-owned background launcher shared by independent plugins; no scheduler or task policy in core. |
 | [`extension.go`](extension.go) | **contract** — every extension point (`ToolInterceptor`, `StepInterceptor`, `StopInterceptor`, `RunObserver`, `ToolContributor`, …) and the `extensionSet` the loop dispatches through. The file that forbids naming a plugin. |
+| [`run_lifecycle.go`](run_lifecycle.go) | **contract + dispatch** — optional settled-boundary controls, host command handlers and finalization before native checkpoints; no capability-specific state. |
 | [`hooks.go`](hooks.go) | **contract** — the lifecycle hook types and their dispatch, including the `BeforeToolCall` shape the permission gate is built from. |
 | [`tool.go`](tool.go) | **contract** — `Tool`, optional additive `RichTool`, `ToolSet`, `ArgPreparer`, and the loop's own byte bounding. Ordinary text stays compatible while image parts can cross the neutral provider seam. |
 | [`toolbridge.go`](toolbridge.go) | **contract + loop** — the run-owned `ToolInvoker` capability for tools such as eval that need to call another registered tool. Nested calls re-enter the single dispatch trust boundary (schema, policy, credentials, hooks, bounds, tracing, idempotency), share the run's atomic execution budget, reject recursion, and persist as audit metadata without inventing provider-authored tool messages. Directly constructing a tool never grants this capability. |
 | [`pi_tools.go`](pi_tools.go) | **host adapter** — exposes a composed Agent's tools to the native Go engine through the existing dispatch boundary. Owns extension resources and the busy slot, supplies native tool definitions/results, and shares the execution budget with nested calls. |
+| `native_session.go` | Restores the native transcript from journal entries, retaining opaque messages and rejecting unsettled effects. Consumer workflow validation remains separate. |
+| `native_run.go` | Composed plugins and consumer checkpoints over the native engine; AI-owned retry/fallback. |
 | `pi_lifecycle.go` | Native-loop host boundary for composed prompt, step, batch, stop, and ceiling policies. Calls extension contracts while Pi owns scheduling and native history. |
 | [`image.go`](image.go) | **loop** — the central rich-image trust boundary: decode validation, MIME correction, pixel/input limits, provider-portable resize/recompression, aggregate byte budgeting, and coordinate mapping. Keeping it beside tool dispatch gives every rich tool identical laptop/server behavior without trusting each implementation to normalize correctly. |
 | [`permission.go`](permission.go) | **contract + seam default** — `Policy`, `Decision`, and `DenyAll`. Default-deny is the kernel's, so a composition that forgets governance is not ungoverned. |
@@ -157,3 +215,18 @@ Black-box tests that import plugins now live in [`integration/`](integration/).
 They prove capabilities against the real public loop without mixing consumer
 composition into the kernel's package-private test suite. A plugin-policy test
 still belongs next to the plugin itself.
+
+### Shared telemetry and native extensions
+
+Supply `NativeRun.Telemetry` or carry an explicit parent with
+`telemetry.WithContext`. `telemetry/export` delivers completed span batches;
+`telemetry/llm` supplies model trace records and DB/file sink contracts. Model
+pricing is in `ai`. The former `observe` plugin, `WrapProvider` and raw provider
+response hook are removed. Native checkpoint validation replaces the old
+typed-journal invariant observer.
+
+Go plugins use `ExtensionFactory.BeginRun` around the engine's hooks.
+`NativeContextContributor` adds a run-scoped request transform without changing
+authoritative history. Todo uses it with its per-run tool and checkpoint;
+memory contributes explicit `memory_recall`. Pi's TypeScript `ExtensionAPI`
+loader belongs to its coding-agent application, not to the ported agent engine.

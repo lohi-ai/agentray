@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // fakeTokenSource is a TokenSource that hands out queued tokens and records
@@ -45,24 +45,24 @@ func (s *fakeTokenSource) Report(_ context.Context, tok OAuthToken, err error) {
 type fakeInner struct {
 	applied  OAuthToken
 	chatErr  error
-	chatFn   func(OAuthToken) (agentcore.ChatResponse, error)
-	streamCh chan agentcore.ChatDelta
-	streamFn func(OAuthToken) (<-chan agentcore.ChatDelta, error)
+	chatFn   func(OAuthToken) (protocol.ChatResponse, error)
+	streamCh chan protocol.ChatDelta
+	streamFn func(OAuthToken) (<-chan protocol.ChatDelta, error)
 }
 
-func (f *fakeInner) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+func (f *fakeInner) applyOAuthToken(tok OAuthToken) protocol.LLMProvider {
 	f.applied = tok
 	return f
 }
 func (f *fakeInner) Name() string        { return "fake" }
 func (f *fakeInner) SupportsTools() bool { return true }
-func (f *fakeInner) Chat(context.Context, agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (f *fakeInner) Chat(context.Context, protocol.ChatRequest) (protocol.ChatResponse, error) {
 	if f.chatFn != nil {
 		return f.chatFn(f.applied)
 	}
-	return agentcore.ChatResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "ok"}}, f.chatErr
+	return protocol.ChatResponse{Message: protocol.Message{Role: protocol.RoleAssistant, Content: "ok"}}, f.chatErr
 }
-func (f *fakeInner) Stream(context.Context, agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (f *fakeInner) Stream(context.Context, protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	if f.streamFn != nil {
 		return f.streamFn(f.applied)
 	}
@@ -79,7 +79,7 @@ func TestPooledProvider_AcquireApplyReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"}); err != nil {
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "m"}); err != nil {
 		t.Fatal(err)
 	}
 	if inner.applied.AccessToken != "tok-1" {
@@ -98,8 +98,8 @@ func TestPooledProvider_AcquireFailureIsProviderError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
-	var pe *agentcore.ProviderError
+	_, err = p.Chat(context.Background(), protocol.ChatRequest{Model: "m"})
+	var pe *protocol.ProviderError
 	if !errors.As(err, &pe) || pe.Provider != VendorOpenAICodex {
 		t.Fatalf("err = %v, want ProviderError for %q", err, VendorOpenAICodex)
 	}
@@ -112,19 +112,19 @@ func TestPooledProvider_ReportsErrorAndRotates(t *testing.T) {
 		{AccountID: "a1", AccessToken: "tok-1"},
 		{AccountID: "a2", AccessToken: "tok-2"},
 	}}
-	inner := &fakeInner{chatErr: agentcore.NewProviderError("fake", nil, "boom")}
+	inner := &fakeInner{chatErr: protocol.NewProviderError("fake", nil, "boom")}
 	p, err := newPooledProvider(VendorClaudeCode, inner, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"}); err == nil {
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "m"}); err == nil {
 		t.Fatal("want error")
 	}
 	if len(src.reports) != 1 || src.reports[0].err == nil || src.reports[0].tok.AccountID != "a1" {
 		t.Fatalf("reports = %+v, want one error report for a1", src.reports)
 	}
 	inner.chatErr = nil
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"}); err != nil {
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "m"}); err != nil {
 		t.Fatal(err)
 	}
 	if inner.applied.AccessToken != "tok-2" {
@@ -138,18 +138,18 @@ func TestPooledProvider_AuthFailureRetriesDistinctCredential(t *testing.T) {
 		{AccountID: "a2", AccessToken: "tok-2"},
 	}}
 	var wireCalls []string
-	inner := &fakeInner{chatFn: func(tok OAuthToken) (agentcore.ChatResponse, error) {
+	inner := &fakeInner{chatFn: func(tok OAuthToken) (protocol.ChatResponse, error) {
 		wireCalls = append(wireCalls, tok.AccountID)
 		if tok.AccountID == "a1" {
-			return agentcore.ChatResponse{}, &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
+			return protocol.ChatResponse{}, &protocol.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
 		}
-		return agentcore.ChatResponse{Message: agentcore.Message{Role: agentcore.RoleAssistant, Content: "recovered"}}, nil
+		return protocol.ChatResponse{Message: protocol.Message{Role: protocol.RoleAssistant, Content: "recovered"}}, nil
 	}}
 	p, err := newPooledProvider(VendorClaudeCode, inner, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
+	resp, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil || resp.Message.Content != "recovered" {
 		t.Fatalf("Chat = (%q, %v), want recovered", resp.Message.Content, err)
 	}
@@ -164,16 +164,16 @@ func TestPooledProvider_AuthFailureRetriesDistinctCredential(t *testing.T) {
 func TestPooledProvider_AuthRetryStopsOnCredentialCycle(t *testing.T) {
 	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "same-token"}}}
 	wireCalls := 0
-	inner := &fakeInner{chatFn: func(OAuthToken) (agentcore.ChatResponse, error) {
+	inner := &fakeInner{chatFn: func(OAuthToken) (protocol.ChatResponse, error) {
 		wireCalls++
-		return agentcore.ChatResponse{}, &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
+		return protocol.ChatResponse{}, &protocol.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}
 	}}
 	p, err := newPooledProvider(VendorClaudeCode, inner, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
-	var providerErr *agentcore.ProviderError
+	_, err = p.Chat(context.Background(), protocol.ChatRequest{Model: "m"})
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Status != http.StatusUnauthorized {
 		t.Fatalf("error = %v, want original 401", err)
 	}
@@ -188,14 +188,14 @@ func TestPooledProvider_StreamAuthFailureBeforeOutputRotates(t *testing.T) {
 		{AccountID: "a2", AccessToken: "tok-2"},
 	}}
 	var wireCalls []string
-	inner := &fakeInner{streamFn: func(tok OAuthToken) (<-chan agentcore.ChatDelta, error) {
+	inner := &fakeInner{streamFn: func(tok OAuthToken) (<-chan protocol.ChatDelta, error) {
 		wireCalls = append(wireCalls, tok.AccountID)
-		ch := make(chan agentcore.ChatDelta, 2)
+		ch := make(chan protocol.ChatDelta, 2)
 		if tok.AccountID == "a1" {
-			ch <- agentcore.ChatDelta{Done: true, Err: &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
+			ch <- protocol.ChatDelta{Done: true, Err: &protocol.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
 		} else {
-			ch <- agentcore.ChatDelta{ContentDelta: "recovered"}
-			ch <- agentcore.ChatDelta{Done: true, StopReason: "stop"}
+			ch <- protocol.ChatDelta{ContentDelta: "recovered"}
+			ch <- protocol.ChatDelta{Done: true, StopReason: "stop"}
 		}
 		close(ch)
 		return ch, nil
@@ -204,7 +204,7 @@ func TestPooledProvider_StreamAuthFailureBeforeOutputRotates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestClaudeCode_InBandAuthenticationErrorRotatesCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -270,15 +270,15 @@ func TestClaudeCode_InBandAuthenticationErrorRotatesCredential(t *testing.T) {
 
 func TestPooledProvider_StreamCancellationIsVisible(t *testing.T) {
 	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "tok-1"}}}
-	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan agentcore.ChatDelta, error) {
-		return make(chan agentcore.ChatDelta), nil
+	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan protocol.ChatDelta, error) {
+		return make(chan protocol.ChatDelta), nil
 	}}
 	p, err := newPooledProvider(VendorClaudeCode, inner, src)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := p.Stream(ctx, agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(ctx, protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,11 +300,11 @@ func TestPooledProvider_StreamAuthFailureAfterOutputDoesNotReplay(t *testing.T) 
 		{AccountID: "a2", AccessToken: "tok-2"},
 	}}
 	wireCalls := 0
-	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan agentcore.ChatDelta, error) {
+	inner := &fakeInner{streamFn: func(OAuthToken) (<-chan protocol.ChatDelta, error) {
 		wireCalls++
-		ch := make(chan agentcore.ChatDelta, 2)
-		ch <- agentcore.ChatDelta{ContentDelta: "partial"}
-		ch <- agentcore.ChatDelta{Done: true, Err: &agentcore.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
+		ch := make(chan protocol.ChatDelta, 2)
+		ch <- protocol.ChatDelta{ContentDelta: "partial"}
+		ch <- protocol.ChatDelta{Done: true, Err: &protocol.ProviderError{Provider: "fake", Status: http.StatusUnauthorized, Message: "expired"}}
 		close(ch)
 		return ch, nil
 	}}
@@ -312,7 +312,7 @@ func TestPooledProvider_StreamAuthFailureAfterOutputDoesNotReplay(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,15 +331,15 @@ func TestPooledProvider_StreamAuthFailureAfterOutputDoesNotReplay(t *testing.T) 
 
 func TestPooledProvider_Concurrency403DoesNotBurnCredential(t *testing.T) {
 	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "tok-1"}}}
-	inner := &fakeInner{chatErr: &agentcore.ProviderError{
+	inner := &fakeInner{chatErr: &protocol.ProviderError{
 		Provider: "fake", Status: http.StatusForbidden, Message: "concurrent request limit reached",
 	}}
 	p, err := newPooledProvider(VendorClaudeCode, inner, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"})
-	if err == nil || !agentcore.IsRetryable(err) {
+	_, err = p.Chat(context.Background(), protocol.ChatRequest{Model: "m"})
+	if err == nil || !protocol.IsRetryable(err) {
 		t.Fatalf("concurrency cap = %v, want retryable", err)
 	}
 	if len(src.reports) != 0 || src.acquireN != 1 {
@@ -351,15 +351,15 @@ func TestPooledProvider_Concurrency403DoesNotBurnCredential(t *testing.T) {
 // serving account — a 429 arriving after headers still has to rotate it.
 func TestPooledProvider_StreamReportsFirstErrorDelta(t *testing.T) {
 	src := &fakeTokenSource{tokens: []OAuthToken{{AccountID: "a1", AccessToken: "tok-1"}}}
-	ch := make(chan agentcore.ChatDelta, 2)
-	ch <- agentcore.ChatDelta{ContentDelta: "hi"}
-	ch <- agentcore.ChatDelta{Done: true, Err: errors.New("rate limited")}
+	ch := make(chan protocol.ChatDelta, 2)
+	ch <- protocol.ChatDelta{ContentDelta: "hi"}
+	ch <- protocol.ChatDelta{Done: true, Err: errors.New("rate limited")}
 	close(ch)
 	p, err := newPooledProvider(VendorClaudeCode, &fakeInner{streamCh: ch}, src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	got, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +384,7 @@ func TestPooledProvider_StreamReportsFirstErrorDelta(t *testing.T) {
 	}
 }
 
-// The pooled wrapper must not implement agentcore.KeyUpdater: the loop's
+// The pooled wrapper must not implement protocol.KeyUpdater: the loop's
 // per-turn key refresh would overwrite the live OAuth token with the provider
 // row's sentinel key.
 func TestPooledProvider_IsNotAKeyUpdater(t *testing.T) {
@@ -392,7 +392,7 @@ func TestPooledProvider_IsNotAKeyUpdater(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := any(p).(agentcore.KeyUpdater); ok {
+	if _, ok := any(p).(protocol.KeyUpdater); ok {
 		t.Fatal("pooledProvider must not implement KeyUpdater")
 	}
 }
@@ -434,11 +434,11 @@ func TestClaudeCode_HeadersAndSystemBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "claude-sonnet-4-6",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "Be terse."},
-			{Role: agentcore.RoleUser, Content: "hi"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "Be terse."},
+			{Role: protocol.RoleUser, Content: "hi"},
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -512,19 +512,19 @@ func TestCodex_StreamDecodesTextToolCallAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{
 		Model: "gpt-5.6",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "Be terse."},
-			{Role: agentcore.RoleUser, Content: "hi"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "Be terse."},
+			{Role: protocol.RoleUser, Content: "hi"},
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var text string
-	var toolCall *agentcore.ToolCall
-	var done agentcore.ChatDelta
+	var toolCall *protocol.ToolCall
+	var done protocol.ChatDelta
 	for d := range ch {
 		if d.Err != nil {
 			t.Fatalf("stream error: %v", d.Err)
@@ -603,20 +603,20 @@ func TestAntigravity_EnvelopeAndStreamDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{
 		Model: "claude-sonnet-4-6",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "Be terse."},
-			{Role: agentcore.RoleUser, Content: "hi"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "Be terse."},
+			{Role: protocol.RoleUser, Content: "hi"},
 		},
-		Tools: []agentcore.ToolSchema{{Name: "read_file", Description: "read", Parameters: map[string]any{"type": "object"}}},
+		Tools: []protocol.ToolSchema{{Name: "read_file", Description: "read", Parameters: map[string]any{"type": "object"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var text string
-	var toolCall *agentcore.ToolCall
-	var done agentcore.ChatDelta
+	var toolCall *protocol.ToolCall
+	var done protocol.ChatDelta
 	for d := range ch {
 		if d.Err != nil {
 			t.Fatalf("stream error: %v", d.Err)
@@ -696,7 +696,7 @@ func TestAntigravity_StreamErrorMapsStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "gemini-3-pro"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "gemini-3-pro"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestAntigravity_StreamErrorMapsStatus(t *testing.T) {
 			sawErr = d.Err
 		}
 	}
-	var pe *agentcore.ProviderError
+	var pe *protocol.ProviderError
 	if !errors.As(sawErr, &pe) || pe.Status != 429 {
 		t.Fatalf("err = %v, want ProviderError status 429", sawErr)
 	}
@@ -744,9 +744,9 @@ func TestAntigravity_FailsOverOn5xx(t *testing.T) {
 		}
 		return http.DefaultTransport.RoundTrip(r)
 	})}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{
 		Model:    "gemini-3-pro",
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatal(err)

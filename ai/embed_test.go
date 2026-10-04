@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestNewOpenAIEmbedder_FillsDefaults(t *testing.T) {
@@ -96,7 +96,7 @@ func TestEmbed_TruncatedBodyIsRetryable(t *testing.T) {
 	if err == nil {
 		t.Fatal("severed embeddings body decoded as success")
 	}
-	if !agentcore.IsRetryable(err) {
+	if !protocol.IsRetryable(err) {
 		t.Fatalf("truncated embeddings error is not retryable: %v", err)
 	}
 	if !strings.Contains(err.Error(), "truncated embeddings body") {

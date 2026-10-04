@@ -12,7 +12,6 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
@@ -21,6 +20,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
 	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 )
 
 // defaultRunMaxTokens caps a run's per-turn model output when the caller doesn't
@@ -35,9 +35,8 @@ const defaultRunMaxTokens = 16000
 // optionally fires the reflect pass (§14.9). Both the chat handler and the NATS
 // scheduler go through this one path.
 type Runner struct {
-	// Pi selects the Pi-contract runtime, including the in-process Go port. Nil
-	// retains the legacy Go driver for explicitly selected compatibility runs.
-	Pi    *PiRuntimeConfig
+	// Pi configures the native engine. The zero value uses native AI transports.
+	Pi    PiRuntimeConfig
 	Store *storage.Store
 	// Sandbox, when non-nil, is threaded into every BuildParams so agents get
 	// selectable risky tools + injection guard running inside an isolated container.
@@ -92,7 +91,7 @@ type Runner struct {
 	// run (and the cheap classifier). It captures the request messages, response,
 	// tokens, and computed cost per call. nil (the default) still prices each call
 	// — only the trace emission is skipped.
-	Tracer observe.Sink
+	Tracer llm.Sink
 	// SessionStore, when non-nil, makes every run durable: the loop appends an
 	// append-only entry log (keyed by run id) so a crashed or compacted run can be
 	// reduced. nil (the default) keeps runs in-memory only.
@@ -246,7 +245,7 @@ func WithHTTPTool(tool agentcore.Tool) RunnerOption {
 // WithTraceSink wires a per-LLM-call trace sink into every run this Runner
 // drives. A nil sink is a no-op, preserving the default where calls are priced
 // but not traced.
-func WithTraceSink(sink observe.Sink) RunnerOption {
+func WithTraceSink(sink llm.Sink) RunnerOption {
 	return func(r *Runner) {
 		if sink != nil {
 			r.Tracer = sink
@@ -809,7 +808,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// TracingProvider's records (file + DB sinks) attribute back to this run —
 	// and through agent_runs.agent_id, to this agent. agentcore treats the id as
 	// opaque; the run→agent mapping stays here in the consumer.
-	ctx = observe.WithTraceID(ctx, runID)
+	ctx = llm.WithTraceID(ctx, runID)
 
 	// The durable log this run appends to: continues the prior run when
 	// resuming, otherwise keys off this run's own id.
@@ -966,14 +965,6 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		// model instead of a re-run of the tool. Fenced to the durable session, so
 		// the locator stays valid across a resume and invalid everywhere else.
 		Spill: r.SpillStore,
-		// The "model-visible means logged" detector. Advisory: it reports and never
-		// alters the run, which is exactly why it is safe to leave on — a resumed
-		// run replaying a different conversation than the one that ran is a silent
-		// failure otherwise, surfacing weeks later as a model that forgot a
-		// correction it was given.
-		ReportLogInvariant: func(v observe.LogInvariantViolation) {
-			log.Printf("agentray: run %s log invariant: %v", runID, v)
-		},
 	}
 	// Run on the cancellable context; trace and terminal persistence below use
 	// ctx so a user stop still settles the run row.
@@ -1099,26 +1090,6 @@ func (r *Runner) keyRefresher(projectID string) func(context.Context, string) (s
 		}
 		return TierSetFromWorkspace(wsTiers, keys, r.PoolFor).KeyFor(provider)
 	}
-}
-
-// CheapProvider resolves the provider+model for the orchestrator's front-desk
-// "triage" task — cheap, no-analytics intent classification and small-talk. It
-// reads the workspace model pool and the default agent's task→tier map (triage
-// runs at project/default-agent scope; the orchestrator classifier is shared, so
-// per-non-default-agent triage tiering is out of scope). An unconfigured tier
-// resolves back to flash, so the common single-key setup works with no extra
-// config. Returns an error when the agent is disabled or no key is configured, so
-// the caller degrades to a setup prompt rather than a dead end.
-func (r *Runner) CheapProvider(ctx context.Context, projectID string) (agentcore.LLMProvider, string, error) {
-	tier, err := r.cheapTier(ctx, projectID)
-	if err != nil {
-		return nil, "", err
-	}
-	prov, err := tier.TracedProvider(r.Tracer)
-	if err != nil {
-		return nil, "", err
-	}
-	return prov, tier.Model, nil
 }
 
 // cheapTier is shared by the legacy classifier and native conversation

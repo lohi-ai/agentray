@@ -2,35 +2,37 @@ package todo_test
 
 import (
 	"context"
+	"fmt"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/lohi-ai/agentray/ai"
 	"testing"
 )
 
 // TestPlanUpdatesDoNotStarveTurnBudget is the long-running fix proven in NEBULA:
 // a turn spent only on update_plan is bookkeeping, not productive work, so it
 // must not consume the MaxTurns budget. With MaxTurns=3 the model interleaves
-// three plan updates with three real tool calls (6 turns) and still reaches its
+// three plan updates with two real tool calls and a final answer (6 turns) and still reaches its
 // final answer — without the refund it would stop at "max_turns" mid-task.
 func TestPlanUpdatesDoNotStarveTurnBudget(t *testing.T) {
 	store := todo.NewStore()
 	work := &echoTool{name: "do_work"}
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantToolCall("p1", todo.ToolName, `{"items":[{"content":"a","status":"in_progress"}]}`),
-		agentcore.AssistantToolCall("w1", "do_work", `{"step":1}`),
-		agentcore.AssistantToolCall("p2", todo.ToolName, `{"items":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}`),
-		agentcore.AssistantToolCall("w2", "do_work", `{"step":2}`),
-		agentcore.AssistantToolCall("p3", todo.ToolName, `{"items":[{"content":"b","status":"completed"}]}`),
-		agentcore.AssistantText("all three steps complete"),
+	script := ai.ScriptedStream(
+		nativePlanCall("p1", todo.ToolName, `{"items":[{"content":"a","status":"in_progress"}]}`),
+		nativePlanCall("w1", "do_work", `{"step":1}`),
+		nativePlanCall("p2", todo.ToolName, `{"items":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}`),
+		nativePlanCall("w2", "do_work", `{"step":2}`),
+		nativePlanCall("p3", todo.ToolName, `{"items":[{"content":"b","status":"completed"}]}`),
+		nativePlanAnswer("all three steps complete"),
 	)
 	limits := agentcore.DefaultLimits()
 	limits.MaxTurns = 3
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    agentcore.NewToolSet(work, todo.NewTool(store)),
-		Policy:   agentcore.NewAllowList("do_work", todo.ToolName),
-		Limits:   &limits,
+		NativeProvider: nativePlanProvider(script),
+		Model:          "test",
+		Tools:          agentcore.NewToolSet(work, todo.NewTool(store)),
+		Policy:         agentcore.NewAllowList("do_work", todo.ToolName),
+		Limits:         &limits,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -53,20 +55,20 @@ func TestPlanUpdatesDoNotStarveTurnBudget(t *testing.T) {
 // run halts cleanly at max_tool_calls rather than spinning.
 func TestPlanOnlyLoopStillBounded(t *testing.T) {
 	store := todo.NewStore()
-	resp := make([]agentcore.ChatResponse, 0, 50)
+	resp := make([]ai.Message, 0, 50)
 	for i := 0; i < 50; i++ {
-		resp = append(resp, agentcore.AssistantToolCall("p", todo.ToolName, `{"items":[{"content":"x","status":"in_progress"}]}`))
+		resp = append(resp, nativePlanCall(fmt.Sprint("p", i), todo.ToolName, `{"items":[{"content":"x","status":"in_progress"}]}`))
 	}
-	faux := agentcore.NewFauxProvider(resp...)
+	script := ai.ScriptedStream(resp...)
 	limits := agentcore.DefaultLimits()
 	limits.MaxTurns = 5
 	limits.MaxToolCalls = 6
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    agentcore.NewToolSet(todo.NewTool(store)),
-		Policy:   agentcore.NewAllowList(todo.ToolName),
-		Limits:   &limits,
+		NativeProvider: nativePlanProvider(script),
+		Model:          "test",
+		Tools:          agentcore.NewToolSet(todo.NewTool(store)),
+		Policy:         agentcore.NewAllowList(todo.ToolName),
+		Limits:         &limits,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

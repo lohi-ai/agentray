@@ -44,16 +44,14 @@ func TestChatKeywordEntryPersists(t *testing.T) {
 
 	var got chatWork
 	svc := NewChatService(st)
-	svc.classify = func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-		return chatDecision{Route: routeData}, nil
-	}
+
 	svc.handle = func(_ context.Context, w chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 		got = w
 		return ChatResult{Final: "done"}, nil
 	}
 	_, err = svc.Chat(ctx, ChatOptions{
 		ProjectID: boot.Project.ID, Message: "ultrathink why did signups drop?",
-		SessionID: conv.ID, ConversationID: conv.ID,
+		SessionID: conv.ID, ConversationID: conv.ID, PiHistory: &PiConversationHistory{Messages: json.RawMessage(`[]`)}, InputID: "test-keyword-input",
 	}, nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)

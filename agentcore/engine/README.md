@@ -5,6 +5,19 @@ commit `eeac84ca92498ac18b6832754d01aef1d3c5f654`. The server uses it by default
 It directly consumes the native `ai` package and `telemetry`; it does not launch
 a subprocess or import application policy.
 
+## Upstream recheck
+
+On 2026-10-05, upstream `main` was
+`200387122ca450d6387f033949423114a270b96c`. Compared with the pinned reference,
+`packages/agent` and `packages/telemetry` changed only changelogs and package
+metadata (version 1.0.2); their source and tests are unchanged. The AI dependency
+delta was audited: thinking-level sampling defaults and
+summary-only reasoning selection are ported for the existing compatible
+adapters, with a new 14-case upstream oracle. The remaining provider delta is
+Bedrock thinking-block binding; Bedrock is outside the configured provider
+scope and has no Go adapter here. This check does not establish complete
+parity of the entire application with upstream `main`.
+
 ## Boundaries
 
 | Module | Responsibility |
@@ -57,9 +70,8 @@ and credential binding. Summaries use their own tier and no executable tools.
 - Gemini: native OpenAI-compatible API using the configured Google endpoint.
 
 Other existing Go adapters remain where callers still use them; expanding the
-Pi provider catalog is outside this completion scope. The server defaults
-`AGENTRAY_AGENT_NATIVE_GO=true`. Explicit `false` retains the legacy Go driver
-for existing legacy sessions. Native history is revision-checked; legacy
+Pi provider catalog is outside this completion scope. The server always uses the native engine; the runtime-selection environment
+flag and legacy execution branch have been removed. Native history is revision-checked; legacy
 history requires an explicit migration or a fresh conversation.
 
 ## Verification and provenance

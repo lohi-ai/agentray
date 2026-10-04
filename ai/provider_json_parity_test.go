@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Exercise the exported Go providers over HTTP, so a passing parser test alone
@@ -25,12 +25,12 @@ func TestPiProviderToolArguments(t *testing.T) {
 	}
 	providers := []struct {
 		api string
-		new func(string) agentcore.LLMProvider
+		new func(string) protocol.LLMProvider
 	}{
-		{"openai", func(base string) agentcore.LLMProvider { return NewOpenAIProvider("test", base, DefaultCompat()) }},
-		{"anthropic", func(base string) agentcore.LLMProvider { return NewAnthropicProvider("test", base) }},
-		{"responses", func(base string) agentcore.LLMProvider { return NewOpenAIResponsesProvider("test", base) }},
-		{"codex", func(base string) agentcore.LLMProvider { p := NewCodexProvider(); p.BaseURL = base; return p }},
+		{"openai", func(base string) protocol.LLMProvider { return NewOpenAIProvider("test", base, DefaultCompat()) }},
+		{"anthropic", func(base string) protocol.LLMProvider { return NewAnthropicProvider("test", base) }},
+		{"responses", func(base string) protocol.LLMProvider { return NewOpenAIResponsesProvider("test", base) }},
+		{"codex", func(base string) protocol.LLMProvider { p := NewCodexProvider(); p.BaseURL = base; return p }},
 	}
 	for _, provider := range providers {
 		for _, test := range cases {
@@ -70,8 +70,8 @@ func TestPiProviderToolArguments(t *testing.T) {
 					client := provider.new(server.URL)
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					defer cancel()
-					req := agentcore.ChatRequest{Model: "test-model", MaxTokens: 128, Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "look up"}}}
-					var calls []agentcore.ToolCall
+					req := protocol.ChatRequest{Model: "test-model", MaxTokens: 128, Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "look up"}}}
+					var calls []protocol.ToolCall
 					if method == "chat" {
 						response, err := client.Chat(ctx, req)
 						if err != nil {
@@ -108,7 +108,7 @@ func TestPiProviderNonstreamToolArguments(t *testing.T) {
 		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call","function":{"name":"lookup","arguments":"{\"city\":\"Hue"}}]},"finish_reason":"tool_calls"}]}`)
 	}))
 	defer server.Close()
-	response, err := NewOpenAIProvider("test", server.URL, DefaultCompat()).Chat(context.Background(), agentcore.ChatRequest{Model: "test"})
+	response, err := NewOpenAIProvider("test", server.URL, DefaultCompat()).Chat(context.Background(), protocol.ChatRequest{Model: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

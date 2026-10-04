@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // New builds a provider from a Spec. Wire routing goes through NewClient, so a
@@ -28,7 +28,7 @@ func New(spec Spec) (Provider, error) {
 	}
 
 	var (
-		inner agentcore.LLMProvider
+		inner protocol.LLMProvider
 		err   error
 	)
 	switch vendor {
@@ -73,7 +73,7 @@ func New(spec Spec) (Provider, error) {
 	if spec.HTTP != nil {
 		injectHTTP(inner, spec.HTTP)
 	}
-	var modelResponses agentcore.LLMProvider
+	var modelResponses protocol.LLMProvider
 	if vendor == "openai" {
 		// Keep an identity-preserving Responses peer ready for models whose live
 		// metadata explicitly selects that API. Listing and chatting stay on the
@@ -106,10 +106,10 @@ func New(spec Spec) (Provider, error) {
 		w.tokenSource = spec.TokenSource
 		w.listModels = oauthModelLister(vendor, pooled.inner, spec.HTTP, w.baseURL)
 	}
-	if _, ok := inner.(agentcore.KeyUpdater); ok {
+	if _, ok := inner.(protocol.KeyUpdater); ok {
 		return &wiredKeyProvider{wired: w}, nil
 	}
-	if _, ok := modelResponses.(agentcore.KeyUpdater); ok {
+	if _, ok := modelResponses.(protocol.KeyUpdater); ok {
 		return &wiredKeyProvider{wired: w}, nil
 	}
 	return w, nil
@@ -119,7 +119,7 @@ func New(spec Spec) (Provider, error) {
 // provider: it takes an acquired account token and returns the vendor's live
 // catalog. A nil result means the vendor has no lister (shouldn't happen —
 // every OAuth vendor ships one).
-func oauthModelLister(vendor string, inner agentcore.LLMProvider, http HTTPDoer, baseURL string) func(context.Context, OAuthToken) ([]Model, error) {
+func oauthModelLister(vendor string, inner protocol.LLMProvider, http HTTPDoer, baseURL string) func(context.Context, OAuthToken) ([]Model, error) {
 	switch vendor {
 	case VendorClaudeCode:
 		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
@@ -143,7 +143,7 @@ func oauthModelLister(vendor string, inner agentcore.LLMProvider, http HTTPDoer,
 // server, a proxy, or a custom timeout applies to the run as well as to
 // list-models. Only *http.Client can be installed: the providers hold a
 // concrete client, not an interface.
-func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
+func injectHTTP(inner protocol.LLMProvider, client HTTPDoer) {
 	std, ok := client.(*http.Client)
 	if !ok {
 		return
@@ -170,11 +170,11 @@ func injectHTTP(inner agentcore.LLMProvider, client HTTPDoer) {
 type wired struct {
 	id, vendor, name, baseURL, apiKey string
 	keyMu                             sync.RWMutex
-	inner                             agentcore.LLMProvider
+	inner                             protocol.LLMProvider
 	// modelResponses is the optional Responses peer for an ordinary OpenAI
 	// provider row. It keeps the same identity and is selected only by explicit
 	// per-model metadata learned from ListModels.
-	modelResponses agentcore.LLMProvider
+	modelResponses protocol.LLMProvider
 	http           HTTPDoer
 	// tokenSource and listModels are set only for OAuth vendors: the pool the
 	// list-models call draws its credential from, and the vendor's lister.
@@ -184,7 +184,7 @@ type wired struct {
 	// discovered keeps explicit live model facts by id. It is an optimization
 	// and refinement only: a fresh process still has adapter defaults, and a
 	// failed list call never erases the last successful knowledge.
-	discovered map[string]agentcore.ModelCapabilities
+	discovered map[string]protocol.ModelCapabilities
 }
 
 func (w *wired) ID() string          { return w.id }
@@ -199,30 +199,30 @@ func (w *wired) APIKey() string {
 func (w *wired) Name() string        { return w.inner.Name() }
 func (w *wired) SupportsTools() bool { return w.inner.SupportsTools() }
 
-func (w *wired) ModelCapabilities(model string) agentcore.ModelCapabilities {
-	caps := agentcore.CapabilitiesOf(w.inner, model)
+func (w *wired) ModelCapabilities(model string) protocol.ModelCapabilities {
+	caps := protocol.CapabilitiesOf(w.inner, model)
 	w.modelsMu.RLock()
 	live := w.discovered[model]
 	w.modelsMu.RUnlock()
 	return caps.Overlay(live)
 }
 
-func (w *wired) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (w *wired) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	return w.providerForModel(req.Model).Chat(ctx, req)
 }
 
-func (w *wired) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (w *wired) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	return w.providerForModel(req.Model).Stream(ctx, req)
 }
 
-func (w *wired) providerForModel(model string) agentcore.LLMProvider {
+func (w *wired) providerForModel(model string) protocol.LLMProvider {
 	if w.modelResponses == nil {
 		return w.inner
 	}
 	w.modelsMu.RLock()
 	caps := w.discovered[model]
 	w.modelsMu.RUnlock()
-	if caps.StatefulResponses == agentcore.CapabilitySupported {
+	if caps.StatefulResponses == protocol.CapabilitySupported {
 		return w.modelResponses
 	}
 	return w.inner
@@ -240,10 +240,10 @@ func (w *wiredKeyProvider) UpdateAPIKey(key string) {
 	w.keyMu.Lock()
 	w.apiKey = key
 	w.keyMu.Unlock()
-	if u, ok := w.inner.(agentcore.KeyUpdater); ok {
+	if u, ok := w.inner.(protocol.KeyUpdater); ok {
 		u.UpdateAPIKey(key)
 	}
-	if u, ok := w.modelResponses.(agentcore.KeyUpdater); ok {
+	if u, ok := w.modelResponses.(protocol.KeyUpdater); ok {
 		u.UpdateAPIKey(key)
 	}
 }
@@ -256,7 +256,7 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 		// rotates out.
 		tok, err := w.tokenSource.Acquire(ctx)
 		if err != nil {
-			return nil, agentcore.NewProviderError(w.vendor, nil, err.Error())
+			return nil, protocol.NewProviderError(w.vendor, nil, err.Error())
 		}
 		listed, err = w.listModels(ctx, tok)
 		w.tokenSource.Report(ctx, tok, err)
@@ -274,7 +274,7 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 		}
 	}
 	out := make([]Model, 0, len(listed))
-	discovered := make(map[string]agentcore.ModelCapabilities, len(listed))
+	discovered := make(map[string]protocol.ModelCapabilities, len(listed))
 	for _, m := range listed {
 		// The vendor's own figure wins; the table only fills a gap. A vendor that
 		// starts reporting the window therefore takes over automatically, and a
@@ -283,7 +283,7 @@ func (w *wired) ListModels(ctx context.Context) ([]Model, error) {
 		if window <= 0 {
 			window = ContextWindowFor(w.vendor, m.ID)
 		}
-		caps := agentcore.CapabilitiesOf(w.inner, m.ID).Overlay(m.Capabilities)
+		caps := protocol.CapabilitiesOf(w.inner, m.ID).Overlay(m.Capabilities)
 		discovered[m.ID] = m.Capabilities
 		out = append(out, Model{
 			ProviderID:     w.id,

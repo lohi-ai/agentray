@@ -45,8 +45,8 @@ func TestNativeAttemptTracePreservesAdmissionFailure(t *testing.T) {
 			}
 			return nil
 		},
-		observe: func(_ context.Context, _ int, a nativeRetryAttempt) error {
-			if a.number == 1 && a.failure != failure {
+		observe: func(_ context.Context, _ int, a ai.FallbackAttempt) error {
+			if a.Number == 1 && a.Failure != failure {
 				t.Error("trace replaced admission error")
 			}
 			return nil
@@ -55,7 +55,7 @@ func TestNativeAttemptTracePreservesAdmissionFailure(t *testing.T) {
 	if err != nil || calls != 2 || waits != 1 {
 		t.Fatal("admission retry changed", calls, waits, err)
 	}
-	session.native.flushTraces()
+	session.agent.flushTraces()
 	if len(traces) != 2 {
 		t.Fatal("admission attempt trace missing", len(traces))
 	}

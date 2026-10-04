@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const strictToolsStatePrefix = "strict-tools-adaptive\x00"
@@ -22,7 +22,7 @@ type strictToolsState struct {
 	closed   bool
 }
 
-func newStrictToolsState() agentcore.ProviderSessionState {
+func newStrictToolsState() protocol.ProviderSessionState {
 	return &strictToolsState{disabled: make(map[string]bool)}
 }
 
@@ -48,7 +48,7 @@ func (s *strictToolsState) disable(model string) {
 	s.mu.Unlock()
 }
 
-func prepareStrictTools(req agentcore.ChatRequest, providerName, baseURL string, dialect toolSchemaDialect) (*strictToolsState, agentcore.ChatRequest) {
+func prepareStrictTools(req protocol.ChatRequest, providerName, baseURL string, dialect toolSchemaDialect) (*strictToolsState, protocol.ChatRequest) {
 	if req.ProviderSession == nil {
 		return nil, req
 	}
@@ -60,13 +60,13 @@ func prepareStrictTools(req agentcore.ChatRequest, providerName, baseURL string,
 	return state, req
 }
 
-func withoutStrictTools(req agentcore.ChatRequest) agentcore.ChatRequest {
+func withoutStrictTools(req protocol.ChatRequest) protocol.ChatRequest {
 	changed := false
-	tools := make([]agentcore.ToolSchema, len(req.Tools))
+	tools := make([]protocol.ToolSchema, len(req.Tools))
 	copy(tools, req.Tools)
 	for i := range tools {
-		if tools[i].Strict != agentcore.ToolStrictDefault {
-			tools[i].Strict = agentcore.ToolStrictDefault
+		if tools[i].Strict != protocol.ToolStrictDefault {
+			tools[i].Strict = protocol.ToolStrictDefault
 			changed = true
 		}
 	}
@@ -76,7 +76,7 @@ func withoutStrictTools(req agentcore.ChatRequest) agentcore.ChatRequest {
 	return req
 }
 
-func toolStrictFieldEmitted(req agentcore.ChatRequest, dialect toolSchemaDialect) bool {
+func toolStrictFieldEmitted(req protocol.ChatRequest, dialect toolSchemaDialect) bool {
 	for _, tool := range req.Tools {
 		_, strict := projectedToolParameters(tool, dialect)
 		if strict != nil {
@@ -89,11 +89,11 @@ func toolStrictFieldEmitted(req agentcore.ChatRequest, dialect toolSchemaDialect
 // shouldRetryWithoutStrictTools recognizes only an HTTP schema/strictness
 // rejection. Authentication, rate limits, transport failures, and arbitrary
 // validation errors never trigger a weakened replay.
-func shouldRetryWithoutStrictTools(req agentcore.ChatRequest, dialect toolSchemaDialect, err error) bool {
+func shouldRetryWithoutStrictTools(req protocol.ChatRequest, dialect toolSchemaDialect, err error) bool {
 	if !toolStrictFieldEmitted(req, dialect) {
 		return false
 	}
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) || (providerErr.Status != http.StatusBadRequest && providerErr.Status != http.StatusUnprocessableEntity) {
 		return false
 	}
@@ -129,7 +129,7 @@ func rememberStrictToolsRejected(state *strictToolsState, model string) {
 // rejection reported inside an HTTP-200 SSE envelope can still be retried
 // because no output has crossed the provider boundary. Any content, tool call,
 // or ordinary error is put back in order and permanently commits the attempt.
-func preflightStrictStream(ctx context.Context, req agentcore.ChatRequest, dialect toolSchemaDialect, ch <-chan agentcore.ChatDelta) (<-chan agentcore.ChatDelta, error, bool) {
+func preflightStrictStream(ctx context.Context, req protocol.ChatRequest, dialect toolSchemaDialect, ch <-chan protocol.ChatDelta) (<-chan protocol.ChatDelta, error, bool) {
 	if !toolStrictFieldEmitted(req, dialect) {
 		return ch, nil, false
 	}
@@ -141,7 +141,7 @@ func preflightStrictStream(ctx context.Context, req agentcore.ChatRequest, diale
 		if first.Err != nil && shouldRetryWithoutStrictTools(req, dialect, first.Err) {
 			return nil, first.Err, true
 		}
-		out := make(chan agentcore.ChatDelta, 16)
+		out := make(chan protocol.ChatDelta, 16)
 		out <- first
 		go func() {
 			defer close(out)

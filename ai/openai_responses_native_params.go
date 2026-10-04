@@ -140,9 +140,13 @@ func BuildOpenAIResponsesParams(rawModel json.RawMessage, context TranscriptCont
 	if value, exists := options["toolChoice"]; exists {
 		params["tool_choice"] = value
 	}
+	reasoningEffort := options["reasoningEffort"]
+	if !samplingNonNull(reasoningEffort) && samplingTruthy(options["reasoningSummary"]) {
+		reasoningEffort = json.RawMessage(`"medium"`)
+	}
 	if model.Reasoning {
-		if samplingTruthy(options["reasoningEffort"]) || samplingTruthy(options["reasoningSummary"]) {
-			effort := json.RawMessage(`"medium"`)
+		if samplingTruthy(reasoningEffort) {
+			effort := reasoningEffort
 			if samplingTruthy(options["reasoningEffort"]) {
 				effort = options["reasoningEffort"]
 				if mapped := model.ThinkingLevelMap[samplingString(effort)]; samplingNonNull(mapped) {
@@ -166,11 +170,7 @@ func BuildOpenAIResponsesParams(rawModel json.RawMessage, context TranscriptCont
 			set("include", []string{"reasoning.encrypted_content"})
 		}
 	}
-	for key, value := range model.SamplingParams {
-		params[key] = value
-	}
-	sampling, _ := samplingObject(options["samplingParams"])
-	for key, value := range sampling {
+	for key, value := range resolveSamplingParams(model, samplingString(reasoningEffort), options["samplingParams"]) {
 		params[key] = value
 	}
 	return json.Marshal(params)

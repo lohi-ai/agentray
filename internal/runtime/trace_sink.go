@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 // storeTraceSink persists every per-LLM-call TraceRecord to agent_llm_calls,
 // keyed by the run id the TracingProvider stamped on the record (the trace id
-// the Runner set via observe.WithTraceID). It is the DB-backed half of the
+// the Runner set via llm.WithTraceID). It is the DB-backed half of the
 // trace fan-out — the queryable source for the monitoring console — and lives
 // here, in the consumer, because it is the one place that may import both
 // agentcore and storage (storage never imports agentcore).
@@ -54,7 +54,7 @@ type llmCallRecorder interface {
 }
 
 // NewStoreTraceSink returns a TraceSink that writes LLM-call traces to Postgres.
-func NewStoreTraceSink(store *storage.Store) observe.Sink {
+func NewStoreTraceSink(store *storage.Store) llm.Sink {
 	return &storeTraceSink{store: store, prev: newContextCache(maxTracedSessions)}
 }
 
@@ -85,7 +85,7 @@ type tracedContext struct {
 	sinceKey       int // calls since the last keyframe
 }
 
-func (s *storeTraceSink) Record(r observe.TraceRecord) {
+func (s *storeTraceSink) Record(r llm.TraceRecord) {
 	if r.TraceID == "" {
 		return // no run correlation → nothing to attach the trace to
 	}
@@ -153,7 +153,7 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 	})
 }
 
-// encode diffs this call's context against the previous call of the same
+// encodeTracedContext diffs this call's context against the previous call of the same
 // session, returning the base seq to chain onto (0 = keyframe), how many of the
 // base's messages are retained, and the messages that follow.
 //
@@ -163,11 +163,7 @@ func (s *storeTraceSink) Record(r observe.TraceRecord) {
 // message of the previous request is usually replaced rather than kept. A
 // prefix diff handles that in the same shape it handles compaction, which
 // replaces a long head with a short summary.
-func (s *storeTraceSink) encode(session string, msgs []agentcore.Message) (baseSeq, keepPrefix int, delta []agentcore.Message) {
-	prev, _ := s.prev.get(session)
-	return encodeTracedContext(prev, msgs)
-}
-
+//
 // Both projections must use the same cache snapshot: an overlapping timed-out
 // observer must not pair one call's sequence with another call's native prefix.
 func encodeTracedContext(prev tracedContext, msgs []agentcore.Message) (baseSeq, keepPrefix int, delta []agentcore.Message) {

@@ -6,7 +6,34 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
+
+// ObservePiMessages delivers a detached display projection to existing plugin
+// observers. Native request/history JSON remains authoritative and cannot be
+// rewritten by a legacy observer.
+func (h *PiToolHost) ObservePiMessages(ctx context.Context, phase ObservePhase, turn int, raw json.RawMessage) error {
+	h.gate.RLock()
+	defer h.gate.RUnlock()
+	if h.closed || !h.lifecycle.Load() {
+		return errors.New("Pi tool host is not running")
+	}
+	var messages []json.RawMessage
+	if err := json.Unmarshal(raw, &messages); err != nil {
+		return err
+	}
+	projected := make([]Message, 0, len(messages))
+	for _, message := range messages {
+		value, err := nativehost.ProjectMessage(message)
+		if err != nil {
+			return err
+		}
+		projected = append(projected, value)
+	}
+	h.exts.observe(piToolContext{Context: ctx, values: h.ctx}, phase, turn, projected)
+	return nil
+}
 
 // PiTurnPreparation contains host-authored additions for the next native turn.
 // Append Messages through Pi's prompt/prepareNextTurnWithContext lifecycle;
@@ -134,7 +161,7 @@ func (h *PiToolHost) PreparePiTurn(ctx context.Context, info StepInfo) (PiTurnPr
 	}
 	var reason string
 	switch {
-	case info.Turn > h.agent.limits.MaxTurns:
+	case info.Turn-info.BookkeepingTurns > h.agent.limits.MaxTurns:
 		reason = "max_turns"
 	case h.budget.exhausted():
 		reason = "max_tool_calls"
@@ -186,8 +213,8 @@ func (h *PiToolHost) FinishPiTurn(ctx context.Context, turn PiCompletedTurn) (Pi
 		cancel()
 	}
 	ctx = piToolContext{Context: ctx, values: h.ctx}
-	turn.Usage = addUsage(turn.Usage, h.agent.peekChildUsage())
-	if err := h.agent.hooks.runTurnHooks(ctx, h.agent.hooks.TurnEnd, "turn_end", TurnInfo{Turn: turn.Info.Turns, Model: turn.Model, Usage: turn.Usage, StopReason: turn.StopReason}); err != nil {
+
+	if err := h.agent.hooks.runTurnHooks(ctx, h.agent.hooks.TurnEnd, "turn_end", TurnInfo{Turn: turn.Info.Turns, Model: turn.Model, Usage: addUsage(turn.Usage, h.agent.peekChildUsage()), StopReason: turn.StopReason}); err != nil {
 		return PiTurnDecision{}, err
 	}
 	if turn.StopReason == "error" || turn.StopReason == "aborted" {
@@ -203,6 +230,14 @@ func (h *PiToolHost) FinishPiTurn(ctx context.Context, turn PiCompletedTurn) (Pi
 	batch, err := h.finishPiBatch(ctx, turn.Calls, turn.Outcomes)
 	if err != nil || batch.End {
 		return batch, err
+	}
+
+	reason, controlErr := h.controlRun(ctx, StepInfo{Turn: turn.Info.Turns + 1, Model: turn.Model, Usage: turn.Usage})
+	if controlErr != nil {
+		return PiTurnDecision{}, controlErr
+	}
+	if reason != "" {
+		return PiTurnDecision{End: true, StopDecision: StopDecision{StopReason: reason}}, nil
 	}
 	if len(turn.Calls) > 0 {
 		// Pi decides whether this batch schedules another request. A native
@@ -303,7 +338,7 @@ func (h *PiToolHost) CompletePiRun(ctx context.Context, result RunResult) RunRes
 func (h *PiToolHost) TransformPiContext(ctx context.Context, raw json.RawMessage) json.RawMessage {
 	h.gate.RLock()
 	defer h.gate.RUnlock()
-	if h.closed || len(h.agent.hooks.PiContext) == 0 {
+	if h.closed || (len(h.agent.hooks.PiContext) == 0 && len(h.exts.contexts) == 0) {
 		return raw
 	}
 	ctx, cancel := context.WithCancel(ctx)
@@ -317,7 +352,16 @@ func (h *PiToolHost) TransformPiContext(ctx context.Context, raw json.RawMessage
 	if err := json.Unmarshal(raw, &current); err != nil {
 		return raw
 	}
-	for i, hook := range h.agent.hooks.PiContext {
+	hooks := slices.Clone(h.agent.hooks.PiContext)
+	sources := make([]string, len(hooks))
+	for i := range hooks {
+		sources[i] = fmt.Sprintf("pi_context[%d]", i)
+	}
+	for _, extension := range h.exts.contexts {
+		hooks = append(hooks, extension.TransformNativeContext)
+		sources = append(sources, "extension_context["+extension.Name()+"]")
+	}
+	for i, hook := range hooks {
 		if ctx.Err() != nil {
 			return raw
 		}
@@ -342,7 +386,7 @@ func (h *PiToolHost) TransformPiContext(ctx context.Context, raw json.RawMessage
 		if err != nil {
 			// The native transform contract is non-throwing, including when an
 			// error reporter itself panics or legacy hooks request HookThrow.
-			_ = safe(func() { _ = h.agent.hooks.emitErr(fmt.Sprintf("pi_context[%d]", i), err) })
+			_ = safe(func() { _ = h.agent.hooks.emitErr(sources[i], err) })
 			continue
 		}
 		if next != nil {

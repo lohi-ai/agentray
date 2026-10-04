@@ -7,7 +7,6 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
@@ -16,7 +15,7 @@ import (
 
 // buildParityGolden is the composition Build produced BEFORE it was migrated off
 // agentcore.New onto plugin composition, captured from the running code for the
-// representative BuildParams below.
+// representative BuildParams below, excluding the retired driver seam.
 //
 // It is the whole safety net for that migration. Twenty-odd BuildParams fields
 // each route to a seam, and a mapping silently dropped in the rewrite — the
@@ -26,8 +25,7 @@ import (
 //
 // The extensions line is deliberately NOT part of the golden: the migration's
 // stated purpose was to add capabilities there. It is asserted separately below.
-const buildParityGolden = `driver:                react
-model:                 gpt-5
+const buildParityGolden = `model:                 gpt-5
 max_tokens:            4096
 reasoning_effort:      high
 output_schema:         -
@@ -55,8 +53,8 @@ compaction_model:      -
 steering:              set
 follow_up:             set
 prepare_next_turn:     set
-tools:                 activity_summary, recent_events, persons, explore_events, run_sql, activation_candidates, run_insight, run_funnel, run_retention, list_dashboards, create_dashboard, create_chart, submit_recommendation, propose_test, test_status, list_tests, remember, send_notification, overview, update_test, record_outcome, abandon_test, list_findings, dataset_preview, verify_sdk, update_dashboard, archive_dashboard, unarchive_dashboard, list_charts, update_chart, archive_chart, unarchive_chart, reorder_charts, list_metrics, read_metric, get_board, save_board, set_metric_target, test_source, preview_source, list_sources, create_source, update_source, archive_source, unarchive_source, pause_source, run_source, source_status, cancel_source_run, run_findings_scan, watch_funnel, list_funnel_watches, add_annotation, list_triggers, list_annotations, delete_annotation, run_experiment_review, http_request, run_shell, update_plan
-hooks:                 before=2 after=1 context=1 turn_start=0 turn_end=0 message_end=0 provider=0 agent_end=0
+tools:                 activity_summary, recent_events, persons, explore_events, run_sql, activation_candidates, run_insight, run_funnel, run_retention, list_dashboards, create_dashboard, create_chart, submit_recommendation, propose_test, test_status, list_tests, remember, send_notification, overview, update_test, record_outcome, abandon_test, list_findings, dataset_preview, verify_sdk, update_dashboard, archive_dashboard, unarchive_dashboard, list_charts, update_chart, archive_chart, unarchive_chart, reorder_charts, list_metrics, read_metric, get_board, save_board, set_metric_target, test_source, preview_source, list_sources, create_source, update_source, archive_source, unarchive_source, pause_source, run_source, source_status, cancel_source_run, run_findings_scan, watch_funnel, list_funnel_watches, add_annotation, list_triggers, list_annotations, delete_annotation, run_experiment_review, http_request, run_shell
+hooks:                 before=2 after=1 context=0 turn_start=0 turn_end=0 message_end=0 agent_end=0
 hook_error_policy:
 `
 
@@ -87,7 +85,7 @@ func TestBuildInstallsTheShippedCapabilities(t *testing.T) {
 	exts := extensionsLineOf(agent.Describe())
 	for _, want := range []string{
 		// newly wired by preset.Full
-		"spill", "jobs", "repeat_guard", "session_query", "log_invariant",
+		"spill", "jobs", "repeat_guard", "session_query",
 		// pre-existing, must survive
 		"goal", "finish_guard", "subagent",
 	} {
@@ -117,7 +115,6 @@ func TestBuildWithoutOptionalCapabilities(t *testing.T) {
 	p.Tools = nil
 	p.Spill = nil
 	p.FinishGuard = nil
-	p.ReportLogInvariant = nil
 
 	agent, err := Build(p)
 	if err != nil {
@@ -200,8 +197,7 @@ func representativeBuildParams() BuildParams {
 		PrepareNextTurn: func(_ context.Context, s agentcore.TurnState) agentcore.TurnState {
 			return s
 		},
-		Spill:              spill.NewMemorySpillStore(),
-		ReportLogInvariant: func(observe.LogInvariantViolation) {},
+		Spill: spill.NewMemorySpillStore(),
 	}
 }
 

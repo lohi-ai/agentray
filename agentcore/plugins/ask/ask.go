@@ -162,3 +162,36 @@ func (Tool) SelfGated() bool { return true }
 // RetrySafe makes a dangling ask re-issue on resume: re-parking on the same
 // question is the correct recovery when the answer never arrived.
 func (Tool) RetrySafe() bool { return true }
+
+// Plugin offers questions on an interactive top-level run. Delegated children
+// report missing information to their parent, which owns the human channel.
+type Plugin struct{}
+
+func (Plugin) Name() string                           { return ToolName }
+func (p Plugin) Register(r *agentcore.Registry) error { r.AddExtension(p); return nil }
+func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
+	if info.Depth > 0 {
+		return nil, nil
+	}
+	return p, nil
+}
+func (Plugin) Tools() []agentcore.Tool { return []agentcore.Tool{Tool{}} }
+func (Plugin) SelfGated() bool         { return true }
+
+// QuestionText renders the bounded question for hosts with a plain-text human
+// channel. Structured clients may render the original payload directly.
+func QuestionText(raw json.RawMessage) string {
+	var question args
+	if json.Unmarshal(raw, &question) != nil {
+		return ""
+	}
+	clamp(&question)
+	out := question.Question
+	for _, option := range question.Options {
+		out += "\n- " + option.Label
+		if option.Description != "" {
+			out += ": " + option.Description
+		}
+	}
+	return out
+}

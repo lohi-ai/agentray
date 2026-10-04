@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestNativeFailureHTTPMetadataKeepsWireUnchanged(t *testing.T) {
@@ -69,23 +69,23 @@ func TestNativeFailureHTTPMetadataKeepsWireUnchanged(t *testing.T) {
 			if string(a) != string(b) {
 				t.Fatalf("failure observation changed wire: %s / %s", a, b)
 			}
-			var failure *agentcore.ProviderError
-			if !errors.As(capture.Failure(), &failure) || failure.Status != 503 || failure.RetryAfter != 7*time.Second || !agentcore.IsRetryable(failure) || capture.HostFailure() {
+			var failure *protocol.ProviderError
+			if !errors.As(capture.Failure(), &failure) || failure.Status != 503 || failure.RetryAfter != 7*time.Second || !protocol.IsRetryable(failure) || capture.HostFailure() {
 				t.Fatalf("metadata missing: %v", capture.Failure())
 			}
 			failure.Status = 401
-			if capture.Failure().(*agentcore.ProviderError).Status != 503 {
+			if capture.Failure().(*protocol.ProviderError).Status != 503 {
 				t.Fatal("returned metadata aliases capture")
 			}
 			options.OnPayload = func(context.Context, json.RawMessage, json.RawMessage) (json.RawMessage, error) {
-				return nil, &agentcore.ProviderError{Status: 503, Message: "callback failed"}
+				return nil, &protocol.ProviderError{Status: 503, Message: "callback failed"}
 			}
 			observed, capture = WithNativeProviderFailure(ctx)
 			stream = tc.start(observed, raw, TranscriptContext{}, options)
 			if err = stream.WaitForEnd(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if !capture.HostFailure() || agentcore.IsRetryable(capture.Failure()) {
+			if !capture.HostFailure() || protocol.IsRetryable(capture.Failure()) {
 				t.Fatal("callback error reclassified as provider failure")
 			}
 		})
@@ -104,12 +104,12 @@ func TestNativeFailureTypedProviderBoundaries(t *testing.T) {
 		{"anthropic-client", &AnthropicClientError{Status: 503, Headers: http.Header{"Retry-After": []string{"7"}}, Message: "busy"}, false, 503, true},
 		{"callback-codex", &codexHTTPError{Status: 503, Message: "callback"}, true, 0, false},
 		{"callback-anthropic", &AnthropicClientError{Status: 503, Message: "callback"}, true, 0, false},
-		{"foreign-provider-error", &agentcore.ProviderError{Status: 503, Message: "injected"}, false, 0, false},
+		{"foreign-provider-error", &protocol.ProviderError{Status: 503, Message: "injected"}, false, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, capture := WithNativeProviderFailure(context.Background())
 			recordNativeFailure(ctx, tc.name, tc.cause, tc.callback)
-			var typed *agentcore.ProviderError
+			var typed *protocol.ProviderError
 			if errors.As(capture.Failure(), &typed) != tc.typed {
 				t.Fatal("wrong failure provenance", capture.Failure())
 			}

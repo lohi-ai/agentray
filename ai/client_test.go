@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // TestNewClientResolvesVendors checks NewClient maps config→wire client with
@@ -72,7 +72,7 @@ func TestNewClientSelectsResponsesWireWithoutChangingOpenAIIdentity(t *testing.T
 	if responses.APIKey != "sk-test" || responses.BaseURL != "https://gateway.example/v1" {
 		t.Fatalf("responses provider = %+v", responses)
 	}
-	if got := responses.ModelCapabilities("gpt-test").StatefulResponses; got != agentcore.CapabilitySupported {
+	if got := responses.ModelCapabilities("gpt-test").StatefulResponses; got != protocol.CapabilitySupported {
 		t.Fatalf("stateful responses capability = %q, want supported", got)
 	}
 }

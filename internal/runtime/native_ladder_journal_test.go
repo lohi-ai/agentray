@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 func ladderJournalEntry(t *testing.T, selection nativeLadderSelection) agentcore.SessionEntry {
@@ -37,9 +38,8 @@ func TestNativeLadderJournalCrashRecovery(t *testing.T) {
 			}
 			defer session.Close()
 			if failApply {
-				session.agent.Call = func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-					return nil, errors.New("process stopped")
-				}
+				// End the native agent lifetime after startup, before state apply.
+				session.agent.cancel()
 			}
 			err = session.selectNativeRung(ctx, 0, 1)
 			if failApply {
@@ -140,7 +140,7 @@ func TestNativeLadderJournalRejectsCorruptionAtomically(t *testing.T) {
 		_ = json.Unmarshal([]byte(valid.Content), &fields)
 		delete(fields, field)
 		raw, _ := json.Marshal(fields)
-		if _, err := parseNativeLadderSelection(string(raw), nil); err == nil {
+		if _, err := ai.ParseFallbackSelection(string(raw), nil); err == nil {
 			t.Fatalf("missing %s accepted", field)
 		}
 	}

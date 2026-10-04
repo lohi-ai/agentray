@@ -9,25 +9,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestAnthropicEncodeReplaysOnlyValidSameScopeReasoning(t *testing.T) {
 	p := NewAnthropicProvider("key", "https://gateway.example")
 	model := "claude-sonnet-test"
 	scope := p.replayScope(model)
-	body := p.encode(agentcore.ChatRequest{
+	body := p.encode(protocol.ChatRequest{
 		Model: model,
-		Messages: []agentcore.Message{{
-			Role: agentcore.RoleAssistant,
-			ReasoningBlocks: []agentcore.ReasoningBlock{
-				{Type: agentcore.ReasoningBlockThinking, Text: "signed thought", Signature: "sig", ReplayScope: scope},
-				{Type: agentcore.ReasoningBlockThinking, Text: "unsigned", ReplayScope: scope},
-				{Type: agentcore.ReasoningBlockThinking, Text: "wrong endpoint", Signature: "sig-2", ReplayScope: "anthropic:foreign"},
-				{Type: agentcore.ReasoningBlockRedacted, Data: "encrypted", ReplayScope: scope},
+		Messages: []protocol.Message{{
+			Role: protocol.RoleAssistant,
+			ReasoningBlocks: []protocol.ReasoningBlock{
+				{Type: protocol.ReasoningBlockThinking, Text: "signed thought", Signature: "sig", ReplayScope: scope},
+				{Type: protocol.ReasoningBlockThinking, Text: "unsigned", ReplayScope: scope},
+				{Type: protocol.ReasoningBlockThinking, Text: "wrong endpoint", Signature: "sig-2", ReplayScope: "anthropic:foreign"},
+				{Type: protocol.ReasoningBlockRedacted, Data: "encrypted", ReplayScope: scope},
 			},
 			Content:   "answer",
-			ToolCalls: []agentcore.ToolCall{{ID: "call-1", Name: "lookup", Arguments: `{"q":"x"}`}},
+			ToolCalls: []protocol.ToolCall{{ID: "call-1", Name: "lookup", Arguments: `{"q":"x"}`}},
 		}},
 	})
 
@@ -70,16 +70,16 @@ func TestAnthropicChatCapturesSignedAndRedactedReasoning(t *testing.T) {
 
 	p := NewAnthropicProvider("key", srv.URL)
 	p.HTTP = srv.Client()
-	resp, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "claude-test"})
+	resp, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "claude-test"})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	if resp.Message.Content != "done" || len(resp.Message.ToolCalls) != 1 {
 		t.Fatalf("visible response changed: %+v", resp.Message)
 	}
-	want := []agentcore.ReasoningBlock{
-		{Type: agentcore.ReasoningBlockThinking, Text: "consider this", Signature: "signature-1", ReplayScope: p.replayScope("claude-test")},
-		{Type: agentcore.ReasoningBlockRedacted, Data: "encrypted-1", ReplayScope: p.replayScope("claude-test")},
+	want := []protocol.ReasoningBlock{
+		{Type: protocol.ReasoningBlockThinking, Text: "consider this", Signature: "signature-1", ReplayScope: p.replayScope("claude-test")},
+		{Type: protocol.ReasoningBlockRedacted, Data: "encrypted-1", ReplayScope: p.replayScope("claude-test")},
 	}
 	if !reasoningBlocksEqual(resp.Message.ReasoningBlocks, want) {
 		t.Fatalf("reasoning blocks = %+v, want %+v", resp.Message.ReasoningBlocks, want)
@@ -114,14 +114,14 @@ func TestAnthropicStreamCapturesCompleteReasoningBlocks(t *testing.T) {
 
 	p := NewAnthropicProvider("key", srv.URL)
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "claude-test"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "claude-test"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	var content string
-	var reasoning []agentcore.ReasoningBlock
-	var calls []agentcore.ToolCall
-	var terminal agentcore.ChatDelta
+	var reasoning []protocol.ReasoningBlock
+	var calls []protocol.ToolCall
+	var terminal protocol.ChatDelta
 	for delta := range ch {
 		content += delta.ContentDelta
 		if delta.ReasoningBlock != nil {
@@ -134,9 +134,9 @@ func TestAnthropicStreamCapturesCompleteReasoningBlocks(t *testing.T) {
 			terminal = delta
 		}
 	}
-	wantReasoning := []agentcore.ReasoningBlock{
-		{Type: agentcore.ReasoningBlockThinking, Text: "plan carefully", Signature: "sig-stream", ReplayScope: p.replayScope("claude-test")},
-		{Type: agentcore.ReasoningBlockRedacted, Data: "encrypted-stream", ReplayScope: p.replayScope("claude-test")},
+	wantReasoning := []protocol.ReasoningBlock{
+		{Type: protocol.ReasoningBlockThinking, Text: "plan carefully", Signature: "sig-stream", ReplayScope: p.replayScope("claude-test")},
+		{Type: protocol.ReasoningBlockRedacted, Data: "encrypted-stream", ReplayScope: p.replayScope("claude-test")},
 	}
 	if content != "answer" || !reasoningBlocksEqual(reasoning, wantReasoning) {
 		t.Fatalf("stream content=%q reasoning=%+v", content, reasoning)
@@ -152,10 +152,10 @@ func TestAnthropicStreamCapturesCompleteReasoningBlocks(t *testing.T) {
 func TestAnthropicReasoningBoundsDropWholeBlock(t *testing.T) {
 	p := NewAnthropicProvider("key", "https://gateway.example")
 	model := "claude-test"
-	body := p.encode(agentcore.ChatRequest{Model: model, Messages: []agentcore.Message{{
-		Role: agentcore.RoleAssistant,
-		ReasoningBlocks: []agentcore.ReasoningBlock{{
-			Type: agentcore.ReasoningBlockThinking, Text: strings.Repeat("x", maxAnthropicReasoningBlockBytes),
+	body := p.encode(protocol.ChatRequest{Model: model, Messages: []protocol.Message{{
+		Role: protocol.RoleAssistant,
+		ReasoningBlocks: []protocol.ReasoningBlock{{
+			Type: protocol.ReasoningBlockThinking, Text: strings.Repeat("x", maxAnthropicReasoningBlockBytes),
 			Signature: "too-large", ReplayScope: p.replayScope(model),
 		}},
 		Content: "safe answer",
@@ -165,7 +165,7 @@ func TestAnthropicReasoningBoundsDropWholeBlock(t *testing.T) {
 	}
 }
 
-func reasoningBlocksEqual(a, b []agentcore.ReasoningBlock) bool {
+func reasoningBlocksEqual(a, b []protocol.ReasoningBlock) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -183,7 +183,7 @@ func TestAnthropicReplayScopeDoesNotExposeEndpoint(t *testing.T) {
 	if strings.Contains(scope, p.BaseURL) || !strings.HasPrefix(scope, "anthropic:") {
 		t.Fatalf("unsafe replay scope %q", scope)
 	}
-	if _, err := json.Marshal(agentcore.ReasoningBlock{ReplayScope: scope}); err != nil {
+	if _, err := json.Marshal(protocol.ReasoningBlock{ReplayScope: scope}); err != nil {
 		t.Fatalf("scope is not persistable: %v", err)
 	}
 }

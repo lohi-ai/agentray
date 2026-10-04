@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/telemetry"
 )
@@ -330,13 +330,13 @@ func TestNativeTraceProviderStreamIdentityAndSnapshot(t *testing.T) {
 }
 
 func TestNativeSessionTraceUsesExistingSinkAndAttribution(t *testing.T) {
-	ctx := agentcore.WithDelegationDepth(agentcore.WithRunSession(observe.WithTraceID(context.Background(), "trace-run"), "parent/child"), 2)
-	var records []observe.TraceRecord
-	cfg := bindPiTrace(agentcore.PiConfig{
+	ctx := agentcore.WithDelegationDepth(agentcore.WithRunSession(llm.WithTraceID(context.Background(), "trace-run"), "parent/child"), 2)
+	var records []llm.TraceRecord
+	cfg := bindPiTrace(NativeAgentConfig{
 		Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			return json.RawMessage(nativeStreamReply), nil
 		},
-	}, observe.SinkFunc(func(record observe.TraceRecord) { records = append(records, record) }), true, "fallback")
+	}, llm.SinkFunc(func(record llm.TraceRecord) { records = append(records, record) }), true, "fallback")
 	session, err := NewPiSession(ctx, PiSessionConfig{Pi: cfg, Store: agentcore.NewMemorySessionStore(), SessionID: "parent/child"})
 	if err != nil {
 		t.Fatal(err)

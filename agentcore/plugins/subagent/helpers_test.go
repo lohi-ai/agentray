@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // echoTool is a trivial always-succeeding tool. These tests are about who runs,
@@ -34,19 +35,6 @@ func (t *echoTool) Run(_ context.Context, args string) (string, error) {
 }
 
 // AssistantToolCall builds a scripted assistant turn that issues one tool call.
-func AssistantToolCall(id, name, args string) agentcore.ChatResponse {
-	return agentcore.ChatResponse{Message: agentcore.Message{
-		Role:      agentcore.RoleAssistant,
-		ToolCalls: []agentcore.ToolCall{{ID: id, Name: name, Arguments: args}},
-	}}
-}
-
-// lastAssistantText returns the final assistant text in a reduced history.
-func lastAssistantText(msgs []agentcore.Message) string {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == agentcore.RoleAssistant && msgs[i].Content != "" {
-			return msgs[i].Content
-		}
-	}
-	return ""
+func AssistantToolCall(id, name, args string) ai.Message {
+	return nativeCall(id, name, args)
 }

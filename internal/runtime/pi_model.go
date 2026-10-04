@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -19,7 +18,7 @@ import (
 // A nil pricing table means unknown prices, not a free model.
 type PiModelOptions struct {
 	MaxTokens         int
-	Pricing           observe.Pricing
+	Pricing           ai.Pricing
 	ToolChoice        agentcore.ToolChoice
 	ParallelToolCalls *bool
 	OutputSchema      *agentcore.OutputSchema
@@ -34,10 +33,10 @@ type PiModelOptions struct {
 // Standalone bindings reject OAuth pools and fallback ladders. The native
 // runner selects its supported native pool binding alongside the pooled stream.
 // The returned bool says whether the native cost metadata is known.
-func (t ModelTier) BindPi(cfg agentcore.PiConfig, opts PiModelOptions) (agentcore.PiConfig, bool, error) {
+func (t ModelTier) BindPi(cfg NativeAgentConfig, opts PiModelOptions) (NativeAgentConfig, bool, error) {
 	return t.bindPi(cfg, opts, false)
 }
-func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeOAuthPool bool) (agentcore.PiConfig, bool, error) {
+func (t ModelTier) bindPi(cfg NativeAgentConfig, opts PiModelOptions, nativeOAuthPool bool) (NativeAgentConfig, bool, error) {
 	if strings.TrimSpace(t.Model) == "" {
 		return cfg, false, errors.New("Pi model ID is required")
 	}
@@ -85,7 +84,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeOAu
 	}
 	api, endpoint, providerName, compat := wire.api, wire.endpoint, wire.provider, wire.compat
 	if api == ai.VendorPiMessages {
-		if err := piMessagesValidateControls(opts); err != nil {
+		if err := ai.ValidatePiMessagesControls(ai.NativeGenerationControls{ToolChoice: opts.ToolChoice, ParallelToolCalls: opts.ParallelToolCalls, OutputSchema: opts.OutputSchema}); err != nil {
 			return cfg, false, err
 		}
 	}
@@ -201,7 +200,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeOAu
 					request.Payload = value
 				}
 			}
-			return piControlledPayload(api, request.Payload, opts)
+			return ai.ApplyNativeControls(api, request.Payload, ai.NativeGenerationControls{ToolChoice: opts.ToolChoice, ParallelToolCalls: opts.ParallelToolCalls, OutputSchema: opts.OutputSchema})
 		}
 		if method == "prepareRequest" {
 			var request struct{ Model json.RawMessage }

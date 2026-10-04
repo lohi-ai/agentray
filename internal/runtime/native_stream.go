@@ -8,7 +8,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/telemetry"
@@ -18,11 +17,11 @@ import (
 // the Go engine directly. It preserves progressive events and the independent
 // callback result, without a worker process or a legacy Message projection.
 // The supplied telemetry context is the explicit parent for every request.
-func NativeCallbackStream(callback agentcore.PiCallback, parent telemetry.Context) engine.StreamFn {
+func NativeCallbackStream(callback NativeCallback, parent telemetry.Context) engine.StreamFn {
 	return nativeCallbackStream(callback, func() telemetry.Context { return parent })
 }
 
-func nativeCallbackStream(callback agentcore.PiCallback, parent func() telemetry.Context) engine.StreamFn {
+func nativeCallbackStream(callback NativeCallback, parent func() telemetry.Context) engine.StreamFn {
 	var nextRequestID atomic.Uint64
 	return nativeObservedCallbackStream(callback, func(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, run func(*telemetry.Span) (*ai.Message, error)) (*ai.Message, error) {
 		var identity struct {
@@ -37,7 +36,7 @@ func nativeCallbackStream(callback agentcore.PiCallback, parent func() telemetry
 
 type nativeRequestObserver func(context.Context, json.RawMessage, ai.TranscriptContext, func(*telemetry.Span) (*ai.Message, error)) (*ai.Message, error)
 
-func nativeObservedCallbackStream(callback agentcore.PiCallback, observe nativeRequestObserver) engine.StreamFn {
+func nativeObservedCallbackStream(callback NativeCallback, observe nativeRequestObserver) engine.StreamFn {
 	return func(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
 		wireOptions := make(map[string]any, len(options))
 		for key, value := range options {
@@ -173,7 +172,7 @@ func nativeObservedCallbackStream(callback agentcore.PiCallback, observe nativeR
 // Cancellation ends the logical callback wait without claiming a host effect
 // physically completed. The host receives the same cancelled context and may
 // finish cleanup later. No result/progress after logical settlement is admitted.
-func invokeNativeCallback(ctx context.Context, callback agentcore.PiCallback, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
+func invokeNativeCallback(ctx context.Context, callback NativeCallback, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -212,10 +211,6 @@ func invokeNativeCallback(ctx context.Context, callback agentcore.PiCallback, me
 		progressMu.Unlock()
 		if err == nil && len(value) > 0 && !json.Valid(value) {
 			err = errors.New("Pi callback returned invalid JSON")
-		}
-		var wireError *agentcore.PiError
-		if errors.As(err, &wireError) {
-			err = &telemetry.ErrorDetails{Name: wireError.Name, Message: wireError.Message}
 		}
 		completed <- outcome{value, err}
 	}()

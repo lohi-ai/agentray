@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestClaudeCodeNativePoolHTTP(t *testing.T) {
@@ -112,7 +112,7 @@ func TestClaudeCodeNativePoolHTTP(t *testing.T) {
 				t.Fatal("failed account returned success")
 			}
 			if mode == "rotate" {
-				var reported *agentcore.ProviderError
+				var reported *protocol.ProviderError
 				if source.acquireN != 2 || len(source.reports) != 2 || !errors.As(source.reports[0].err, &reported) || reported.Status != 401 || reported.Provider != VendorClaudeCode || strings.Join(keys, ",") != "Bearer first-fixture,Bearer second-fixture" {
 					t.Fatal("incorrect rotation/report lifecycle")
 				}
@@ -121,7 +121,7 @@ func TestClaudeCodeNativePoolHTTP(t *testing.T) {
 				t.Fatal("callback failure treated as account rejection")
 			}
 			if mode == "quota" {
-				var failure *agentcore.ProviderError
+				var failure *protocol.ProviderError
 				if !errors.As(capture.Failure(), &failure) || failure.Status != 429 || failure.RetryAfter != 2*time.Second {
 					t.Fatal("host lost retry metadata")
 				}

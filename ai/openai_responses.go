@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -65,7 +65,7 @@ func (p *OpenAIResponsesProvider) Name() string {
 	return VendorOpenAIResponses
 }
 func (p *OpenAIResponsesProvider) SupportsTools() bool { return true }
-func (p *OpenAIResponsesProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (p *OpenAIResponsesProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
 	// Capabilities describe the selected wire, not the credential/provider
 	// identity returned by Name(). An identity-preserving OpenAI Responses
 	// client must still advertise stateful chaining.
@@ -191,7 +191,7 @@ func (r responsesRequest) controls() responsesControls {
 	}
 }
 
-func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesRequest {
+func (p *OpenAIResponsesProvider) encode(req protocol.ChatRequest) responsesRequest {
 	out := responsesRequest{
 		Model: req.Model, Stream: true, MaxOutputTokens: req.MaxTokens,
 		Temperature: req.Temperature, PromptCacheKey: req.CacheKey,
@@ -202,11 +202,11 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 	allowImages := imageInputAllowed(p.ModelCapabilities(req.Model))
 	for _, message := range req.Messages {
 		switch message.Role {
-		case agentcore.RoleSystem:
+		case protocol.RoleSystem:
 			if message.Content != "" {
 				instructions = append(instructions, message.Content)
 			}
-		case agentcore.RoleTool:
+		case protocol.RoleTool:
 			text := messageText(message)
 			images := messageImages(message)
 			var output any = text
@@ -228,7 +228,7 @@ func (p *OpenAIResponsesProvider) encode(req agentcore.ChatRequest) responsesReq
 			out.Input = append(out.Input, responsesInputItem{
 				Type: "function_call_output", CallID: message.ToolCallID, Output: output,
 			})
-		case agentcore.RoleAssistant:
+		case protocol.RoleAssistant:
 			if message.Content != "" {
 				out.Input = append(out.Input, responsesInputItem{
 					Type: "message", Role: "assistant",
@@ -314,7 +314,7 @@ type openAIResponsesState struct {
 	closed bool
 }
 
-func newOpenAIResponsesState() agentcore.ProviderSessionState {
+func newOpenAIResponsesState() protocol.ProviderSessionState {
 	return &openAIResponsesState{chains: make(map[string]*responsesChain)}
 }
 
@@ -367,7 +367,7 @@ type responsesPlan struct {
 	release   func()
 }
 
-func (p *OpenAIResponsesProvider) plan(req agentcore.ChatRequest, apiKey string) responsesPlan {
+func (p *OpenAIResponsesProvider) plan(req protocol.ChatRequest, apiKey string) responsesPlan {
 	canonical := p.encode(req)
 	plan := responsesPlan{canonical: canonical, wire: canonical, release: func() {}}
 	if req.ProviderSession == nil || strings.TrimSpace(req.SessionID) == "" {
@@ -448,7 +448,7 @@ func cloneResponsesRequest(in responsesRequest) responsesRequest {
 	return out
 }
 
-func canonicalResponseOutput(text string, tools []agentcore.ToolCall) []responsesInputItem {
+func canonicalResponseOutput(text string, tools []protocol.ToolCall) []responsesInputItem {
 	out := make([]responsesInputItem, 0, 1+len(tools))
 	if text != "" {
 		out = append(out, responsesInputItem{
@@ -468,7 +468,7 @@ func canonicalResponseOutput(text string, tools []agentcore.ToolCall) []response
 	return out
 }
 
-func (p responsesPlan) succeed(responseID, text string, tools []agentcore.ToolCall) {
+func (p responsesPlan) succeed(responseID, text string, tools []protocol.ToolCall) {
 	defer p.release()
 	if p.chain == nil {
 		return
@@ -549,9 +549,9 @@ type responsesWireUsage struct {
 	} `json:"input_tokens_details,omitempty"`
 }
 
-func (u *responsesWireUsage) usage() agentcore.Usage {
+func (u *responsesWireUsage) usage() protocol.Usage {
 	if u == nil {
-		return agentcore.Usage{}
+		return protocol.Usage{}
 	}
 	cached := 0
 	if u.InputTokensDetails != nil {
@@ -560,7 +560,7 @@ func (u *responsesWireUsage) usage() agentcore.Usage {
 	if cached > u.InputTokens {
 		cached = u.InputTokens
 	}
-	return agentcore.Usage{
+	return protocol.Usage{
 		InputTokens: u.InputTokens - cached, OutputTokens: u.OutputTokens, CacheReadTokens: cached,
 	}
 }
@@ -579,11 +579,11 @@ type responsesWireResponse struct {
 // Chat drains the public API's streaming transport into one neutral response.
 // Keeping one decoder prevents Chat and Stream from learning different chain
 // baselines or tool-call semantics.
-func (p *OpenAIResponsesProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *OpenAIResponsesProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	return chatViaStream(ctx, p, req)
 }
 
-func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	// Snapshot once: provider-session state and Authorization must refer to the
 	// same credential even if a sibling agent rotates the shared provider while
 	// this request is being planned.
@@ -608,7 +608,7 @@ func (p *OpenAIResponsesProvider) Stream(ctx context.Context, req agentcore.Chat
 			return nil, err
 		}
 
-		ch := make(chan agentcore.ChatDelta, 16)
+		ch := make(chan protocol.ChatDelta, 16)
 		go p.consume(resp, plan, ch)
 		ready, preflightErr, retryStrict := preflightStrictStream(ctx, active, toolSchemaOpenAIResponses, ch)
 		if retryStrict {
@@ -655,18 +655,18 @@ func (p *OpenAIResponsesProvider) open(ctx context.Context, body responsesReques
 			message += " (code=" + decoded.Error.Code + ")"
 		}
 	}
-	return nil, agentcore.NewProviderError(p.Name(), resp, message)
+	return nil, protocol.NewProviderError(p.Name(), resp, message)
 }
 
-func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPlan, ch chan<- agentcore.ChatDelta) {
+func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPlan, ch chan<- protocol.ChatDelta) {
 	defer close(ch)
 	defer resp.Body.Close()
 
 	var text strings.Builder
-	var tools []agentcore.ToolCall
+	var tools []protocol.ToolCall
 	seenTools := make(map[string]bool)
 	var responseID, stopReason string
-	var usage agentcore.Usage
+	var usage protocol.Usage
 	terminal := false
 	failed := false
 	defer func() {
@@ -687,9 +687,9 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 			}
 			seenTools[key] = true
 			arguments := string(ParseStreamingJSON(item.Arguments))
-			call := agentcore.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments}
+			call := protocol.ToolCall{ID: item.CallID, Name: item.Name, Arguments: arguments}
 			tools = append(tools, call)
-			ch <- agentcore.ChatDelta{ToolCall: &call}
+			ch <- protocol.ChatDelta{ToolCall: &call}
 		case "message":
 			if !emitText {
 				return
@@ -701,7 +701,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 				}
 				if value != "" {
 					text.WriteString(value)
-					ch <- agentcore.ChatDelta{ContentDelta: value}
+					ch <- protocol.ChatDelta{ContentDelta: value}
 				}
 			}
 		}
@@ -721,7 +721,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 		var event responsesStreamEvent
 		if err := json.Unmarshal([]byte(payload), &event); err != nil {
 			failed = true
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "decode responses stream event: "+err.Error())}
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil, "decode responses stream event: "+err.Error())}
 			return
 		}
 		switch event.Type {
@@ -732,7 +732,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 		case "response.output_text.delta", "response.refusal.delta":
 			if event.Delta != "" {
 				text.WriteString(event.Delta)
-				ch <- agentcore.ChatDelta{ContentDelta: event.Delta}
+				ch <- protocol.ChatDelta{ContentDelta: event.Delta}
 			}
 		case "response.output_item.done":
 			if event.Item != nil {
@@ -761,19 +761,19 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 			}
 		case "response.failed", "error":
 			failed = true
-			ch <- agentcore.ChatDelta{Done: true, Err: p.responsesEventError(resp, &event)}
+			ch <- protocol.ChatDelta{Done: true, Err: p.responsesEventError(resp, &event)}
 			return
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		failed = true
-		ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil,
+		ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil,
 			"responses stream ended with read error: "+err.Error())}
 		return
 	}
 	if !terminal {
 		failed = true
-		ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil,
+		ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil,
 			"responses stream ended before terminal completion event")}
 		return
 	}
@@ -781,7 +781,7 @@ func (p *OpenAIResponsesProvider) consume(resp *http.Response, plan responsesPla
 		stopReason = "tool_calls"
 	}
 	plan.succeed(responseID, text.String(), tools)
-	ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
+	ch <- protocol.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 }
 
 func (p *OpenAIResponsesProvider) responsesEventError(resp *http.Response, event *responsesStreamEvent) error {
@@ -810,7 +810,7 @@ func (p *OpenAIResponsesProvider) responsesEventError(resp *http.Response, event
 }
 
 func isStalePreviousResponse(err error) bool {
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) {
 		return false
 	}
@@ -827,8 +827,8 @@ func isZeroDataRetention(err error) bool {
 }
 
 var (
-	_ agentcore.LLMProvider                = (*OpenAIResponsesProvider)(nil)
-	_ agentcore.ModelCapabilityProvider    = (*OpenAIResponsesProvider)(nil)
-	_ agentcore.KeyUpdater                 = (*OpenAIResponsesProvider)(nil)
-	_ agentcore.AccountScopedProviderState = (*openAIResponsesState)(nil)
+	_ protocol.LLMProvider                = (*OpenAIResponsesProvider)(nil)
+	_ protocol.ModelCapabilityProvider    = (*OpenAIResponsesProvider)(nil)
+	_ protocol.KeyUpdater                 = (*OpenAIResponsesProvider)(nil)
+	_ protocol.AccountScopedProviderState = (*openAIResponsesState)(nil)
 )

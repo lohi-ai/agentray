@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const openAIAdaptiveStatePrefix = "openai-chat-adaptive\x00"
@@ -14,17 +14,17 @@ const openAIAdaptiveStatePrefix = "openai-chat-adaptive\x00"
 // openAIAdaptiveState holds endpoint-scoped lessons, not account-scoped state:
 // a gateway that rejects prompt_cache_key keeps rejecting it after an API key
 // or OAuth account changes. It therefore deliberately does not implement
-// agentcore.AccountScopedProviderState.
+// protocol.AccountScopedProviderState.
 type openAIAdaptiveState struct {
 	mu             sync.RWMutex
-	models         map[string]agentcore.ModelCapabilities
+	models         map[string]protocol.ModelCapabilities
 	maxTokenFields map[string]string
 	closed         bool
 }
 
-func newOpenAIAdaptiveState() agentcore.ProviderSessionState {
+func newOpenAIAdaptiveState() protocol.ProviderSessionState {
 	return &openAIAdaptiveState{
-		models: make(map[string]agentcore.ModelCapabilities), maxTokenFields: make(map[string]string),
+		models: make(map[string]protocol.ModelCapabilities), maxTokenFields: make(map[string]string),
 	}
 }
 
@@ -36,28 +36,28 @@ func (s *openAIAdaptiveState) Close() {
 	s.mu.Unlock()
 }
 
-func (s *openAIAdaptiveState) apply(req agentcore.ChatRequest, maxTokenField string) (agentcore.ChatRequest, string) {
+func (s *openAIAdaptiveState) apply(req protocol.ChatRequest, maxTokenField string) (protocol.ChatRequest, string) {
 	s.mu.RLock()
 	caps := s.models[req.Model]
 	if learned := s.maxTokenFields[req.Model]; learned != "" {
 		maxTokenField = learned
 	}
 	s.mu.RUnlock()
-	if caps.ReasoningEffort == agentcore.CapabilityUnsupported {
+	if caps.ReasoningEffort == protocol.CapabilityUnsupported {
 		req.ReasoningEffort = ""
 	}
-	if caps.StructuredOutput == agentcore.CapabilityUnsupported {
+	if caps.StructuredOutput == protocol.CapabilityUnsupported {
 		req.OutputSchema = nil
 	}
-	if caps.PromptCaching == agentcore.CapabilityUnsupported {
+	if caps.PromptCaching == protocol.CapabilityUnsupported {
 		req.CacheKey = ""
 		req.CacheRetention = ""
 	}
 	return req, maxTokenField
 }
 
-func (s *openAIAdaptiveState) remember(model string, learned agentcore.ModelCapabilities) {
-	if learned == (agentcore.ModelCapabilities{}) {
+func (s *openAIAdaptiveState) remember(model string, learned protocol.ModelCapabilities) {
+	if learned == (protocol.ModelCapabilities{}) {
 		return
 	}
 	s.mu.Lock()
@@ -78,7 +78,7 @@ func (s *openAIAdaptiveState) rememberMaxTokenField(model, field string) {
 	s.mu.Unlock()
 }
 
-func (p *OpenAIProvider) adaptiveRequest(req agentcore.ChatRequest) (*openAIAdaptiveState, agentcore.ChatRequest, string) {
+func (p *OpenAIProvider) adaptiveRequest(req protocol.ChatRequest) (*openAIAdaptiveState, protocol.ChatRequest, string) {
 	maxTokenField := p.maxTokensField()
 	if req.ProviderSession == nil {
 		return nil, req, maxTokenField
@@ -92,11 +92,11 @@ func (p *OpenAIProvider) adaptiveRequest(req agentcore.ChatRequest) (*openAIAdap
 	return state, req, maxTokenField
 }
 
-func alternateMaxTokenField(field string, req agentcore.ChatRequest, err error) (string, bool) {
+func alternateMaxTokenField(field string, req protocol.ChatRequest, err error) (string, bool) {
 	if req.MaxTokens <= 0 {
 		return field, false
 	}
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) || (providerErr.Status != http.StatusBadRequest && providerErr.Status != http.StatusUnprocessableEntity) {
 		return field, false
 	}
@@ -121,10 +121,10 @@ func alternateMaxTokenField(field string, req agentcore.ChatRequest, err error) 
 // response. It never treats an arbitrary 400 as capability discovery: in
 // particular, an invalid JSON schema stays a caller-visible error instead of
 // silently weakening the request contract.
-func withoutRejectedOpenAIHint(req agentcore.ChatRequest, err error) (agentcore.ChatRequest, agentcore.ModelCapabilities, bool) {
-	var pe *agentcore.ProviderError
+func withoutRejectedOpenAIHint(req protocol.ChatRequest, err error) (protocol.ChatRequest, protocol.ModelCapabilities, bool) {
+	var pe *protocol.ProviderError
 	if !errors.As(err, &pe) || (pe.Status != http.StatusBadRequest && pe.Status != http.StatusUnprocessableEntity) {
-		return req, agentcore.ModelCapabilities{}, false
+		return req, protocol.ModelCapabilities{}, false
 	}
 	message := strings.ToLower(pe.Message)
 	unsupported := strings.Contains(message, "unsupported") ||
@@ -135,21 +135,21 @@ func withoutRejectedOpenAIHint(req agentcore.ChatRequest, err error) (agentcore.
 		strings.Contains(message, "unexpected keyword") ||
 		strings.Contains(message, "extra inputs are not permitted")
 	if !unsupported {
-		return req, agentcore.ModelCapabilities{}, false
+		return req, protocol.ModelCapabilities{}, false
 	}
 	if req.ReasoningEffort != "" && containsAny(message, "reasoning_effort", "reasoning effort") {
 		req.ReasoningEffort = ""
-		return req, agentcore.ModelCapabilities{ReasoningEffort: agentcore.CapabilityUnsupported}, true
+		return req, protocol.ModelCapabilities{ReasoningEffort: protocol.CapabilityUnsupported}, true
 	}
 	if req.CacheKey != "" && containsAny(message, "prompt_cache_key", "prompt cache", "prompt caching") {
 		req.CacheKey, req.CacheRetention = "", ""
-		return req, agentcore.ModelCapabilities{PromptCaching: agentcore.CapabilityUnsupported}, true
+		return req, protocol.ModelCapabilities{PromptCaching: protocol.CapabilityUnsupported}, true
 	}
 	if req.OutputSchema != nil && containsAny(message, "response_format", "structured output", "json_schema") {
 		req.OutputSchema = nil
-		return req, agentcore.ModelCapabilities{StructuredOutput: agentcore.CapabilityUnsupported}, true
+		return req, protocol.ModelCapabilities{StructuredOutput: protocol.CapabilityUnsupported}, true
 	}
-	return req, agentcore.ModelCapabilities{}, false
+	return req, protocol.ModelCapabilities{}, false
 }
 
 func containsAny(value string, needles ...string) bool {
@@ -191,11 +191,11 @@ func (s *oauthAccountBinding) switched(account string) bool {
 	return changed
 }
 
-func bindOAuthProviderSession(session *agentcore.ProviderSession, vendor, scope string, tok OAuthToken) {
+func bindOAuthProviderSession(session *protocol.ProviderSession, vendor, scope string, tok OAuthToken) {
 	if session == nil {
 		return
 	}
-	state, _ := session.State("oauth-account\x00"+vendor+"\x00"+scope, func() agentcore.ProviderSessionState {
+	state, _ := session.State("oauth-account\x00"+vendor+"\x00"+scope, func() protocol.ProviderSessionState {
 		return &oauthAccountBinding{}
 	}).(*oauthAccountBinding)
 	if state != nil && state.switched(tok.AccountID) {

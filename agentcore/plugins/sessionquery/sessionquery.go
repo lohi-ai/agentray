@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -96,6 +97,9 @@ const (
 
 // Plugin installs retrieval over the durable log.
 type Plugin struct {
+	// Native enables retrieval over this run's original native checkpoint and
+	// newly appended messages, including detail hidden by request compaction.
+	Native bool
 	// Provider performs the search. nil uses the built-in provider over the
 	// run's own SessionStore, which therefore requires a durable run.
 	Provider SessionQuery
@@ -130,10 +134,13 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
 	provider := p.Provider
 	if provider == nil {
-		if !info.Durable {
+		if info.Durable {
+			provider = &logSessionQuery{store: info.Session}
+		} else if p.Native {
+			provider = &nativeQuery{}
+		} else {
 			return nil, nil
 		}
-		provider = &logSessionQuery{store: info.Session}
 	}
 	maxLimit := p.MaxLimit
 	if maxLimit <= 0 {
@@ -147,6 +154,37 @@ type queryRun struct {
 	provider  SessionQuery
 	sessionID string
 	maxLimit  int
+}
+
+func (r *queryRun) ObserveMessages(_ context.Context, phase agentcore.ObservePhase, turn int, messages []agentcore.Message) {
+	if q, ok := r.provider.(*nativeQuery); ok {
+		if phase != agentcore.PhaseRestore && phase != agentcore.PhaseExternalInput && phase != agentcore.PhaseAppend {
+			return
+		}
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if phase == agentcore.PhaseRestore {
+			q.entries = nil
+		}
+		for _, message := range messages {
+			message := message
+			q.entries = append(q.entries, agentcore.SessionEntry{Kind: agentcore.EntryMessage, Seq: len(q.entries) + 1, Turn: turn, Message: &message})
+		}
+	}
+}
+
+type nativeQuery struct {
+	mu      sync.RWMutex
+	entries []agentcore.SessionEntry
+}
+
+func (q *nativeQuery) Search(ctx context.Context, req SessionQueryRequest) (SessionQueryResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionQueryResult{}, err
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return searchEntries(q.entries, req), nil
 }
 
 // Name identifies the extension in composition diagnostics.
@@ -178,6 +216,10 @@ func (q *logSessionQuery) Search(ctx context.Context, req SessionQueryRequest) (
 	if err != nil {
 		return SessionQueryResult{}, err
 	}
+	return searchEntries(log, req), nil
+}
+
+func searchEntries(log []agentcore.SessionEntry, req SessionQueryRequest) SessionQueryResult {
 	kinds := map[agentcore.SessionEntryKind]bool{}
 	for _, k := range req.Kinds {
 		kinds[k] = true
@@ -241,7 +283,7 @@ func (q *logSessionQuery) Search(ctx context.Context, req SessionQueryRequest) (
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return SessionQueryResult{Matches: out, Searched: searched}, nil
+	return SessionQueryResult{Matches: out, Searched: searched}
 }
 
 // entryText renders the searchable text of an entry.

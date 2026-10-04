@@ -82,11 +82,19 @@ type PiToolHost struct {
 // OpenPiTools creates the run's effective tool registry without entering the Go
 // model loop. The Pi host must close the worker before closing this host.
 func (a *Agent) OpenPiTools(ctx context.Context) (*PiToolHost, error) {
+	return a.openPiTools(ctx, true)
+}
+
+func (a *Agent) openPiTools(ctx context.Context, jsonBindings bool, restoredGoal ...string) (*PiToolHost, error) {
 	if !a.tryAcquire() {
 		return nil, ErrBusy
 	}
+	goal := a.goal
+	if len(restoredGoal) > 0 {
+		goal = restoredGoal[0]
+	}
 	ctx, cancel := context.WithCancel(ctx)
-	h := &PiToolHost{agent: a, ctx: ctx, cancel: cancel, goal: a.goal, committedGoal: a.goal, budget: newToolExecutionBudget(a.limits.MaxToolCalls)}
+	h := &PiToolHost{agent: a, ctx: ctx, cancel: cancel, goal: goal, committedGoal: goal, budget: newToolExecutionBudget(a.limits.MaxToolCalls)}
 	ok := false
 	defer func() {
 		if !ok {
@@ -107,7 +115,7 @@ func (a *Agent) OpenPiTools(ctx context.Context) (*PiToolHost, error) {
 	h.exts, err = beginExtensions(ctx, a.extensions, RunInfo{
 		SessionID: a.sessionID, Owner: owner, ScopeID: a.def.ScopeID,
 		Limits: a.limits, Depth: DelegationDepth(ctx), Durable: a.session != nil && a.sessionID != "",
-		Session: a.session, Agent: a, Goal: a.goal,
+		Session: a.session, Agent: a, Goal: goal,
 		Bookkeeping: func(name string) bool { return isBookkeeping(registry.Load(), name) },
 	})
 	if err != nil {
@@ -123,7 +131,7 @@ func (a *Agent) OpenPiTools(ctx context.Context) (*PiToolHost, error) {
 	h.exempt = exempt
 	for _, name := range h.tools.Names() {
 		tool, _ := h.tools.Get(name)
-		if _, prepares := tool.(ArgPreparer); prepares {
+		if _, prepares := tool.(ArgPreparer); jsonBindings && prepares {
 			if native, ok := tool.(PiArgumentPreparer); !ok || native.PiArgumentPreparation() == "" {
 				return nil, fmt.Errorf("tool %q requires synchronous prepareArguments; supply a native Pi tool implementation", name)
 			}

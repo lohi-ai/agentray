@@ -4,15 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
 	"testing"
+
+	"github.com/lohi-ai/agentray/ai"
 )
 
 func TestNativeLadderPrepareUpdatesNextEngineTurn(t *testing.T) {
 	ctx := context.Background()
 	turns := 0
-	base := agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["finishTurn"]}`), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	base := NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["finishTurn"]}`), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "finishTurn" {
 			return nil, errors.New("unexpected callback")
 		}

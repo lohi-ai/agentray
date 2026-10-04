@@ -9,8 +9,7 @@ via `Describe()`. If the plugin surface ever drifts from `Config`, that test
 fails.
 
 `preset.Full(cfg, opts)` is that list **plus** the capabilities `Config` has no
-field for: `spill`, `jobs`, `repeat_guard`, `session_query`, and the two
-`observe` plugins. The split is load-bearing — `Plugins` is pinned to
+field for: `spill`, `jobs`, `repeat_guard`, `session_query`, plus opt-in todo, subagents, advisor, ask and finish guards. The split is load-bearing — `Plugins` is pinned to
 `agentcore.New` parity and must stay a pure mirror of `Config`, so the
 capabilities that answer to no `Config` field live one layer up. **`Full` is
 where a deployment starts; `Plugins` is where the parity proof lives.**
@@ -32,14 +31,13 @@ replace what you want to change, append your own, and build:
 
 ```go
 ps := preset.Plugins(cfg)
-ps = preset.Replace(ps, myDriverPlugin{})        // swap the control flow (r.SetDriver)
+ps = preset.Replace(ps, agentcore.PolicyDenyAll()) // replace the permission policy
 ps = append(ps, myCapability{})                  // add a capability
 agent, err := agentcore.Build(ps...)
 ```
 
-The driver seam has no preset entry: `Build` installs the default reason→act
-driver when nothing claims it, so swapping control flow is a plugin whose
-`Register` calls `r.SetDriver(myDriver)`.
+The engine owns turn scheduling. Plugins configure capabilities through
+registry setters, hooks and per-run extensions; they cannot replace the loop.
 
 Two tests here carry the architectural claims:
 
@@ -56,5 +54,15 @@ Two tests here carry the architectural claims:
   does not report could drift undetected. The test guards against a vacuous pass
   by asserting the dump is not thin, but that is a proxy, not a proof.
 - **`Replace` appends.** A replacement lands at the end of the list rather than
-  in the original position. Harmless today — seams are keyed and hooks are
-  prioritized — but it means list order is not a stable diagnostic.
+  in the original position. Seams are keyed and hooks are prioritized, but extension stop guards
+  run in registration order. Preserve that order when replacing guards. Full
+  replaces its goal/memory options in place.
+
+Tracing is supplied through `NativeRun.Telemetry` or `telemetry.WithContext`;
+there is no observer plugin or provider-decorator registration. Native recovery
+validates checkpoints and effect receipts directly.
+
+`Full` additionally accepts `GoalLifecycle` (an opt-in goal plugin configuration),
+`AdvisorOptions` (cadence/caps for `NativeAdvisor`), and `ConsolidateMemory` (native
+rollout distillation when the configured store implements the optional durable
+consolidation contract). Zero values preserve the earlier composition behavior.

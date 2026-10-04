@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/ai"
 )
@@ -58,7 +58,7 @@ func TestNativeAnthropicFederationScopedBinding(t *testing.T) {
 	defer server.Close()
 	options := piModelJSON(map[string]any{"streamOptions": map[string]any{"env": map[string]string{"ANTHROPIC_FEDERATION_RULE_ID": "native-rule", "ANTHROPIC_ORGANIZATION_ID": "native-organization", "ANTHROPIC_IDENTITY_TOKEN_FILE": identity}}})
 	tier := ModelTier{TierConfig: TierConfig{Provider: "anthropic", Model: "native-http", BaseURL: server.URL}}
-	binding, _, err := tier.BindPi(agentcore.PiConfig{Options: options}, PiModelOptions{})
+	binding, _, err := tier.BindPi(NativeAgentConfig{Options: options}, PiModelOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 		configureNativeFederationEnv(t)
 	}
 	var traceMu sync.Mutex
-	traces := []observe.TraceRecord{}
+	traces := []llm.TraceRecord{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if federated && serveNativeFederationExchange(t, w, r, &exchanges) {
 			return
@@ -284,7 +284,7 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 			return "stale-key", nil
 		}
 	}
-	p.Tracer = observe.SinkFunc(func(trace observe.TraceRecord) {
+	p.Tracer = llm.SinkFunc(func(trace llm.TraceRecord) {
 		traceMu.Lock()
 		defer traceMu.Unlock()
 		traces = append(traces, trace)

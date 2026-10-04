@@ -15,7 +15,7 @@ import (
 func testNativeLadder(t *testing.T) *nativeModelLadder {
 	t.Helper()
 	tier := ModelTier{TierConfig{Provider: "openai", ProviderID: "row-a", Model: "primary", BaseURL: "https://same.test/v1", APIKey: "secret-a", Fallback: &TierConfig{Provider: "openai", ProviderID: "row-b", Model: "fallback", BaseURL: "https://same.test/v1", APIKey: "secret-b", Capabilities: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported}}}}
-	ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(rung ModelTier) (PiModelOptions, error) {
+	ladder, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(rung ModelTier) (PiModelOptions, error) {
 		return PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { return rung.APIKey + "-fresh", nil }}, nil
 	})
 	if err != nil {
@@ -131,7 +131,7 @@ func TestNativeLadderRestoreRejectsChangedIdentity(t *testing.T) {
 }
 func TestNativeLadderBindingFailsAsAWhole(t *testing.T) {
 	tier := ModelTier{TierConfig{Provider: "openai", Model: "primary", Fallback: &TierConfig{Provider: "openai", Model: "fallback", BaseURL: "ftp://other.test"}}}
-	ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
+	ladder, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
 	if err == nil || ladder != nil {
 		t.Fatal("partially bound ladder escaped")
 	}

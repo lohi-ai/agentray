@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestCodexPoolFailurePreservesHTTPMetadataAndWireMessage(t *testing.T) {
@@ -38,7 +38,7 @@ func TestCodexPoolFailurePreservesHTTPMetadataAndWireMessage(t *testing.T) {
 				t.Fatalf("Pi message changed: %+v", result)
 			}
 			reported := codexPoolFailure(cause)
-			var typed *agentcore.ProviderError
+			var typed *protocol.ProviderError
 			if !errors.As(reported, &typed) || typed.Status != status || typed.RetryAfter != 7*time.Second || typed.Provider != VendorOpenAICodex || typed.Message != expected {
 				t.Fatalf("pool metadata lost: %#v", reported)
 			}

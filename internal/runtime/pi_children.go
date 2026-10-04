@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 )
 
@@ -17,7 +19,7 @@ func equalPiInvocation(a, b json.RawMessage) bool {
 	if len(a) == 0 || len(b) == 0 {
 		return len(a) == len(b)
 	}
-	return samePiJSON(a, b)
+	return nativehost.SameJSON(a, b)
 }
 
 func piStoredInvocation(entries []agentcore.SessionEntry) (json.RawMessage, error) {
@@ -43,7 +45,7 @@ func piMessagesDigest(state json.RawMessage) (string, error) {
 	}
 	// JSONB and worker transport can reorder object keys. Normalize JSON values,
 	// preserving every native field, before binding the completion receipt.
-	return piPrefixDigest(value.Messages), nil
+	return nativehost.PrefixDigest(value.Messages), nil
 }
 
 // PiChildQuestionError identifies the durable child workflow a host must route
@@ -113,7 +115,7 @@ func piParkedChild(entries []agentcore.SessionEntry) (agentcore.RunResult, strin
 		if audit.ChildQuestion != nil {
 			expected = audit.ChildQuestion.Question
 		}
-		if !samePiJSON(question, expected) {
+		if !nativehost.SameJSON(question, expected) {
 			return agentcore.RunResult{}, "", errors.New("native child question differs from its settled receipt")
 		}
 		workflowID := audit.QuestionID
@@ -144,7 +146,7 @@ func piParkedChild(entries []agentcore.SessionEntry) (agentcore.RunResult, strin
 	}
 	result := agentcore.RunResult{Parked: pending, Question: pendingQuestion, StopReason: "parked", NativeState: state, NativeRevision: revision}
 	for _, raw := range native.Messages {
-		message, err := projectPiMessage(raw)
+		message, err := nativehost.ProjectMessage(raw)
 		if err != nil {
 			return agentcore.RunResult{}, "", err
 		}
@@ -192,7 +194,7 @@ func piCompletedChild(entries []agentcore.SessionEntry) (agentcore.RunResult, bo
 	_ = json.Unmarshal(state, &native)
 	result := agentcore.RunResult{Final: receipt.Final, StopReason: "reattached", NativeState: state, NativeRevision: receipt.Revision}
 	for _, raw := range native.Messages {
-		message, err := projectPiMessage(raw)
+		message, err := nativehost.ProjectMessage(raw)
 		if err != nil {
 			return agentcore.RunResult{}, false, err
 		}
@@ -237,7 +239,7 @@ func piChildEndedWithoutReceipt(entries []agentcore.SessionEntry) bool {
 // piForkRunner executes only the already-governed Agent.Fork child. Native
 // options are copied per child; the parent's messages and agent instance are
 // never shared. Session ownership encloses both execution and completion write.
-func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.SessionStore, choice agentcore.ToolChoice, compaction *PiContextCompaction) subagent.ForkRunner {
+func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.SessionStore, choice agentcore.ToolChoice, compaction *nativehost.CompactionPolicy) subagent.ForkRunner {
 	worker := runtime.Pi
 	return func(ctx context.Context, child *agentcore.Agent, request subagent.ForkRequest, sink agentcore.StreamSink) (agentcore.RunResult, error) {
 		history := json.RawMessage(`[]`)
@@ -247,7 +249,7 @@ func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.Se
 			if json.Unmarshal(request.Previous.NativeState, &previous) != nil || len(previous.Messages) == 0 || request.Previous.NativeRevision == "" {
 				return agentcore.RunResult{}, errors.New("native child retry requires original native state and revision")
 			}
-			if err := validatePiConversationMessages(previous.Messages); err != nil {
+			if err := nativehost.ValidateMessages(previous.Messages); err != nil {
 				return agentcore.RunResult{}, err
 			}
 			history, revision = previous.Messages, request.Previous.NativeRevision
@@ -319,7 +321,7 @@ func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.Se
 		var ladder *nativeModelLadder
 		if runtime.nativeLadder != nil {
 			ladder = runtime.nativeLadder.fork()
-			var bound agentcore.PiConfig
+			var bound NativeAgentConfig
 			bound, known, stream = ladder.sessionBinding()
 			if runtime.nativeAttempts != nil {
 				bound, known, stream = ladder.admissionBinding()
@@ -352,7 +354,7 @@ func piForkRunner(runtime PiSessionConfig, pricingKnown bool, store agentcore.Se
 		if err != nil {
 			return agentcore.RunResult{}, err
 		}
-		if err := piValidateToolChoice(choice, names); err != nil {
+		if err := ai.ValidateNativeToolChoice(choice, names); err != nil {
 			return agentcore.RunResult{}, err
 		}
 		var input json.RawMessage

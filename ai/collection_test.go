@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Two registered providers each list exactly the IDs their stub /models
@@ -145,8 +145,8 @@ func TestCollectionDispatchesChatAndStreamToOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	chatOAI, err := col.Chat(context.Background(), agentcore.ChatRequest{
-		Model: "oai-only", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+	chatOAI, err := col.Chat(context.Background(), protocol.ChatRequest{
+		Model: "oai-only", Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("chat openai: %v", err)
@@ -158,8 +158,8 @@ func TestCollectionDispatchesChatAndStreamToOwner(t *testing.T) {
 		t.Fatalf("after openai chat: openaiHits=%d anthHits=%d", openaiHits, anthHits)
 	}
 
-	chatAnt, err := col.Chat(context.Background(), agentcore.ChatRequest{
-		Model: "ant-only", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+	chatAnt, err := col.Chat(context.Background(), protocol.ChatRequest{
+		Model: "ant-only", Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("chat anthropic: %v", err)
@@ -171,8 +171,8 @@ func TestCollectionDispatchesChatAndStreamToOwner(t *testing.T) {
 		t.Fatalf("after anthropic chat: openaiHits=%d anthHits=%d", openaiHits, anthHits)
 	}
 
-	stream, err := col.Stream(context.Background(), agentcore.ChatRequest{
-		Model: "oai-only", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+	stream, err := col.Stream(context.Background(), protocol.ChatRequest{
+		Model: "oai-only", Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("stream openai: %v", err)
@@ -191,8 +191,8 @@ func TestCollectionDispatchesChatAndStreamToOwner(t *testing.T) {
 		t.Fatalf("openai stream did not hit openai stub (hits=%d)", openaiHits)
 	}
 
-	stream, err = col.Stream(context.Background(), agentcore.ChatRequest{
-		Model: "ant-only", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
+	stream, err = col.Stream(context.Background(), protocol.ChatRequest{
+		Model: "ant-only", Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("stream anthropic: %v", err)
@@ -237,10 +237,10 @@ func TestOpenAIChatAndStreamToolsAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := agentcore.ChatRequest{
+	req := protocol.ChatRequest{
 		Model:    "m1",
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "go"}},
-		Tools:    []agentcore.ToolSchema{{Name: "lookup", Description: "d", Parameters: map[string]any{"type": "object"}}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "go"}},
+		Tools:    []protocol.ToolSchema{{Name: "lookup", Description: "d", Parameters: map[string]any{"type": "object"}}},
 	}
 	resp, err := p.Chat(context.Background(), req)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestOpenAIChatAndStreamToolsAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var usage agentcore.Usage
+	var usage protocol.Usage
 	for d := range ch {
 		if d.Err != nil {
 			t.Fatal(d.Err)
@@ -307,10 +307,10 @@ func TestAnthropicChatAndStreamToolsAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := agentcore.ChatRequest{
+	req := protocol.ChatRequest{
 		Model:    "claude-x",
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "go"}},
-		Tools:    []agentcore.ToolSchema{{Name: "lookup", Description: "d", Parameters: map[string]any{"type": "object"}}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "go"}},
+		Tools:    []protocol.ToolSchema{{Name: "lookup", Description: "d", Parameters: map[string]any{"type": "object"}}},
 	}
 	resp, err := p.Chat(context.Background(), req)
 	if err != nil {
@@ -331,8 +331,8 @@ func TestAnthropicChatAndStreamToolsAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var usage agentcore.Usage
-	var calls []agentcore.ToolCall
+	var usage protocol.Usage
+	var calls []protocol.ToolCall
 	for d := range ch {
 		if d.Err != nil {
 			t.Fatal(d.Err)
@@ -455,8 +455,8 @@ func TestChatOnUsesNamedProvider(t *testing.T) {
 	col := NewCollection()
 	col.Register(a)
 	col.Register(b)
-	resp, err := col.ChatOn(context.Background(), "pb", agentcore.ChatRequest{
-		Model: "same-id", Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "x"}},
+	resp, err := col.ChatOn(context.Background(), "pb", protocol.ChatRequest{
+		Model: "same-id", Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "x"}},
 	})
 	if err != nil {
 		t.Fatal(err)

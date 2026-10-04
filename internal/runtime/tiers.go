@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
@@ -99,17 +98,9 @@ type ModelTier struct {
 func (t ModelTier) EffectiveWindow() int { return EffectiveContextWindow(t.TierConfig) }
 
 // RawProvider builds the tier's provider undecorated. The run loop needs the
-// raw client because the composition's monitor plugin prices and traces every
-// rung itself — wrapping here would double-count.
+// metadata client. Native model calls use the telemetry-backed request boundary.
 func (t ModelTier) RawProvider() (agentcore.LLMProvider, error) {
 	return buildProviderForModel(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, t.ProviderID, t.Capabilities)
-}
-
-// TracedProvider builds the tier's provider wrapped for pricing + tracing —
-// the shape one-shot callers (advisor, reflection, triage, authoring) want,
-// since they run outside the run composition's monitor plugin.
-func (t ModelTier) TracedProvider(tracer observe.Sink) (agentcore.LLMProvider, error) {
-	return buildTracedProviderForModel(t.Provider, t.BaseURL, t.APIKey, t.TokenSource, tracer, t.Capabilities)
 }
 
 // Rungs builds the model ladder for a run on this tier: the primary model

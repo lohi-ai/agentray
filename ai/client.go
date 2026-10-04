@@ -4,14 +4,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // ClientSpec is the resolved configuration for constructing a wire client:
 // vendor name, decrypted key, and an optional base-URL override.
 //
 // It is deliberately smaller than Spec: a ClientSpec yields a bare
-// agentcore.LLMProvider (Chat/Stream and nothing else), which is what a run
+// protocol.LLMProvider (Chat/Stream and nothing else), which is what a run
 // needs. Spec adds the identity and live model list that a workspace-managed
 // provider needs, and builds on this.
 type ClientSpec struct {
@@ -46,10 +46,10 @@ const (
 	OpenAIWireResponses OpenAIWire = "responses"
 )
 
-// NewClient resolves a ClientSpec into an agentcore.LLMProvider. Adding a
+// NewClient resolves a ClientSpec into an protocol.LLMProvider. Adding a
 // vendor is additive here — a new case (or, for OpenAI-compatible vendors, just
 // a compat entry + base_url) — and never requires touching the agent loop.
-func NewClient(spec ClientSpec) (agentcore.LLMProvider, error) {
+func NewClient(spec ClientSpec) (protocol.LLMProvider, error) {
 	name := strings.ToLower(strings.TrimSpace(spec.Name))
 	if v := NormalizeOAuthVendor(name); v != "" {
 		name = v

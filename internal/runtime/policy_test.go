@@ -139,6 +139,9 @@ func TestMemoryCurationToolsGated(t *testing.T) {
 	}
 
 	readOnly := permittedToolNames(BuildParams{Scopes: Scopes{GrowthSuggest: true}, Memory: mem, ReadOnly: true})
+	if !has(readOnly, memory.ToolMemoryRecall) || !has(noScope, memory.ToolMemoryRecall) || has(noStore, memory.ToolMemoryRecall) {
+		t.Error("read-only memory recall must follow store availability, not write grants")
+	}
 	for _, name := range []string{memory.ToolMemoryEdit, memory.ToolLearn} {
 		if has(readOnly, name) {
 			t.Errorf("%q permitted on a read-only run", name)

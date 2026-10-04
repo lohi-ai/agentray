@@ -8,33 +8,19 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	goalplugin "github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
-// This file is the conversational entry of the general agent. It used to be a
-// binding to a separate, domain-agnostic agentorch front desk; that package has
-// been retired into the agent itself (see ARCHITECT-AGENT-TEAM.md). A chat turn
-// is now owned end-to-end here: a cheap front-desk classifier answers small talk
-// directly, and a real product question runs the general agent (the Growth
-// Analyst), narrating friendly progress and deriving a result card. The
-// orchestrator will return later as the *team lead* general agent when we build
-// agent teams; until then there is one agent abstraction, conversational by
-// default.
-
-// route names the front-desk classifier emits. smalltalk is answered directly
-// with the classifier's one-shot reply; data runs the general agent.
+// Every conversational turn is owned by the native agent, including greetings
+// and follow-ups. Slash commands are the only host-handled turns.
 const (
-	routeData      = "data"
-	routeSmallTalk = "smalltalk"
-	// routeCommand is a turn the server answered itself from a slash command
-	// (/compact, /clear, /plan, /agents, /help). It opens no run and spends
-	// nothing on the model — the client renders it as an instant reply.
+	routeData    = "data"
 	routeCommand = "command"
 )
 
 // ChatOptions parameterize one chat turn. Conversation routes supply history
-// derived from the durable active branch; legacy stateless callers may supply
-// their own prior turns.
+// derived from the durable native branch. Display-only history is rejected.
 type ChatOptions struct {
 	ProjectID string
 	// AgentID selects which of the project's agents handles the turn (AgentGarden
@@ -51,10 +37,10 @@ type ChatOptions struct {
 	SessionID string
 	// ConversationID, when set, makes the turn durable in the conversation store
 	// (DESIGN-CONVERSATION-STORE.md): the route appends the user message and derives
-	// History server-side before calling Chat, and Chat appends the assistant turn as
+	// PiHistory server-side before calling Chat, and Chat appends the assistant turn as
 	// a message entry when it finishes — so the thread survives on the server and a
-	// second machine/user can load and continue it. Empty keeps the legacy
-	// client-held-history path. Distinct from SessionID (live-control key), though a
+	// second machine/user can load and continue it. Empty starts a stateless turn.
+	// Distinct from SessionID (live-control key), though a
 	// caller typically sets both to the same conversation id.
 	ConversationID string
 	// ReadOnly withholds the agent's writing tools for this turn (see
@@ -92,7 +78,7 @@ type AnswerOptions struct {
 
 // ChatResult is the outcome of one chat turn, shaped to the chat JSON/SSE
 // contract (run_id/final/route/tool_calls/usage/turns + the additive card).
-// RunID is empty for a direct small-talk reply, which never opens a run.
+// RunID is empty for host-handled slash commands, which never open a run.
 type ChatResult struct {
 	RunID string                `json:"run_id"`
 	Final string                `json:"final"`
@@ -114,21 +100,11 @@ type ChatResult struct {
 	Question json.RawMessage `json:"question,omitempty"`
 }
 
-// chatDecision is the front-desk classifier's verdict for one turn. A non-empty
-// Reply is streamed directly (small talk / persona); otherwise Route selects how
-// the turn is handled.
-type chatDecision struct {
-	Route string
-	Reply string
-	Usage agentcore.Usage
-}
-
 // chatWork is the delegated turn handed to the data handler.
 type chatWork struct {
 	ProjectID string
 	AgentID   string
 	Message   string
-	History   []agentcore.Message
 	PiHistory *PiConversationHistory
 	InputID   string
 	SessionID string
@@ -150,29 +126,22 @@ type chatWork struct {
 	ResumeFromRunID string
 }
 
-// ChatService owns one conversational turn of the general agent. It holds a
-// single Runner (shared by the classifier's cheap-tier call and the agent run)
-// and two seams — classify + handle — defaulted to the runner-backed
-// implementations and overridable in tests so the routing logic is exercised
-// without a database.
+// ChatService runs conversations through one native Runner. The handler seam
+// lets command and turn-admission tests avoid opening a database.
 type ChatService struct {
-	runner   *Runner
-	classify func(ctx context.Context, projectID string, history []agentcore.Message, message string) (chatDecision, error)
-	handle   func(ctx context.Context, req chatWork, sink agentcore.StreamSink) (ChatResult, error)
+	runner *Runner
+	handle func(ctx context.Context, req chatWork, sink agentcore.StreamSink) (ChatResult, error)
 }
 
 // NewChatService wires the conversational general agent over the storage layer.
 // RunnerOptions (e.g. WithSandbox, WithLiveRegistry) are forwarded so a
 // chat-triggered run shares the host's isolation substrate and live control. One
-// Runner backs both the cheap classifier and the agent run.
+// Runner owns the native agent run and its host bindings.
 func NewChatService(store *storage.Store, runnerOpts ...RunnerOption) *ChatService {
 	s := &ChatService{runner: NewRunner(store, runnerOpts...)}
-	s.classify = s.classifyTurn
 	s.handle = s.handleData
 	return s
 }
-
-func (s *ChatService) UsesPiRuntime() bool { return s.runner != nil && s.runner.Pi != nil }
 
 // Chat runs one turn. When sink is non-nil the turn streams (an opening progress
 // beat, then either the typed-out reply or the agent's own tokens/progress/card)
@@ -203,9 +172,8 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 
 	// Magic keywords are the same mechanism one level down: standalone prose
 	// words that configure the run rather than address the model. They are
-	// stripped from the message the agent sees (and from what the classifier
-	// reads) and recorded in the durable log — the raw text the user typed is
-	// already on the transcript from the route's own append.
+	// stripped from the message the agent sees and recorded in the durable log.
+	// The route has already appended the raw user text to the transcript.
 	message, fired := parseMagicKeywords(message)
 	effort := ""
 	for _, kw := range fired {
@@ -214,35 +182,11 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		}
 	}
 
-	dec := chatDecision{Route: routeData}
-	if s.UsesPiRuntime() && len(opts.History) > 0 {
+	if len(opts.History) > 0 {
 		return ChatResult{}, errors.New("Pi chat requires native history; use a native conversation or clear the legacy context")
 	}
-	if s.UsesPiRuntime() && opts.ConversationID != "" && (opts.PiHistory == nil || opts.InputID == "") {
+	if opts.ConversationID != "" && (opts.PiHistory == nil || opts.InputID == "") {
 		return ChatResult{}, errors.New("native conversation requires a history anchor and durable input ID")
-	}
-	// A selected Pi conversation is owned end-to-end by the original Agent.
-	// Its ordinary text response also handles small talk; no Go provider runs
-	// an extra classification pass ahead of the native model.
-	if goal == "" && !s.UsesPiRuntime() {
-		var err error
-		if dec, err = s.classify(ctx, opts.ProjectID, opts.History, message); err != nil {
-			s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), "", 0)
-			return ChatResult{}, err
-		}
-	}
-
-	// Direct reply (small talk / persona): stream it word-by-word, no run.
-	if strings.TrimSpace(dec.Reply) != "" {
-		streamText(dec.Reply, sink)
-		s.persistAssistantTurn(ctx, opts, dec.Reply, "", 0)
-		return ChatResult{Route: dec.Route, Final: dec.Reply, Usage: dec.Usage}, nil
-	}
-
-	// Anything else runs the general agent. Today the only non-direct route is
-	// data; an unexpected route is a fail-closed error rather than a silent run.
-	if dec.Route != routeData {
-		return ChatResult{Route: dec.Route}, fmt.Errorf("agentruntime: no handler for route %q", dec.Route)
 	}
 	// A gated turn announces its condition before the run opens: the client pins
 	// it above the thread, and the log carries it so a reload still shows what the
@@ -268,19 +212,19 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 	}
 	res, err := s.handle(ctx, chatWork{
 		ProjectID: opts.ProjectID, AgentID: opts.AgentID, Message: message,
-		History: opts.History, SessionID: opts.SessionID, ConversationID: opts.ConversationID,
+		SessionID: opts.SessionID, ConversationID: opts.ConversationID,
 		PiHistory: opts.PiHistory, InputID: opts.InputID,
 		OnRunID: opts.OnRunID, OnPlan: opts.OnPlan, Goal: goal,
 		ReasoningEffort: effort,
 		ReadOnly:        opts.ReadOnly,
 	}, sink)
 
-	res.Route = dec.Route
+	res.Route = routeData
 	// The gate's sentinel is a protocol between the loop and the plugin, not
 	// something to hand a reader. Left in, every gated answer in this product ends
 	// with a bare "STATUS: DONE" — and then gets persisted that way, so it is still
 	// there on reload and gets replayed to the model as its own prior words.
-	res.Final = stripGoalSentinel(res.Final)
+	res.Final = goalplugin.PublicText(res.Final)
 	// A user stop unwinds the loop as an error, but it is not one. Persist nothing:
 	// a half-finished answer appended here would be replayed to the model next turn
 	// as its own completed thought. The partial text the user is looking at stays
@@ -290,24 +234,15 @@ func (s *ChatService) Chat(ctx context.Context, opts ChatOptions, sink agentcore
 		// spent real tokens (a rebuilt result would report the most expensive
 		// turns in a thread as free), and it may have pushed the conversation
 		// past the compaction threshold the next turn has to build history over.
-		res.Usage.InputTokens += dec.Usage.InputTokens
-		res.Usage.OutputTokens += dec.Usage.OutputTokens
-		res.Usage.CostUSD += dec.Usage.CostUSD
-		res.Usage.CostUnpriced = res.Usage.CostUnpriced || dec.Usage.CostUnpriced
 		res.Stopped = true
 		s.maybeCompact(ctx, opts)
 		return res, nil
 	}
 	if err != nil {
 		s.persistAssistantTurn(ctx, opts, formatAgentError(err.Error()), res.RunID, res.Turns)
-		return ChatResult{RunID: res.RunID, Route: dec.Route, Tools: res.Tools, Turns: res.Turns}, err
+		return ChatResult{RunID: res.RunID, Route: routeData, Tools: res.Tools, Turns: res.Turns}, err
 	}
 
-	// Fold the classification cost into the reported usage.
-	res.Usage.InputTokens += dec.Usage.InputTokens
-	res.Usage.OutputTokens += dec.Usage.OutputTokens
-	res.Usage.CostUSD += dec.Usage.CostUSD
-	res.Usage.CostUnpriced = res.Usage.CostUnpriced || dec.Usage.CostUnpriced
 	if res.Waiting {
 		return res, nil
 	}
@@ -372,7 +307,7 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 		convID = waitingRun.SessionID
 	}
 	var piHistory *PiConversationHistory
-	if s.UsesPiRuntime() && convID != "" {
+	if convID != "" {
 		history, err := buildPiResumeHistory(ctx, s.runner.Store, convID)
 		if err != nil {
 			return ChatResult{}, err
@@ -392,11 +327,8 @@ func (s *ChatService) AnswerQuestion(ctx context.Context, opts AnswerOptions, si
 	}
 
 	if convID != "" && appended {
-		_, err = appendMessageAtLeaf(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0, false, nil, s.UsesPiRuntime())
-		// Legacy callers may use an arbitrary client-held session ID with no
-		// saved conversation; their display mirror remains best-effort. Native
-		// conversation resume has already verified its durable branch above.
-		if err != nil && s.UsesPiRuntime() {
+		_, err = appendMessageAtLeaf(ctx, s.runner.Store, convID, string(agentcore.RoleUser), opts.Answer, waitingRun.AgentID, opts.UserID, "", 0, false, nil, true)
+		if err != nil {
 			return ChatResult{}, err
 		}
 	}
@@ -469,64 +401,19 @@ func (s *ChatService) persistAssistantTurn(ctx context.Context, opts ChatOptions
 	// Detach from the request cancellation so a client disconnect at the moment of
 	// completion can't abort the write of the answer the run already produced.
 	wctx := context.WithoutCancel(ctx)
-	_, _ = appendMessageAtLeaf(wctx, s.runner.Store, opts.ConversationID, string(agentcore.RoleAssistant), final, opts.AgentID, "", runID, turn, false, nil, s.UsesPiRuntime())
+	_, _ = appendMessageAtLeaf(wctx, s.runner.Store, opts.ConversationID, string(agentcore.RoleAssistant), final, opts.AgentID, "", runID, turn, false, nil, true)
 }
 
-// maybeCompact appends a compaction entry when the conversation's live context
-// estimate crosses the threshold (DESIGN-CONVERSATION-STORE.md §6), so the next
-// turn's BuildHistory replays a summary plus the recent tail instead of the full
-// transcript. The summarizer runs on the project's cheap tier — the same provider
-// the front-desk classifier uses. Best-effort and detached: a failure to compact
-// never fails the answer the user already has. No-op when not conversation-scoped.
+// maybeCompact summarizes a complete native prefix using the configured cheap
+// tier. Original provider messages remain in the durable branch. Failure does
+// not invalidate the answer already delivered to the user.
 func (s *ChatService) maybeCompact(ctx context.Context, opts ChatOptions) {
 	if opts.ConversationID == "" || s.runner == nil || s.runner.Store == nil {
 		return
 	}
 	wctx := context.WithoutCancel(ctx)
-	if s.UsesPiRuntime() {
-		_, _ = compactPiConversation(wctx, s.runner.Store, opts.ConversationID,
-			s.runner.RunTierWindow(wctx, opts.ProjectID), false, s.piSummarizer(opts.ProjectID))
-		return
-	}
-	// The window is the RUN tier's, not the summarizer's: it bounds how much
-	// history the next turn replays, and that turn runs on the run tier. 0 on
-	// error falls back to the conservative default rather than failing a
-	// best-effort compaction.
-	_, _ = MaybeCompactConversation(wctx, s.runner.Store, opts.ConversationID,
-		s.runner.RunTierWindow(wctx, opts.ProjectID), s.summarizer(opts.ProjectID))
-}
-
-// summarizer returns the running-summary callback both the automatic trigger and
-// the user's /compact hand to the conversation store. It runs on the project's
-// cheap tier — the same provider the front-desk classifier uses.
-func (s *ChatService) summarizer(projectID string) func(context.Context, string, string) (string, error) {
-	return func(sctx context.Context, transcript, previousSummary string) (string, error) {
-		prov, model, err := s.runner.CheapProvider(sctx, projectID)
-		if err != nil {
-			return "", err
-		}
-		// On a second+ compaction, fold the new transcript into the prior running
-		// summary instead of summarizing the slice alone — only the latest summary
-		// survives into BuildHistory, so a from-scratch summary would lose earlier
-		// facts. (pi's iterative update-summary.)
-		userContent := transcript
-		if strings.TrimSpace(previousSummary) != "" {
-			userContent = "## Running summary so far\n" + strings.TrimSpace(previousSummary) +
-				"\n\n## New conversation since that summary\n" + transcript +
-				"\n\nUpdate the running summary above so it preserves everything it already captured and folds in the new conversation. Output only the updated running summary."
-		}
-		resp, err := prov.Chat(sctx, agentcore.ChatRequest{
-			Model: model, Temperature: 0.2, MaxTokens: 1024,
-			Messages: []agentcore.Message{
-				{Role: agentcore.RoleSystem, Content: compactionSystem},
-				{Role: agentcore.RoleUser, Content: userContent},
-			},
-		})
-		if err != nil {
-			return "", err
-		}
-		return strings.TrimSpace(resp.Message.Content), nil
-	}
+	_, _ = compactPiConversation(wctx, s.runner.Store, opts.ConversationID,
+		s.runner.RunTierWindow(wctx, opts.ProjectID), false, s.piSummarizer(opts.ProjectID))
 }
 
 // compactionSystem instructs the cheap tier to compress an older slice of the
@@ -536,50 +423,6 @@ func (s *ChatService) summarizer(projectID string) func(context.Context, string,
 const compactionSystem = `You are compacting the earlier part of an analytics assistant conversation so it can be dropped from the model's live context without losing meaning. ` +
 	`Write a faithful running summary that preserves: the user's goals and questions, every concrete data finding or number the assistant reported, decisions made, and any open/unfinished threads. ` +
 	`Be concise but lossless on facts. Do not invent anything. Output the summary only, no preamble.`
-
-// classifySystem instructs the cheap tier to act as the agent's front desk:
-// decide whether the message needs the user's product data, and for small talk
-// write the reply itself in one shot (saving a second round trip).
-const classifySystem = `You are the friendly front desk of an analytics assistant for a non-technical product person. ` +
-	`Decide whether the user's latest message needs their product DATA (metrics, funnels, retention, traffic, events, charts, tracking plans, "what should we track", activation, "how many", "which", "why did X change", "what should we do next") ` +
-	`or is SMALL TALK / greeting / thanks / meta ("hi", "what can you do", "who are you", "thanks").
-
-Tracking, instrumentation, activation, weakest-step, and "what should we measure" questions are DATA — never small talk.
-
-Reply ONLY with a compact JSON object, no prose, no code fences:
-{"route":"data"} when the message needs their analytics data, or
-{"route":"smalltalk","reply":"<a warm, brief, human reply>"} for small talk or meta.
-
-For smalltalk replies: sound like a helpful human teammate, one or two sentences, no jargon, and gently invite a real question about their product when it fits. Never invent data.`
-
-// classifyTurn routes a turn on the project's cheap (lite) tier. It returns a
-// ready reply only for small talk; on any provider/parse failure it
-// conservatively routes to data — better to do the analytics work than to wrongly
-// brush off a real question. A CheapProvider error (disabled agent / no key) is a
-// hard error so the caller degrades to a setup prompt rather than a dead end.
-func (s *ChatService) classifyTurn(ctx context.Context, projectID string, history []agentcore.Message, message string) (chatDecision, error) {
-	prov, model, err := s.runner.CheapProvider(ctx, projectID)
-	if err != nil {
-		return chatDecision{}, err
-	}
-
-	msgs := []agentcore.Message{{Role: agentcore.RoleSystem, Content: classifySystem}}
-	msgs = append(msgs, recentHistory(history, 6)...)
-	msgs = append(msgs, agentcore.Message{Role: agentcore.RoleUser, Content: message})
-
-	resp, err := prov.Chat(ctx, agentcore.ChatRequest{
-		Model: model, Messages: msgs, Temperature: 0.2, MaxTokens: 400,
-	})
-	if err != nil {
-		return chatDecision{Route: routeData}, nil // conservative fallback
-	}
-
-	route, reply := decodeDecision(resp.Message.Content)
-	if route == routeSmallTalk && reply != "" {
-		return chatDecision{Route: routeSmallTalk, Reply: reply, Usage: resp.Usage}, nil
-	}
-	return chatDecision{Route: routeData, Usage: resp.Usage}, nil
-}
 
 // handleData runs a delegated analytics turn through the general agent: it
 // narrates friendly progress derived from the raw tool trace (deduped so repeated
@@ -642,7 +485,7 @@ func (s *ChatService) handleData(ctx context.Context, req chatWork, sink agentco
 
 	opts := RunOptions{
 		ProjectID: req.ProjectID, AgentID: req.AgentID, Trigger: "chat", Prompt: req.Message, InputID: req.InputID,
-		History: req.History, SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
+		SessionID: req.SessionID, OnRunID: onRunID, Goal: req.Goal,
 		ReasoningEffort: req.ReasoningEffort,
 		ReadOnly:        req.ReadOnly,
 		ResumeFromRunID: req.ResumeFromRunID,

@@ -8,12 +8,12 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 func TestPiRunnerNativeTraceRecordsEveryParentAndChildCall(t *testing.T) {
-	ctx := observe.WithTraceID(piSessionContext(t), "root-run")
+	ctx := llm.WithTraceID(piSessionContext(t), "root-run")
 	var parents, children atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct{ Messages []json.RawMessage }
@@ -95,7 +95,7 @@ func TestPiTraceSinkPanicDoesNotChangeNativeResult(t *testing.T) {
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	var calls atomic.Int32
-	p.Tracer = observe.SinkFunc(func(observe.TraceRecord) { calls.Add(1); panic("observer failed") })
+	p.Tracer = llm.SinkFunc(func(llm.TraceRecord) { calls.Add(1); panic("observer failed") })
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { piChildSSE(w, "", "", "still done") }))
 	defer server.Close()
 	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))

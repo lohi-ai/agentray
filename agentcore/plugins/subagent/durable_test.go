@@ -2,195 +2,121 @@ package subagent_test
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/ai"
 )
 
-// durableSubagentAgent wires a delegation-enabled agent whose run is durable,
-// so spawned children get deterministic durable sessions of their own.
-func durableSubagentAgent(t *testing.T, store agentcore.SessionStore, sessionID string, script ...agentcore.ChatResponse) *agentcore.Agent {
+// The plugin binds governed forks to the native session host. Journal recovery,
+// completed-child reattachment and interrupted-child resume are exercised by
+// internal/runtime/pi_children_integration_test.go against the actual host.
+func durableParent(t *testing.T, settings subagent.Plugin) *agentcore.Agent {
 	t.Helper()
-	agent, err := agentcore.New(agentcore.Config{
-		Provider:   agentcore.NewFauxProvider(script...),
-		Model:      "faux-1",
-		Tools:      agentcore.NewToolSet(&echoTool{name: "echo"}),
-		Policy:     agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
-		Extensions: []agentcore.ExtensionFactory{subagent.SelfOnly()},
-		Session:    store,
-		SessionID:  sessionID,
-	})
+	a, err := agentcore.New(agentcore.Config{NativeProvider: nativeProvider(ai.ScriptedStream()), Model: "test", Session: agentcore.NewMemorySessionStore(), SessionID: "parent", Policy: agentcore.NewAllowList(subagent.ToolSpawnSubagent), Extensions: []agentcore.ExtensionFactory{settings}})
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatal(err)
 	}
-	return agent
+	return a
 }
 
-// TestSubagentChildSessionDurable verifies a durable parent gives its child a
-// durable session at the deterministic ID parentSessionID+"/"+toolCallID, whose
-// log reduces to the child's completed run — the record Lab needs to inspect
-// parent/child run trees.
-func TestSubagentChildSessionDurable(t *testing.T) {
-	store := agentcore.NewMemorySessionStore()
-	agent := durableSubagentAgent(t, store, "p1",
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"echo banana and report"}`),
-		AssistantToolCall("c2", "echo", `{"text":"banana"}`),
-		agentcore.AssistantText("the echo returned: banana"),
-		agentcore.AssistantText("child reported: banana"),
-	)
-	if _, err := agent.Prompt(context.Background(), "delegate"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	childLog, err := store.Log(context.Background(), "p1/c1")
+func executeSpawn(t *testing.T, host *agentcore.PiToolHost, scope, args string) agentcore.PiToolOutcome {
+	t.Helper()
+	ctx := agentcore.WithToolInvocationScope(context.Background(), scope)
+	params, _ := json.Marshal(map[string]any{"toolCallId": "reused-call", "toolName": subagent.ToolSpawnSubagent, "args": json.RawMessage(args)})
+	_, audit, err := host.Execute(ctx, params, nil)
 	if err != nil {
-		t.Fatalf("child log: %v", err)
+		t.Fatal(err)
 	}
-	if len(childLog) == 0 {
-		t.Fatal("child ran without a durable session at p1/c1")
+	return audit
+}
+
+func TestDurableChildIdentityUsesPhysicalInvocation(t *testing.T) {
+	var sessions []string
+	settings := subagent.Plugin{RunFork: func(ctx context.Context, child *agentcore.Agent, req subagent.ForkRequest, _ agentcore.StreamSink) (agentcore.RunResult, error) {
+		key, ok := agentcore.IdempotencyKey(ctx)
+		if !ok || req.SessionID != "parent/"+key || child.SessionID() != req.SessionID || !child.IsDurable() || agentcore.DelegationDepth(ctx) != 1 {
+			t.Errorf("fork lost native identity/depth: key=%q request=%+v child=%s", key, req, child.SessionID())
+		}
+		sessions = append(sessions, req.SessionID)
+		return agentcore.RunResult{Final: "child answer", StopReason: "stop"}, nil
+	}}
+	host, err := durableParent(t, settings).OpenPiTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	rs := agentcore.ReduceSession(childLog)
-	if !rs.Completed {
-		t.Fatalf("child log must reduce Completed; entries=%d", len(childLog))
+	defer host.Close()
+	for _, scope := range []string{"effect-one", "effect-two", "effect-one"} {
+		if audit := executeSpawn(t, host, scope, `{"task":"inspect"}`); audit.Trace.Error != "" {
+			t.Fatal(audit.Trace.Error)
+		}
 	}
-	if got := lastAssistantText(rs.Messages); got != "the echo returned: banana" {
-		t.Fatalf("child log final = %q", got)
+	if len(sessions) != 3 || sessions[0] == sessions[1] || sessions[0] != sessions[2] {
+		t.Fatalf("provider ID confused new invocation with replay: %v", sessions)
 	}
 }
 
-// TestSubagentReattachSkipsRerun pins the replay contract: a spawn call
-// re-issued with the same (parent session, call ID) — what RecoverSession does
-// after a parent crash — must return the completed child's recorded answer
-// without re-running it (no duplicate spend or side effects). The second run's
-// script contains NO child responses, so a re-run would derail the script.
-func TestSubagentReattachSkipsRerun(t *testing.T) {
-	store := agentcore.NewMemorySessionStore()
-	first := durableSubagentAgent(t, store, "p1",
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"echo banana and report"}`),
-		AssistantToolCall("c2", "echo", `{"text":"banana"}`),
-		agentcore.AssistantText("the echo returned: banana"),
-		agentcore.AssistantText("child reported: banana"),
-	)
-	if _, err := first.Prompt(context.Background(), "delegate"); err != nil {
-		t.Fatalf("first Prompt: %v", err)
-	}
-
-	// The replayed parent process: same store, same session, same call ID.
-	second := durableSubagentAgent(t, store, "p1",
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"echo banana and report"}`),
-		agentcore.AssistantText("child reported again: banana"),
-	)
-	res, err := second.Prompt(context.Background(), "delegate")
-	if err != nil {
-		t.Fatalf("second Prompt: %v", err)
-	}
-	if res.Final != "child reported again: banana" {
-		t.Fatalf("final = %q", res.Final)
-	}
-	var spawnResult string
-	for _, m := range res.Messages {
-		if m.Role == agentcore.RoleTool && m.Name == subagent.ToolSpawnSubagent {
-			spawnResult = m.Content
-		}
-	}
-	if spawnResult != "the echo returned: banana" {
-		t.Fatalf("reattach must return the recorded child answer, got %q", spawnResult)
+func TestDurableChildRequiresNativeHostAndRecordedInvocation(t *testing.T) {
+	for _, mode := range []string{"missing host", "missing invocation"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			settings := subagent.Plugin{}
+			if mode == "missing invocation" {
+				settings.RunFork = func(context.Context, *agentcore.Agent, subagent.ForkRequest, agentcore.StreamSink) (agentcore.RunResult, error) {
+					calls++
+					return agentcore.RunResult{}, nil
+				}
+			}
+			parent := durableParent(t, settings)
+			ext, err := settings.BeginRun(context.Background(), agentcore.RunInfo{Agent: parent, Durable: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tool := ext.(agentcore.ToolContributor).Tools()[0]
+			_, err = tool.Run(context.Background(), `{"task":"inspect"}`)
+			if err == nil || calls != 0 || !strings.Contains(err.Error(), "requires") {
+				t.Fatalf("unsafe durable fallback: calls=%d err=%v", calls, err)
+			}
+		})
 	}
 }
 
-// TestSubagentResumesInterruptedChild verifies a spawn call replayed against a
-// child log that crashed mid-run RESUMES that child from its own history — the
-// recovered transcript (dangling call closed with an interrupted note) reaches
-// the model, and the seeds are not persisted twice.
-func TestSubagentResumesInterruptedChild(t *testing.T) {
-	ctx := context.Background()
-	store := agentcore.NewMemorySessionStore()
-	// Hand-build the crashed child log: the seed task and an assistant turn whose
-	// echo call never got a result (the process died mid-tool).
-	for _, e := range []agentcore.SessionEntry{
-		{Kind: agentcore.EntryMessage, Message: &agentcore.Message{Role: agentcore.RoleUser, Content: "echo banana and report"}},
-		{Kind: agentcore.EntryMessage, Message: &agentcore.Message{Role: agentcore.RoleAssistant, ToolCalls: []agentcore.ToolCall{{ID: "x1", Name: "echo", Arguments: `{"text":"banana"}`}}}},
-	} {
-		if err := store.Append(ctx, "p1/c1", e); err != nil {
-			t.Fatal(err)
+func TestDurableSchemaCorrectionPassesOriginalNativeCheckpoint(t *testing.T) {
+	const opaque = `{"messages":[{"role":"assistant","opaque":"preserve-me"}]}`
+	var firstID string
+	calls := 0
+	settings := subagent.Plugin{RunFork: func(_ context.Context, _ *agentcore.Agent, req subagent.ForkRequest, _ agentcore.StreamSink) (agentcore.RunResult, error) {
+		calls++
+		if calls == 1 {
+			firstID = req.SessionID
+			return agentcore.RunResult{Final: "not JSON", NativeState: json.RawMessage(opaque), NativeRevision: "test-revision", Messages: []agentcore.Message{{Role: agentcore.RoleAssistant, Content: "display-only"}}}, nil
 		}
-	}
-
-	provider := agentcore.NewFauxProvider(
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"echo banana and report"}`),
-		// Child resume turn: sees the recovered transcript, answers directly.
-		agentcore.AssistantText("recovered: banana was already echoed"),
-		agentcore.AssistantText("child recovered fine"),
-	)
-	agent, err := agentcore.New(agentcore.Config{
-		Provider:   provider,
-		Model:      "faux-1",
-		Tools:      agentcore.NewToolSet(&echoTool{name: "echo"}),
-		Policy:     agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
-		Extensions: []agentcore.ExtensionFactory{subagent.SelfOnly()},
-		Session:    store,
-		SessionID:  "p1",
-	})
+		if req.SessionID != firstID+"/retry" || req.Previous == nil || string(req.Previous.NativeState) != opaque || req.Previous.NativeRevision != "test-revision" || !strings.Contains(req.Prompt, "failed output_schema validation") {
+			t.Errorf("correction rebuilt or lost native state: %+v", req)
+		}
+		return agentcore.RunResult{Final: `{"fruit":"banana"}`, StopReason: "stop"}, nil
+	}}
+	host, err := durableParent(t, settings).OpenPiTools(context.Background())
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatal(err)
 	}
-	res, err := agent.Prompt(ctx, "delegate")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if res.Final != "child recovered fine" {
-		t.Fatalf("final = %q", res.Final)
-	}
-
-	// The child's provider request carried the recovered history: the original
-	// task plus the synthesized interrupted note closing the dangling call.
-	childReq := provider.Recorded[1]
-	var sawTask, sawInterrupted bool
-	for _, m := range childReq.Messages {
-		if strings.Contains(m.Content, "echo banana and report") {
-			sawTask = true
-		}
-		if m.Role == agentcore.RoleTool && strings.Contains(m.Content, "[interrupted:") {
-			sawInterrupted = true
-		}
-	}
-	if !sawTask || !sawInterrupted {
-		t.Fatalf("resumed child missing recovered history (task=%v interrupted=%v): %+v", sawTask, sawInterrupted, childReq.Messages)
-	}
-
-	// The child log now completes, and the seed task appears exactly once —
-	// resume must not double-persist the history it recovered.
-	childLog, _ := store.Log(ctx, "p1/c1")
-	rs := agentcore.ReduceSession(childLog)
-	if !rs.Completed {
-		t.Fatal("resumed child log must reduce Completed")
-	}
-	seeds := 0
-	for _, e := range childLog {
-		if e.Kind == agentcore.EntryMessage && e.Message != nil && e.Message.Content == "echo banana and report" {
-			seeds++
-		}
-	}
-	if seeds != 1 {
-		t.Fatalf("seed task persisted %d times, want 1", seeds)
+	defer host.Close()
+	audit := executeSpawn(t, host, "effect", `{"task":"name a fruit","output_schema":`+fruitSchema+`}`)
+	if calls != 2 || audit.Trace.Error != "" {
+		t.Fatalf("correction failed: calls=%d audit=%+v", calls, audit)
 	}
 }
 
-// TestSubagentStorelessParentKeepsEphemeralChild pins the old behavior for
-// non-durable runs: no session store, no child log, everything still works.
 func TestSubagentStorelessParentKeepsEphemeralChild(t *testing.T) {
 	agent, _ := subagentAgent(t, &subagent.Plugin{},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"echo banana and report"}`),
 		AssistantToolCall("c2", "echo", `{"text":"banana"}`),
-		agentcore.AssistantText("the echo returned: banana"),
-		agentcore.AssistantText("child reported: banana"),
-	)
+		nativeAnswer("the echo returned: banana"), nativeAnswer("child reported: banana"))
 	res, err := agent.Prompt(context.Background(), "delegate")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if res.Final != "child reported: banana" {
-		t.Fatalf("final = %q", res.Final)
+	if err != nil || res.Final != "child reported: banana" {
+		t.Fatalf("ephemeral child: %q %v", res.Final, err)
 	}
 }

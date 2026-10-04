@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
 	"sort"
 	"strings"
 	"sync"
@@ -19,20 +20,17 @@ type Agent struct {
 	// extensions are the per-run capability providers installed by plugins. The
 	// loop dispatches to them through the interfaces in extension.go and never
 	// names one, so removing a plugin removes its behavior with no core edit.
-	extensions []ExtensionFactory
-	// driver runs the turn loop. It is a seam like every other capability: the
-	// built-in reason→act driver is installed by DriverPlugin, and a composition
-	// may register a different control flow without changing anything else.
-	driver   Driver
-	provider LLMProvider
-	model    string
-	tools    *ToolSet
-	policy   Policy
-	hooks    Hooks
-	memory   MemoryStore // optional; nil disables recall/persistence
-	def      AgentDefinition
-	limits   Limits
-	env      Env
+	extensions     []ExtensionFactory
+	provider       LLMProvider
+	nativeProvider *ai.FallbackProvider
+	model          string
+	tools          *ToolSet
+	policy         Policy
+	hooks          Hooks
+	memory         MemoryStore // optional; nil disables recall/persistence
+	def            AgentDefinition
+	limits         Limits
+	env            Env
 	// compaction tunes how the loop summarizes a long transcript once it
 	// approaches limits.MaxContextTokens.
 	compaction CompactionSettings
@@ -287,6 +285,8 @@ type TurnState struct {
 // Config wires an Agent. Provider, Model, Tools, and Policy are required; the
 // rest have safe defaults (DenyAll policy, no memory, DefaultLimits, DefaultEnv).
 type Config struct {
+	// NativeProvider executes through engine with AI-owned fallback.
+	NativeProvider    *ai.FallbackProvider
 	Provider          LLMProvider
 	Model             string
 	ModelCapabilities ModelCapabilities
@@ -438,7 +438,7 @@ type Config struct {
 // Registry through the same exported setters the plugin packages use, and the
 // Agent is built from that Registry. Config stays the ergonomic front door for
 // the common case; reach for Build with plugins from agentcore/plugins/... when
-// you need to REPLACE a seam (a different Driver, your own governance plugin)
+// you need to REPLACE a seam (your own governance plugin)
 // rather than configure one.
 //
 // The permission gate is installed by Registry.UsePolicy at PriorityGate, so it
@@ -452,27 +452,26 @@ func New(cfg Config) (*Agent, error) {
 // the result. task seeds skill selection and memory recall (defaults to the
 // user input).
 func (a *Agent) Prompt(ctx context.Context, userInput string) (RunResult, error) {
-	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput, Directive: true}}, userInput, nil)
+	return a.RunNative(ctx, NativeRun{Input: []Message{{Role: RoleUser, Content: userInput, Directive: true}}, Task: userInput})
 }
 
 // PromptStream runs the same turn-loop but streams the assistant's tokens and
 // tool-call traces to sink as they are produced, for a live (SSE) viewer. The
 // returned RunResult is identical to Prompt's — streaming is additive.
 func (a *Agent) PromptStream(ctx context.Context, userInput string, sink StreamSink) (RunResult, error) {
-	return a.runLoop(ctx, []Message{{Role: RoleUser, Content: userInput, Directive: true}}, userInput, sink)
+	return a.RunNative(ctx, NativeRun{Input: []Message{{Role: RoleUser, Content: userInput, Directive: true}}, Task: userInput, Sink: sink})
 }
 
-// Continue resumes from an existing message history (a working-memory thread).
+// Continue submits host-authored input to the native engine. To resume provider
+// history, pass the prior NativeState to RunNative instead of replaying Messages.
 func (a *Agent) Continue(ctx context.Context, history []Message, task string) (RunResult, error) {
-	return a.runLoop(ctx, history, task, nil)
+	return a.RunNative(ctx, NativeRun{Input: history, Task: task})
 }
 
-// ContinueStream resumes from an existing message history and streams the turn
-// (tokens + tool traces) to sink, exactly like PromptStream does for a fresh
-// prompt. Used by the chat path to thread prior conversation turns into a
-// streamed reply.
+// ContinueStream submits host-authored input and streams the native run.
+// Provider history resumes through RunNative with its opaque checkpoint.
 func (a *Agent) ContinueStream(ctx context.Context, history []Message, task string, sink StreamSink) (RunResult, error) {
-	return a.runLoop(ctx, history, task, sink)
+	return a.RunNative(ctx, NativeRun{Input: history, Task: task, Sink: sink})
 }
 
 // Steer queues a mid-run correction (pi's steer()): the loop drains it at the
@@ -565,11 +564,6 @@ func (a *Agent) Describe() string {
 		}
 	}
 
-	driver := "-"
-	if a.driver != nil {
-		driver = a.driver.Name()
-	}
-	line("driver", driver)
 	line("model", a.model)
 	if n := len(a.escalation); n > 0 {
 		rungs := make([]string, 0, n)
@@ -639,9 +633,9 @@ func (a *Agent) Describe() string {
 	// Surface. Tool order is the order the model is shown, so it is NOT sorted.
 	line("tools", strings.Join(a.tools.Names(), ", "))
 	h := a.hooks
-	line("hooks", fmt.Sprintf("before=%d after=%d context=%d turn_start=%d turn_end=%d message_end=%d provider=%d agent_end=%d",
+	line("hooks", fmt.Sprintf("before=%d after=%d context=%d turn_start=%d turn_end=%d message_end=%d agent_end=%d",
 		len(h.Before), len(h.After), len(h.Context), len(h.TurnStart), len(h.TurnEnd),
-		len(h.MessageEnd), len(h.AfterProviderResponse), len(h.AgentEnd)))
+		len(h.MessageEnd), len(h.AgentEnd)))
 	line("hook_error_policy", string(h.ErrorPolicy))
 
 	return b.String()

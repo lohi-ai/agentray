@@ -21,7 +21,7 @@ func TestPiRunnerRejectsUnsupportedMigrationWithoutGoFallback(t *testing.T) {
 		{"malformed native history", RunOptions{NativeHistory: json.RawMessage(`{}`)}, "message array"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
+			r := NewRunner(nil)
 			// Empty build parameters would fail Build. The migration error must win
 			// before either driver, provider, or tool host can be invoked.
 			_, err := r.runModelLoop(context.Background(), BuildParams{}, tc.opts, ModelTier{}, nil)
@@ -29,9 +29,5 @@ func TestPiRunnerRejectsUnsupportedMigrationWithoutGoFallback(t *testing.T) {
 				t.Fatalf("wrong dispatch: %v", err)
 			}
 		})
-	}
-	r := NewRunner(nil)
-	if _, err := r.runModelLoop(context.Background(), BuildParams{}, RunOptions{NativeHistory: json.RawMessage(`[]`)}, ModelTier{}, nil); err == nil || !strings.Contains(err.Error(), "requires the Pi runtime") {
-		t.Fatalf("legacy loop consumed native history: %v", err)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 // Only the serial completed-turn hooks write this state. RunPi reads it after
@@ -135,7 +136,7 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 		if err != nil {
 			return err
 		}
-		extra, err := piHostMessages(first.Messages)
+		extra, err := nativehost.InputMessages(first.Messages)
 		if err != nil {
 			return err
 		}
@@ -146,7 +147,7 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 			return err
 		}
 		if first.DisableTools {
-			if _, err := session.agent.Call(ctx, "setState", json.RawMessage(`{"tools":[]}`)); err != nil {
+			if err := session.agent.setState(ctx, json.RawMessage(`{"tools":[]}`)); err != nil {
 				return err
 			}
 		}
@@ -172,7 +173,7 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 			if err := json.Unmarshal(params, &turn); err != nil {
 				return nil, err
 			}
-			message, err := projectPiMessage(turn.Message)
+			message, err := nativehost.ProjectMessage(turn.Message)
 			if err != nil {
 				return nil, err
 			}
@@ -218,7 +219,7 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 					return nil, errors.New("parked turn has no durable pending question")
 				}
 				projection.mu.Lock()
-				changed := !samePiJSON(projection.result.Question, question)
+				changed := !nativehost.SameJSON(projection.result.Question, question)
 				projection.result.Question = question
 				projection.mu.Unlock()
 				if changed {
@@ -265,7 +266,7 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 			pending := append(life.pending, prepared.Messages...)
 			life.pending = nil
 			life.mu.Unlock()
-			messages, err := piHostMessages(pending)
+			messages, err := nativehost.InputMessages(pending)
 			if err != nil {
 				return nil, err
 			}
@@ -297,48 +298,4 @@ func bindPiHostLifecycle(ctx context.Context, cfg *PiRunConfig, projection *piRu
 		}
 	}
 	return life, nil
-}
-
-// These are newly authored host instructions, never provider/history messages.
-func piHostMessages(messages []agentcore.Message) ([]json.RawMessage, error) {
-	result := make([]json.RawMessage, 0, len(messages))
-	for _, message := range messages {
-		if message.Role != agentcore.RoleSystem && message.Role != agentcore.RoleUser {
-			return nil, fmt.Errorf("Pi host injection cannot impersonate role %q", message.Role)
-		}
-		if len(message.ToolCalls) > 0 || message.ToolCallID != "" {
-			return nil, errors.New("Pi host injection cannot contain tool calls/results")
-		}
-		var content any = message.Content
-		if len(message.ContentParts) > 0 {
-			parts := make([]any, 0, len(message.ContentParts)+1)
-			if message.Content != "" {
-				parts = append(parts, map[string]any{"type": "text", "text": message.Content})
-			}
-			for _, part := range message.ContentParts {
-				switch part.Type {
-				case agentcore.ContentPartText:
-					parts = append(parts, map[string]any{"type": "text", "text": part.Text})
-				case agentcore.ContentPartImage:
-					if message.Role == agentcore.RoleSystem {
-						return nil, errors.New("native system messages cannot contain images")
-					}
-					parts = append(parts, map[string]any{"type": "image", "mimeType": part.MIMEType, "data": part.Data})
-				default:
-					return nil, fmt.Errorf("unsupported host content %q", part.Type)
-				}
-			}
-			content = parts
-		}
-		value := map[string]any{"role": message.Role, "content": content, "timestamp": time.Now().UnixMilli()}
-		if message.InputID != "" {
-			value["agentrayInputId"] = message.InputID
-		}
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, raw)
-	}
-	return result, nil
 }

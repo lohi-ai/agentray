@@ -70,7 +70,7 @@ func TestNativeLadderToolCapabilitiesPreserveHostCatalogue(t *testing.T) {
 			if mode == "host-empty" {
 				tools = json.RawMessage(`[]`)
 			}
-			base := agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"tools": tools}}), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			base := NativeAgentConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"tools": tools}}), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "tool" {
 					return nil, fmt.Errorf("unexpected host callback %s", method)
 				}

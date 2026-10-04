@@ -355,3 +355,51 @@ func TestJobs_NoticeOnByDefault(t *testing.T) {
 		t.Fatal("SuppressCompletionNotice must turn notices off")
 	}
 }
+
+func TestLocalJobsBoundConcurrentWorkAndFenceOwners(t *testing.T) {
+	store := NewLocalJobStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	work := JobSpec{Tool: "test", Run: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }}
+	for range 15 {
+		if _, err := store.Start(ctx, "owner", work); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Start(ctx, "owner", work); err == nil {
+		t.Fatal("concurrent capacity not enforced")
+	}
+	other, err := store.Start(ctx, "other", work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get("owner", other.ID); err == nil {
+		t.Fatal("foreign job visible")
+	}
+	store.CancelAll("owner")
+	for _, job := range store.List("owner") {
+		if _, err := store.Wait(context.Background(), "owner", job.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.Get("other", other.ID)
+	if err != nil || got.State != JobRunning {
+		t.Fatal("cancellation crossed ownership")
+	}
+	store.CancelAll("other")
+	_, _ = store.Wait(context.Background(), "other", other.ID)
+}
+
+func TestFinishWithPendingJobReturnsControlAfterBoundedWait(t *testing.T) {
+	run := beginJobs(t, Plugin{}, "owner")
+	run.maxWait = time.Millisecond
+	defer run.CloseRun()
+	_, err := run.store.Start(context.Background(), run.owner, JobSpec{Run: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := run.TurnStopping(context.Background(), agentcore.StopInfo{})
+	if !decision.Continue || decision.StopReason != "" || len(decision.Inject) != 1 {
+		t.Fatalf("pending work accepted as final: %+v", decision)
+	}
+}

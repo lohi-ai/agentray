@@ -9,24 +9,29 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"github.com/lohi-ai/agentray/telemetry"
 )
 
+// NativeCallback runs a provider, tool or hook in the host. Calls may be concurrent.
+type NativeCallback func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error)
+
 // NativeAgentConfig keeps the existing host JSON/callback vocabulary while
 // executing the ported Agent directly in Go. StreamFn overrides the built-in Go
 // provider dispatcher in streamMode=native; callback mode uses Callback instead.
 type NativeAgentConfig struct {
 	Options  json.RawMessage
-	Callback agentcore.PiCallback
+	Callback NativeCallback
 	OnEvent  func(context.Context, json.RawMessage) error
 	// OnTrace enables request tracing. Delivery is passive and flushed at run end.
-	OnTrace  func(context.Context, json.RawMessage)
-	StreamFn engine.StreamFn
-	Now      func() int64
+	OnTrace func(context.Context, json.RawMessage)
+	// OnRequest observes the final provider view after transforms/conversion.
+	// The observer must not mutate the native transcript.
+	OnRequest func(context.Context, ai.TranscriptContext) error
+	StreamFn  engine.StreamFn
+	Now       func() int64
 	// Set only by the native session host after binding its model ladder.
 	admitRequest engine.AdmitRequestFn
 }
@@ -36,7 +41,6 @@ type NativeAgentConfig struct {
 type NativeAgent struct {
 	agent         *engine.Agent
 	config        NativeAgentConfig
-	options       engine.AgentConfig
 	ctx           context.Context
 	cancel        context.CancelFunc
 	recorder      *telemetry.InMemory
@@ -63,7 +67,6 @@ func NewNativeAgent(ctx context.Context, config NativeAgentConfig) (*NativeAgent
 		cancel()
 		return nil, err
 	}
-	a.options = options.AgentConfig
 	a.agent, err = engine.NewAgent(options)
 	if err != nil {
 		cancel()
@@ -273,82 +276,13 @@ func (a *NativeAgent) Close() error {
 	return err
 }
 
-// Call keeps the session adapter's JSON operations local. It never serializes
-// a command to another process. Mutating settings does not replace callbacks.
-func (a *NativeAgent) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+func (a *NativeAgent) setState(ctx context.Context, raw json.RawMessage) error {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := a.ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	switch method {
-	case "state":
-		return a.State(ctx)
-	case "prompt":
-		var value struct {
-			Input  json.RawMessage
-			Images []ai.ContentBlock
-		}
-		if err := json.Unmarshal(params, &value); err != nil {
-			return nil, err
-		}
-		return nil, a.run(ctx, false, value.Input, value.Images)
-	case "continue":
-		return nil, a.Continue(ctx)
-	case "waitForIdle":
-		return nil, a.wait(ctx)
-	case "telemetry":
-		return json.Marshal(a.recorder.GetSpans())
-	case "abort":
-		a.mu.Lock()
-		if a.runCancel != nil {
-			a.runCancel()
-		}
-		a.mu.Unlock()
-		a.agent.Abort()
-		return nil, nil
-	case "reset":
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.running != nil {
-			return nil, errors.New("Agent is already processing. Wait for completion before resetting.")
-		}
-		return nil, a.agent.Reset()
-	case "clearSteeringQueue":
-		a.agent.ClearSteeringQueue()
-		return nil, nil
-	case "clearFollowUpQueue":
-		a.agent.ClearFollowUpQueue()
-		return nil, nil
-	case "clearAllQueues":
-		a.agent.ClearAllQueues()
-		return nil, nil
-	case "hasQueuedMessages":
-		return json.Marshal(a.agent.HasQueuedMessages())
-	case "peekQueuedMessages":
-		return json.Marshal(a.agent.PeekQueuedMessages())
-	case "steer", "followUp":
-		var message ai.Message
-		if err := json.Unmarshal(params, &message); err != nil {
-			return nil, err
-		}
-		if method == "steer" {
-			a.agent.Steer(&message)
-		} else {
-			a.agent.FollowUp(&message)
-		}
-		return nil, nil
-	case "setState":
-		return nil, a.setState(params)
-	case "configure":
-		return nil, a.configure(params)
-	default:
-		return nil, fmt.Errorf("Unknown method: %s", method)
-	}
-}
-
-func (a *NativeAgent) setState(raw json.RawMessage) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return err
@@ -396,41 +330,12 @@ func (a *NativeAgent) setState(raw json.RawMessage) error {
 	return nil
 }
 
-func (a *NativeAgent) configure(raw json.RawMessage) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return err
+func (a *NativeAgent) spans(ctx context.Context) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	next := a.options
-	for key, value := range fields {
-		var target any
-		switch key {
-		case "steeringMode":
-			target = &next.SteeringMode
-		case "followUpMode":
-			target = &next.FollowUpMode
-		case "sessionId":
-			target = &next.SessionID
-		case "thinkingBudgets":
-			target = &next.ThinkingBudgets
-		case "transport":
-			target = &next.Transport
-		case "maxRetryDelayMs":
-			target = &next.MaxRetryDelayMS
-		case "toolExecution":
-			target = &next.ToolExecution
-		default:
-			return fmt.Errorf("Unknown setting: %s", key)
-		}
-		if err := json.Unmarshal(value, target); err != nil {
-			return err
-		}
+	if err := a.ctx.Err(); err != nil {
+		return nil, err
 	}
-	if err := a.agent.Configure(next); err != nil {
-		return err
-	}
-	a.options = next
-	return nil
+	return json.Marshal(a.recorder.GetSpans())
 }

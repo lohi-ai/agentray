@@ -14,12 +14,12 @@ import (
 func (s *PiSession) openNativeAttempt(ctx context.Context, rung nativeBoundRung, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
 	request, err := s.nativeAttemptOptions(ctx, rung, options)
 	if err != nil {
-		return nil, &nativePreparationError{cause: err}
+		return nil, &ai.PreparationError{Cause: err}
 	}
-	if s.native == nil {
-		return nil, &nativePreparationError{cause: errors.New("native attempt requires an in-process agent")}
+	if s.agent == nil {
+		return nil, &ai.PreparationError{Cause: errors.New("native attempt requires an in-process agent")}
 	}
-	return s.native.observedProviderStream(rung.stream, true)(ctx, rung.model, transcript, request)
+	return s.agent.observedProviderStream(rung.stream, true)(ctx, rung.model, transcript, request)
 }
 
 func (s *PiSession) nativeAttemptOptions(ctx context.Context, rung nativeBoundRung, options map[string]any) (map[string]any, error) {

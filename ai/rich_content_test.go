@@ -5,21 +5,21 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
-func richToolMessage(id string) agentcore.Message {
-	return agentcore.Message{
-		Role: agentcore.RoleTool, ToolCallID: id, Name: "eval", Content: "plot ready",
-		ContentParts: []agentcore.ContentPart{{
-			Type: agentcore.ContentPartImage, MIMEType: "image/png", Data: "aW1hZ2U=", Detail: "high",
+func richToolMessage(id string) protocol.Message {
+	return protocol.Message{
+		Role: protocol.RoleTool, ToolCallID: id, Name: "eval", Content: "plot ready",
+		ContentParts: []protocol.ContentPart{{
+			Type: protocol.ContentPartImage, MIMEType: "image/png", Data: "aW1hZ2U=", Detail: "high",
 		}},
 	}
 }
 
 func TestOpenAIChatHoistsRichToolImagesAfterResultBatch(t *testing.T) {
 	p := NewOpenAIProvider("sk", "", DefaultCompat())
-	req := agentcore.ChatRequest{Model: "vision", Messages: []agentcore.Message{
+	req := protocol.ChatRequest{Model: "vision", Messages: []protocol.Message{
 		richToolMessage("c1"), richToolMessage("c2"),
 	}}
 	body := p.encode(req)
@@ -44,16 +44,16 @@ func TestOpenAIChatHoistsRichToolImagesAfterResultBatch(t *testing.T) {
 func TestResponsesAndCodexEncodeRichToolOutputNatively(t *testing.T) {
 	message := richToolMessage("c1")
 
-	responses := NewOpenAIResponsesProvider("sk", "").encode(agentcore.ChatRequest{
-		Model: "vision", Messages: []agentcore.Message{message},
+	responses := NewOpenAIResponsesProvider("sk", "").encode(protocol.ChatRequest{
+		Model: "vision", Messages: []protocol.Message{message},
 	})
 	rparts, ok := responses.Input[0].Output.([]responsesContent)
 	if !ok || len(rparts) != 2 || rparts[1].Type != "input_image" || rparts[1].Detail != "high" {
 		t.Fatalf("Responses output = %#v", responses.Input[0].Output)
 	}
 
-	codex := NewCodexProvider().encode(agentcore.ChatRequest{
-		Model: "vision", Messages: []agentcore.Message{message},
+	codex := NewCodexProvider().encode(protocol.ChatRequest{
+		Model: "vision", Messages: []protocol.Message{message},
 	})
 	cparts, ok := codex.Input[0].Output.([]codexContent)
 	if !ok || len(cparts) != 2 || cparts[1].Type != "input_image" || cparts[1].ImageURL != "data:image/png;base64,aW1hZ2U=" {
@@ -73,7 +73,7 @@ func TestResponsesAndCodexEncodeRichToolOutputNatively(t *testing.T) {
 
 func TestAnthropicEncodesRichToolOutputInsideToolResult(t *testing.T) {
 	p := NewAnthropicProvider("sk", "")
-	body := p.encode(agentcore.ChatRequest{Model: "vision", Messages: []agentcore.Message{richToolMessage("c1")}})
+	body := p.encode(protocol.ChatRequest{Model: "vision", Messages: []protocol.Message{richToolMessage("c1")}})
 	if len(body.Messages) != 1 || len(body.Messages[0].Content) != 1 {
 		t.Fatalf("Anthropic messages = %+v", body.Messages)
 	}

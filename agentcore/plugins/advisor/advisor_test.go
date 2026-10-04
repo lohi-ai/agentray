@@ -2,27 +2,41 @@ package advisor_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
+	"github.com/lohi-ai/agentray/ai"
 )
 
-// build wires an agent with the advisor plugin over a scripted provider.
-func build(t *testing.T, p advisor.Plugin, replies ...agentcore.ChatResponse) (*agentcore.Agent, *agentcore.FauxProvider) {
+type nativeRequests struct{ Recorded []ai.TranscriptContext }
+
+func nativeAnswer(text string) ai.Message {
+	return ai.Message{Role: "assistant", Model: "test", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: text})}
+}
+
+func provider(stream ai.StreamFn) *ai.FallbackProvider {
+	return &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: stream}}}
+}
+
+// build exercises review policy through the real native engine and records
+// the final provider view, including any corrective host input.
+func build(t *testing.T, p advisor.Plugin, replies ...ai.Message) (*agentcore.Agent, *nativeRequests) {
 	t.Helper()
-	faux := agentcore.NewFauxProvider(replies...)
-	agent, err := agentcore.New(agentcore.Config{
-		Provider:   faux,
-		Model:      "test",
-		Extensions: []agentcore.ExtensionFactory{p},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	recorded := &nativeRequests{}
+	script := ai.ScriptedStream(replies...)
+	stream := func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		recorded.Recorded = append(recorded.Recorded, view)
+		return script(ctx, model, view, options)
 	}
-	return agent, faux
+	agent, err := agentcore.New(agentcore.Config{NativeProvider: provider(stream), Model: "test", Extensions: []agentcore.ExtensionFactory{p}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agent, recorded
 }
 
 func TestConcernReopensRunAndAgentResolvesIt(t *testing.T) {
@@ -34,8 +48,8 @@ func TestConcernReopensRunAndAgentResolvesIt(t *testing.T) {
 			return nil, nil
 		},
 	},
-		agentcore.AssistantText("revenue was 4.2M"),
-		agentcore.AssistantText("revenue was 3.1M (corrected: the two queries used different filters)"),
+		nativeAnswer("revenue was 4.2M"),
+		nativeAnswer("revenue was 3.1M (corrected: the two queries used different filters)"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "what was revenue")
@@ -49,13 +63,13 @@ func TestConcernReopensRunAndAgentResolvesIt(t *testing.T) {
 		t.Fatalf("provider calls = %d, want 2 (the answer, then the resolution turn)", len(faux.Recorded))
 	}
 	var injected string
-	for _, m := range faux.Recorded[1].Messages {
-		if m.Role == agentcore.RoleUser && strings.Contains(m.Content, "<advisory") {
-			injected = m.Content
+	for _, m := range faux.Recorded[1].Messages() {
+		if m.Role == "user" && m.Content.Text != nil && strings.Contains(*m.Content.Text, "<advisory") {
+			injected = *m.Content.Text
 		}
 	}
 	if injected == "" {
-		t.Fatalf("no advisory reached the reopened turn: %+v", faux.Recorded[1].Messages)
+		t.Fatalf("no advisory reached the reopened turn: %+v", faux.Recorded[1].Messages())
 	}
 	for _, want := range []string{
 		`severity="concern"`,
@@ -76,7 +90,7 @@ func TestNitDoesNotReopenTheRunButIsReported(t *testing.T) {
 			return []advisor.Note{{Text: "the second query could reuse the first CTE", Severity: advisor.SeverityNit}}, nil
 		},
 		OnNotes: func(_ context.Context, n []advisor.Note, _ bool) { reported = append(reported, n...) },
-	}, agentcore.AssistantText("done"))
+	}, nativeAnswer("done"))
 
 	res, err := agent.Prompt(context.Background(), "go")
 	if err != nil {
@@ -117,7 +131,7 @@ func TestANitRidingWithABlockerIsReportedAsDelivered(t *testing.T) {
 		OnNotes: func(_ context.Context, n []advisor.Note, delivered bool) {
 			got = append(got, record{notes: n, delivered: delivered})
 		},
-	}, agentcore.AssistantText("first"), agentcore.AssistantText("second"))
+	}, nativeAnswer("first"), nativeAnswer("second"))
 
 	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -138,7 +152,7 @@ func TestSilentReviewerAcceptsTheFinish(t *testing.T) {
 	agent, faux := build(t, advisor.Of(func(context.Context, advisor.Review) ([]advisor.Note, error) {
 		calls++
 		return nil, nil
-	}), agentcore.AssistantText("answer"))
+	}), nativeAnswer("answer"))
 
 	res, err := agent.Prompt(context.Background(), "go")
 	if err != nil {
@@ -155,7 +169,7 @@ func TestSilentReviewerAcceptsTheFinish(t *testing.T) {
 func TestReviewerErrorAcceptsTheFinish(t *testing.T) {
 	agent, faux := build(t, advisor.Of(func(context.Context, advisor.Review) ([]advisor.Note, error) {
 		return []advisor.Note{{Text: "ignored", Severity: advisor.SeverityBlocker}}, errors.New("provider down")
-	}), agentcore.AssistantText("answer"))
+	}), nativeAnswer("answer"))
 
 	res, err := agent.Prompt(context.Background(), "go")
 	if err != nil {
@@ -178,9 +192,9 @@ func TestRoundsAreCapped(t *testing.T) {
 			return []advisor.Note{{Text: "still wrong, round " + string(rune('a'+r.Round)), Severity: advisor.SeverityBlocker}}, nil
 		},
 	},
-		agentcore.AssistantText("try 1"),
-		agentcore.AssistantText("try 2"),
-		agentcore.AssistantText("try 3"),
+		nativeAnswer("try 1"),
+		nativeAnswer("try 2"),
+		nativeAnswer("try 3"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "go")
@@ -205,8 +219,8 @@ func TestRepeatedNoteIsDroppedSoARoundCannotSpin(t *testing.T) {
 			return []advisor.Note{{Text: "verify the totals", Severity: advisor.SeverityConcern}}, nil
 		},
 	},
-		agentcore.AssistantText("try 1"),
-		agentcore.AssistantText("try 2"),
+		nativeAnswer("try 1"),
+		nativeAnswer("try 2"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "go")
@@ -233,9 +247,9 @@ func TestEscalationGetsASecondTurn(t *testing.T) {
 			return []advisor.Note{{Text: "the totals do not add up", Severity: sev}}, nil
 		},
 	},
-		agentcore.AssistantText("try 1"),
-		agentcore.AssistantText("try 2"),
-		agentcore.AssistantText("try 3"),
+		nativeAnswer("try 1"),
+		nativeAnswer("try 2"),
+		nativeAnswer("try 3"),
 	)
 
 	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
@@ -257,8 +271,8 @@ func TestReviewerSeesTheConversationAndPriorNotes(t *testing.T) {
 			return nil, nil
 		},
 	},
-		agentcore.AssistantText("first"),
-		agentcore.AssistantText("second"),
+		nativeAnswer("first"),
+		nativeAnswer("second"),
 	)
 
 	if _, err := agent.Prompt(context.Background(), "the task"); err != nil {
@@ -285,7 +299,7 @@ func TestReviewerSeesTheConversationAndPriorNotes(t *testing.T) {
 }
 
 func TestNilReviewerIsInert(t *testing.T) {
-	agent, faux := build(t, advisor.Plugin{}, agentcore.AssistantText("answer"))
+	agent, faux := build(t, advisor.Plugin{}, nativeAnswer("answer"))
 	res, err := agent.Prompt(context.Background(), "go")
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
@@ -297,11 +311,11 @@ func TestNilReviewerIsInert(t *testing.T) {
 
 func TestBudgetWrapUpIsNotReviewed(t *testing.T) {
 	consulted := false
-	faux := agentcore.NewFauxProvider(agentcore.AssistantText("wrap-up"))
+	stream := ai.ScriptedStream(nativeAnswer("wrap-up"))
 	agent, err := agentcore.New(agentcore.Config{
-		Provider:   faux,
-		Model:      "test",
-		BudgetGate: func(context.Context, agentcore.Usage) bool { return true },
+		NativeProvider: provider(stream),
+		Model:          "test",
+		BudgetGate:     func(context.Context, agentcore.Usage) bool { return true },
 		Extensions: []agentcore.ExtensionFactory{advisor.Of(func(context.Context, advisor.Review) ([]advisor.Note, error) {
 			consulted = true
 			return []advisor.Note{{Text: "reopen", Severity: advisor.SeverityBlocker}}, nil

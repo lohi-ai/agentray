@@ -30,6 +30,9 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/telemetry"
+	"github.com/lohi-ai/agentray/telemetry/export"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 )
 
 const goalNudgeMarkerProbe = "[goal gate]"
@@ -102,6 +105,7 @@ func TestBench_AgentcoreIdleGame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 	start := time.Now()
+	ctx = telemetry.WithContext(ctx, export.New(func(batch export.Batch) { llm.RecordBatch(batch, obs.sink(), llm.Metadata{}) }))
 	res, err := agent.Prompt(ctx, string(problem))
 	wall := time.Since(start)
 	if err != nil {

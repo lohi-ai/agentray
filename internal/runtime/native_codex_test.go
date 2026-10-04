@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lohi-ai/agentray/agentcore"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -111,7 +111,7 @@ func TestNativeCodexCredentialRefreshAndSessionCleanup(t *testing.T) {
 }
 
 func TestNativeCodexRejectsMissingCredential(t *testing.T) {
-	_, err := NativeProviderStream(context.Background(), json.RawMessage(`{"id":"test","api":"openai-codex-responses","provider":"openai-codex"}`), ai.NormalizeContext(ai.Context{}), nil)
+	_, err := (ai.NativeProvider{}).Stream(context.Background(), json.RawMessage(`{"id":"test","api":"openai-codex-responses","provider":"openai-codex"}`), ai.NormalizeContext(ai.Context{}), nil)
 	if err == nil || err.Error() != "No API key for provider: openai-codex" {
 		t.Fatalf("got %v", err)
 	}
@@ -200,7 +200,7 @@ func TestNativeRunnerCodexPoolBindingAndRotation(t *testing.T) {
 			t.Fatal("credential persisted in native artifacts")
 		}
 	}
-	if _, _, err = tier.BindPi(agentcore.PiConfig{}, PiModelOptions{}); err == nil {
+	if _, _, err = tier.BindPi(NativeAgentConfig{}, PiModelOptions{}); err == nil {
 		t.Fatal("unbound worker path accepted account pool")
 	}
 }
@@ -208,7 +208,7 @@ func TestNativeRunnerCodexPoolBindingAndRotation(t *testing.T) {
 func TestNativeCodexPoolBindingKeepsModelAndCredentialBoundaries(t *testing.T) {
 	pool := &nativeCodexAccountSource{}
 	tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorOpenAICodex, Model: "test", BaseURL: "https://example.test", APIKey: ai.OAuthPoolKey, TokenSource: pool}}
-	cfg, _, err := tier.bindPi(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { t.Error("unexpected key refresh"); return "secret", nil }}, true)
+	cfg, _, err := tier.bindPi(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { t.Error("unexpected key refresh"); return "secret", nil }}, true)
 	if err != nil {
 		t.Fatal(err)
 	}

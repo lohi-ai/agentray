@@ -40,7 +40,7 @@ func TestResolvedNativeRungsKeepProviderRowCredentials(t *testing.T) {
 			if next.Fallback != nil || next.FallbackModel != "" || rungs[0].tier.Fallback != nil {
 				t.Fatal("resolved rung retained recursive fallback")
 			}
-			cfg, _, stream, err := next.bindNativeTier(agentcore.PiConfig{}, PiModelOptions{}, nil)
+			cfg, _, stream, err := next.bindNativeTier(NativeAgentConfig{}, PiModelOptions{}, nil)
 			if err != nil || stream == nil {
 				t.Fatalf("native pool binding: %v", err)
 			}
@@ -61,7 +61,7 @@ func TestResolvedNativeRungsKeepWireAndStaticKeyBoundaries(t *testing.T) {
 		t.Fatal("different provider row reused primary")
 	}
 	for i, rung := range rungs {
-		cfg, _, _, err := rung.tier.bindNativeTier(agentcore.PiConfig{}, PiModelOptions{}, nil)
+		cfg, _, _, err := rung.tier.bindNativeTier(NativeAgentConfig{}, PiModelOptions{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

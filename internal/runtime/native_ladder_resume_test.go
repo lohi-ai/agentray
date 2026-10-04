@@ -140,7 +140,7 @@ func TestNativeLadderSessionResumeRejectsMissingOrChangedBinding(t *testing.T) {
 
 func TestNativeLadderSessionRegistersFallbackCapabilityHooks(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "primary", APIKey: "fixture-key", Fallback: &TierConfig{Model: "fallback", Capabilities: agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported}}}}
-	ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
+	ladder, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
 	if err != nil {
 		t.Fatal(err)
 	}

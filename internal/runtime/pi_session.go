@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 const (
@@ -23,16 +25,16 @@ const (
 
 // ErrPiUnsettledEffect means an earlier process admitted a tool effect without
 // recording its outcome. Replaying it automatically could duplicate a write.
-var ErrPiUnsettledEffect = errors.New("Pi session has an unsettled tool effect")
+var ErrPiUnsettledEffect = nativehost.ErrUnsettledEffect
 
 // PiSessionConfig supplies host policy and persistence around the Pi contract.
 // It deliberately uses lossless Pi JSON, not the older Go Message projection.
 type PiSessionConfig struct {
-	Pi                      agentcore.PiConfig
+	Pi                      NativeAgentConfig
 	nativeLadder            *nativeModelLadder     // session-owned; routing is composed before host wrappers
 	nativeAttempts          *agentcore.RetryPolicy // nonnil installs native request admission
-	nativeAttemptObserved   func(nativeBoundRung, nativeRetryAttempt) error
-	nativeTerminalPublished func(nativeAttemptOutcome) error
+	nativeAttemptObserved   func(nativeBoundRung, ai.FallbackAttempt) error
+	nativeTerminalPublished func(ai.AttemptOutcome) error
 	// NativeStream optionally overrides the built-in Go provider.
 	NativeStream    engine.StreamFn
 	Policy          agentcore.Policy // nil is deny-all
@@ -49,8 +51,7 @@ type PiSessionConfig struct {
 // the native JSON verbatim; the existing Postgres and memory stores can persist
 // it without changing or truncating Pi message fields.
 type PiSession struct {
-	agent     *piSessionAgent
-	native    *NativeAgent
+	agent     *NativeAgent
 	config    PiSessionConfig
 	ctx       context.Context
 	release   func() error
@@ -211,7 +212,8 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 	var err error
 
 	var native *NativeAgent
-	config := NativeAgentConfig{Options: binding.Options, Callback: binding.Callback, OnEvent: binding.OnEvent, OnTrace: binding.OnTrace, StreamFn: cfg.NativeStream}
+	config := binding
+	config.StreamFn = cfg.NativeStream
 	if cfg.nativeAttempts != nil {
 		if cfg.nativeLadder == nil {
 			return nil, errors.New("native request admission requires a model ladder")
@@ -223,8 +225,7 @@ func NewPiSession(ctx context.Context, cfg PiSessionConfig) (*PiSession, error) 
 	}
 	native, err = NewNativeAgent(s.ctx, config)
 	if err == nil {
-		s.native = native
-		s.agent = &piSessionAgent{Call: native.Call, State: native.State, Prompt: native.Prompt, Continue: native.Continue, Close: native.Close, UpstreamCommit: native.UpstreamCommit, ObserveDelegation: native.observeDelegation}
+		s.agent = native
 	}
 	if err != nil {
 		return nil, err
@@ -536,161 +537,9 @@ func (s *PiSession) Close() error {
 	return s.closeErr
 }
 
-// recoverPiState refuses ambiguous effects even when cancellation caused Pi to
-// emit a synthetic error result. A native error event is not proof an external
-// write didn't happen. Entries in this format never go through RecoverSession.
+// recoverPiState adds server workflow validation to shared native recovery.
 func recoverPiState(entries []agentcore.SessionEntry) (json.RawMessage, error) {
-	state := map[string]json.RawMessage{}
-	var messages []json.RawMessage
-	var pendingResult json.RawMessage
-	unsettled := map[string]string{}
-	seenState := false
-	var selection *nativeLadderSelection
-	for _, entry := range entries {
-		switch entry.Kind {
-		case agentcore.EntryPiModelSelection:
-			if !seenState {
-				return nil, errors.New("native ladder selection precedes initial state")
-			}
-			next, err := parseNativeLadderSelection(entry.Content, selection)
-			if err != nil {
-				return nil, err
-			}
-			selection = &next
-			state["model"] = append(json.RawMessage(nil), next.Model...)
-		case agentcore.EntryPiContextSummary:
-			if _, err := parsePiContextSummary(entry.Content); err != nil {
-				return nil, err
-			}
-		case agentcore.EntryPiAnswer, agentcore.EntryPiDelegation, agentcore.EntryPiDelegationBatch, agentcore.EntryPiGoal, agentcore.EntryPiGoalRevision, agentcore.EntryPiInvocation, agentcore.EntryPiChildResult:
-			// Host workflow metadata is validated against parked effects and
-			// native history below; it does not rewrite any provider message.
-		case piEffectStart, piEffectDone:
-			var effect struct {
-				ID string `json:"effectId"`
-			}
-			if err := json.Unmarshal([]byte(entry.Content), &effect); err != nil || effect.ID == "" {
-				return nil, errors.New("corrupt Pi effect record")
-			}
-			if entry.Kind == piEffectStart {
-				unsettled[effect.ID] = entry.CallID
-			} else {
-				delete(unsettled, effect.ID)
-			}
-		case piStateEntry:
-			state = map[string]json.RawMessage{}
-			pendingResult = nil
-			if err := json.Unmarshal([]byte(entry.Content), &state); err != nil || state == nil {
-				return nil, errors.New("corrupt Pi state record")
-			}
-			if err := json.Unmarshal(state["messages"], &messages); err != nil {
-				return nil, err
-			}
-			if selection != nil && !nativeModelIdentityEqual(state["model"], selection.Model) {
-				return nil, errors.New("Pi checkpoint disagrees with committed native ladder model")
-			}
-			seenState = true
-		case piEventEntry:
-			var event struct {
-				Type    string          `json:"type"`
-				Message json.RawMessage `json:"message"`
-			}
-			if err := json.Unmarshal([]byte(entry.Content), &event); err != nil {
-				return nil, err
-			}
-			if event.Type == "message_start" {
-				var message struct{ Role string }
-				if err := json.Unmarshal(event.Message, &message); err != nil {
-					return nil, err
-				}
-				if message.Role == "toolResult" {
-					if pendingResult != nil {
-						return nil, errors.New("overlapping Pi tool-result messages")
-					}
-					// Pi emits the complete immutable result at message_start,
-					// including its native timestamp. Never invent that message
-					// from a physical effect receipt or tool_execution_end.
-					pendingResult = event.Message
-				}
-			}
-			if event.Type == "message_end" {
-				if !json.Valid(event.Message) {
-					return nil, errors.New("corrupt Pi message record")
-				}
-				if pendingResult != nil {
-					if string(pendingResult) != string(event.Message) {
-						return nil, errors.New("Pi tool-result start/end mismatch")
-					}
-					pendingResult = nil
-				}
-				messages = append(messages, event.Message)
-			}
-		default:
-			return nil, fmt.Errorf("session kind %q is not a native Pi record", entry.Kind)
-		}
-	}
-	if !seenState {
-		return nil, errors.New("Pi session has no initial state")
-	}
-	if len(unsettled) > 0 {
-		ids := make([]string, 0, len(unsettled))
-		for id, callID := range unsettled {
-			ids = append(ids, callID+"/"+id)
-		}
-		slices.Sort(ids)
-		return nil, fmt.Errorf("%w: %v", ErrPiUnsettledEffect, ids)
-	}
-	if pendingResult != nil {
-		messages = append(messages, pendingResult)
-	}
-	// Results must finish their own assistant batch. A reused provider call ID
-	// in a later batch cannot settle an earlier missing result.
-	open := map[string]int{}
-	for _, raw := range messages {
-		var m struct {
-			Role, ToolCallID, StopReason string
-			Content                      json.RawMessage
-		}
-		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
-		}
-		if m.Role != "toolResult" && len(open) > 0 {
-			return nil, fmt.Errorf("%w: incomplete tool batch", ErrPiUnsettledEffect)
-		}
-		// Pi exits the turn before tool admission on error/aborted messages.
-		// Their partial calls remain in history but have no native results to
-		// await. Physical effects are checked independently above; this cannot
-		// clear an effect that started before a provider failure. A length stop
-		// still produces failure results, so it must finish its result batch.
-		if m.Role == "assistant" && m.StopReason != "error" && m.StopReason != "aborted" {
-			var blocks []struct{ Type, ID string }
-			if err := json.Unmarshal(m.Content, &blocks); err != nil {
-				return nil, err
-			}
-			for _, block := range blocks {
-				if block.Type == "toolCall" {
-					open[block.ID]++
-				}
-			}
-		}
-		if m.Role == "toolResult" {
-			if open[m.ToolCallID] > 1 {
-				open[m.ToolCallID]--
-			} else {
-				delete(open, m.ToolCallID)
-			}
-		}
-	}
-	if len(open) > 0 {
-		return nil, fmt.Errorf("%w: tool results need recovery", ErrPiUnsettledEffect)
-	}
-	state["messages"], _ = json.Marshal(messages)
-	for name := range state {
-		if name != "messages" && name != "model" && name != "thinkingLevel" && name != "tools" {
-			delete(state, name)
-		}
-	}
-	raw, err := json.Marshal(state)
+	raw, err := agentcore.RecoverNativeTranscript(entries)
 	if err != nil {
 		return nil, err
 	}

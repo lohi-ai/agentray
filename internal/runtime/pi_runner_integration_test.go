@@ -40,7 +40,7 @@ func TestPiRunnerDispatchUsesNativeProviderAndGovernedTools(t *testing.T) {
 	p.Sandbox, p.HTTPTool, p.Subagents = nil, nil, nil
 	p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 	p.Tools = []agentcore.Tool{piComposedTool{&effects}}
-	r := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
+	r := NewRunner(nil)
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "runner-native", BaseURL: server.URL + "/v1", APIKey: "native-key"}}
 	var tokens string
 	result, err := r.runModelLoop(ctx, p, RunOptions{Prompt: "execute", NativeHistory: json.RawMessage(`[{"role":"user","content":"prior native user","timestamp":1,"extension":{"preserve":true}}]`)}, tier, func(event agentcore.StreamEvent) {

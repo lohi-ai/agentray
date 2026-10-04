@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/telemetry"
@@ -72,7 +71,7 @@ func TestNativeCallbackStreamMigrationOracle(t *testing.T) {
 				}
 				if tc.Input.Failure != "" {
 					if tc.Input.FailureName != "" {
-						return nil, &agentcore.PiError{Name: tc.Input.FailureName, Message: tc.Input.Failure}
+						return nil, &telemetry.ErrorDetails{Name: tc.Input.FailureName, Message: tc.Input.Failure}
 					}
 					return nil, errors.New(tc.Input.Failure)
 				}

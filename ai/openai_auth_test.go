@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Local OpenAI-compatible engines normally have no key. Absence must mean no
@@ -46,10 +46,10 @@ func TestOpenAICompatibleEmptyKeyOmitsAuthorizationEverywhere(t *testing.T) {
 	p := NewOpenAIProvider("", srv.URL, DefaultCompat())
 	p.HTTP = srv.Client()
 	p.StreamHTTP = srv.Client()
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "local"}); err != nil {
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "local"}); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "local"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "local"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestOpenAIConcurrentKeyRotationUsesWholeCredential(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 20; j++ {
-				if _, err := p.Chat(context.Background(), agentcore.ChatRequest{Model: "m"}); err != nil {
+				if _, err := p.Chat(context.Background(), protocol.ChatRequest{Model: "m"}); err != nil {
 					errMu.Lock()
 					if serverErr == nil {
 						serverErr = err

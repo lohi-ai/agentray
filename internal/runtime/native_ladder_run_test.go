@@ -42,7 +42,7 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 	}))
 	defer server.Close()
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", ProviderID: "primary-row", Model: "primary", BaseURL: server.URL, APIKey: "primary-key", Fallback: &TierConfig{Provider: "openai", ProviderID: "fallback-row", Model: "fallback", BaseURL: server.URL, APIKey: "fallback-key"}}}
-	ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
+	ladder, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,9 +78,9 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 			}
 			return nil
 		},
-		observe: func(_ context.Context, index int, a nativeRetryAttempt) error {
+		observe: func(_ context.Context, index int, a ai.FallbackAttempt) error {
 			observed++
-			if index == 0 && !agentcore.IsRetryable(a.failure) {
+			if index == 0 && !agentcore.IsRetryable(a.Failure) {
 				t.Error("primary HTTP error untyped")
 			}
 			return nil
@@ -89,7 +89,7 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 	for n := 0; n < 2; n++ {
 		out := ai.NewAssistantMessageEventStream()
 		result, err := session.runNativeLadder(session.ctx, out, run)
-		if err != nil || !result.committed {
+		if err != nil || !result.Committed {
 			t.Fatal("ladder did not commit successful rung", err)
 		}
 		out.End()
@@ -98,12 +98,16 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 			t.Fatal("fallback response lost", message, err)
 		}
 	}
-	session.native.flushTraces()
+	session.agent.flushTraces()
 	traceMu.Lock()
 	if len(traces) != 4 {
 		t.Fatalf("expected four attempt traces, got %d", len(traces))
 	}
-	for i, raw := range traces {
+	// Trace recording is passive: the next attempt can begin before the prior
+	// attempt's observer enqueues its diagnostic packet. Identity, not callback
+	// arrival order, owns attribution.
+	seen := map[int]bool{}
+	for _, raw := range traces {
 		var packet struct {
 			RequestID int
 			Model     struct{ ID string }
@@ -117,6 +121,11 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 		if err := json.Unmarshal(raw, &packet); err != nil {
 			t.Fatal(err)
 		}
+		if packet.RequestID < 1 || packet.RequestID > 4 || seen[packet.RequestID] {
+			t.Fatalf("invalid or duplicate attempt trace identity: %s", raw)
+		}
+		seen[packet.RequestID] = true
+		i := packet.RequestID - 1
 		model, stop := "primary", "error"
 		if i >= 2 {
 			model, stop = "fallback", "stop"
@@ -131,7 +140,7 @@ func TestNativeLadderRunHTTPRetryEscalationAndRetention(t *testing.T) {
 		if packet.Attempt.Rung != rung || packet.Attempt.ProviderID != row || packet.Attempt.Generation != generation {
 			t.Fatal("attempt row/generation missing", string(raw))
 		}
-		if packet.RequestID != i+1 || packet.Model.ID != model || packet.Response.StopReason != stop {
+		if packet.Model.ID != model || packet.Response.StopReason != stop {
 			t.Fatalf("attempt trace attribution lost: %s", raw)
 		}
 	}
@@ -189,7 +198,7 @@ func TestNativeLadderRunStopsAtVisibleContentAndHostFailure(t *testing.T) {
 					}
 					return attemptFixture(append(events, ai.AssistantMessageEvent{Type: "error", Error: terminal})...)(ctx)
 				},
-				observe: func(context.Context, int, nativeRetryAttempt) error {
+				observe: func(context.Context, int, ai.FallbackAttempt) error {
 					if mode == "callback" {
 						return errors.New("host observer failed")
 					}
@@ -208,7 +217,7 @@ func TestNativeLadderRunStopsAtVisibleContentAndHostFailure(t *testing.T) {
 				if mode == "exhausted" {
 					want = 2
 				}
-				if len(calls) != want || result.terminal.Error != terminal {
+				if len(calls) != want || result.Terminal.Error != terminal {
 					t.Fatal("wrong escalation/final identity", calls)
 				}
 			} else {
@@ -263,7 +272,7 @@ func TestNativeLadderRunCandidateIsolationAndGenerationFence(t *testing.T) {
 			}
 			result, err := session.runNativeLadder(ctx, out, run)
 			if mode == "stale-generation" {
-				if err == nil || result.committed || calls != 1 {
+				if err == nil || result.Committed || calls != 1 {
 					t.Fatal("stale attempt admitted or escalated", calls, err)
 				}
 				assertAttemptEmpty(t, out)
@@ -271,7 +280,7 @@ func TestNativeLadderRunCandidateIsolationAndGenerationFence(t *testing.T) {
 					t.Fatal("stale attempt overwrote newer selection")
 				}
 			} else {
-				if err != nil || calls != 2 || !result.committed {
+				if err != nil || calls != 2 || !result.Committed {
 					t.Fatal("isolated retry failed", calls, err)
 				}
 				if !json.Valid(ladder.rungs[0].model) || !json.Valid(ladder.rungs[0].config.Options) {

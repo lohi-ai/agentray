@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
@@ -37,27 +37,27 @@ func TestWiredListModelsOverlaysAndRetainsLiveCapabilities(t *testing.T) {
 		t.Fatalf("models = %d, want 1", len(models))
 	}
 	caps := models[0].Capabilities
-	if caps.Tools != agentcore.CapabilityUnsupported ||
-		caps.ReasoningEffort != agentcore.CapabilitySupported ||
-		caps.StructuredOutput != agentcore.CapabilitySupported ||
-		caps.PromptCaching != agentcore.CapabilitySupported ||
-		caps.ImageInput != agentcore.CapabilityUnsupported || caps.MaxInputImages != 7 || caps.MaxOutputTokens != 8192 {
+	if caps.Tools != protocol.CapabilityUnsupported ||
+		caps.ReasoningEffort != protocol.CapabilitySupported ||
+		caps.StructuredOutput != protocol.CapabilitySupported ||
+		caps.PromptCaching != protocol.CapabilitySupported ||
+		caps.ImageInput != protocol.CapabilityUnsupported || caps.MaxInputImages != 7 || caps.MaxOutputTokens != 8192 {
 		t.Fatalf("listed capabilities = %+v", caps)
 	}
 
-	capable, ok := provider.(agentcore.ModelCapabilityProvider)
+	capable, ok := provider.(protocol.ModelCapabilityProvider)
 	if !ok {
 		t.Fatal("wired provider lost ModelCapabilityProvider")
 	}
 	retained := capable.ModelCapabilities("text-only")
-	if retained.Tools != agentcore.CapabilityUnsupported || retained.ReasoningEffort != agentcore.CapabilitySupported {
+	if retained.Tools != protocol.CapabilityUnsupported || retained.ReasoningEffort != protocol.CapabilitySupported {
 		t.Fatalf("retained capabilities = %+v", retained)
 	}
 }
 
 func TestDiscoveredCapabilitiesNeverTreatsMissingMetadataAsUnsupported(t *testing.T) {
 	got := (discoveredCapabilities{}).modelCapabilities()
-	if got != (agentcore.ModelCapabilities{}) {
+	if got != (protocol.ModelCapabilities{}) {
 		t.Fatalf("empty discovery = %+v, want entirely unknown", got)
 	}
 }
@@ -68,27 +68,27 @@ func TestDedicatedCapabilityBooleanWinsOverGenericHints(t *testing.T) {
 		SupportsTools:       &no,
 		SupportedParameters: []string{"tools"},
 	}).modelCapabilities()
-	if got.Tools != agentcore.CapabilityUnsupported {
+	if got.Tools != protocol.CapabilityUnsupported {
 		t.Fatalf("tools = %q, explicit supports_tools:false must win", got.Tools)
 	}
 }
 
 func TestCapabilityOverlayUsesOnlyKnownNewValues(t *testing.T) {
-	base := agentcore.ModelCapabilities{
-		Tools:           agentcore.CapabilitySupported,
-		PromptCaching:   agentcore.CapabilitySupported,
+	base := protocol.ModelCapabilities{
+		Tools:           protocol.CapabilitySupported,
+		PromptCaching:   protocol.CapabilitySupported,
 		MaxInputImages:  90,
 		MaxOutputTokens: 8192,
 	}
-	got := base.Overlay(agentcore.ModelCapabilities{Tools: agentcore.CapabilityUnsupported})
-	if got.Tools != agentcore.CapabilityUnsupported || got.PromptCaching != agentcore.CapabilitySupported || got.MaxInputImages != 90 || got.MaxOutputTokens != 8192 {
+	got := base.Overlay(protocol.ModelCapabilities{Tools: protocol.CapabilityUnsupported})
+	if got.Tools != protocol.CapabilityUnsupported || got.PromptCaching != protocol.CapabilitySupported || got.MaxInputImages != 90 || got.MaxOutputTokens != 8192 {
 		t.Fatalf("overlay = %+v", got)
 	}
-	got = got.Overlay(agentcore.ModelCapabilities{MaxInputImages: 12})
+	got = got.Overlay(protocol.ModelCapabilities{MaxInputImages: 12})
 	if got.MaxInputImages != 12 {
 		t.Fatalf("numeric capability did not overlay: %+v", got)
 	}
-	got = got.Overlay(agentcore.ModelCapabilities{MaxOutputTokens: 4096})
+	got = got.Overlay(protocol.ModelCapabilities{MaxOutputTokens: 4096})
 	if got.MaxOutputTokens != 4096 {
 		t.Fatalf("output-token capability did not overlay: %+v", got)
 	}
@@ -108,10 +108,10 @@ func TestDiscoveredImageLimitAcceptsDedicatedAndCapabilityMapShapes(t *testing.T
 }
 
 func TestModelCapabilitiesRejectsNegativeImageLimit(t *testing.T) {
-	if err := (agentcore.ModelCapabilities{MaxInputImages: -1}).Validate(); err == nil {
+	if err := (protocol.ModelCapabilities{MaxInputImages: -1}).Validate(); err == nil {
 		t.Fatal("negative image limit must be rejected")
 	}
-	if err := (agentcore.ModelCapabilities{MaxOutputTokens: -1}).Validate(); err == nil {
+	if err := (protocol.ModelCapabilities{MaxOutputTokens: -1}).Validate(); err == nil {
 		t.Fatal("negative output-token limit must be rejected")
 	}
 }
@@ -128,12 +128,12 @@ func TestAntigravityAdvertisesModelOutputCeilings(t *testing.T) {
 func TestOpenAICompatSelectsConfiguredMaxTokenField(t *testing.T) {
 	completion := NewOpenAIProvider("k", "http://local", Compat{
 		MaxTokensField: "max_completion_tokens", SupportsTools: true,
-	}).encode(agentcore.ChatRequest{Model: "reasoning", MaxTokens: 1234})
+	}).encode(protocol.ChatRequest{Model: "reasoning", MaxTokens: 1234})
 	if completion.MaxCompletionTokens != 1234 || completion.MaxTokens != 0 {
 		t.Fatalf("completion-token request = %+v", completion)
 	}
 	standard := NewOpenAIProvider("k", "http://local", DefaultCompat()).encode(
-		agentcore.ChatRequest{Model: "chat", MaxTokens: 5678},
+		protocol.ChatRequest{Model: "chat", MaxTokens: 5678},
 	)
 	if standard.MaxTokens != 5678 || standard.MaxCompletionTokens != 0 {
 		t.Fatalf("standard-token request = %+v", standard)
@@ -142,7 +142,7 @@ func TestOpenAICompatSelectsConfiguredMaxTokenField(t *testing.T) {
 
 func TestAntigravityHonorsSmallerRequestedOutputLimit(t *testing.T) {
 	p := NewAntigravityProvider()
-	body := p.encode(agentcore.ChatRequest{Model: "claude-sonnet-4-6", MaxTokens: 2048})
+	body := p.encode(protocol.ChatRequest{Model: "claude-sonnet-4-6", MaxTokens: 2048})
 	if body.Request.GenerationConfig == nil || body.Request.GenerationConfig.MaxOutputTokens != 2048 {
 		t.Fatalf("generation config = %+v, want maxOutputTokens=2048", body.Request.GenerationConfig)
 	}
@@ -150,12 +150,12 @@ func TestAntigravityHonorsSmallerRequestedOutputLimit(t *testing.T) {
 
 func TestOpenAIResponsesAdvertisesStatefulWireWithoutChangingChatCompletions(t *testing.T) {
 	responses := CapabilitiesFor(VendorOpenAIResponses, "gpt-test")
-	if responses.StatefulResponses != agentcore.CapabilitySupported ||
-		responses.StructuredOutput != agentcore.CapabilitySupported ||
-		responses.Tools != agentcore.CapabilitySupported || responses.MaxInputImages != 200 {
+	if responses.StatefulResponses != protocol.CapabilitySupported ||
+		responses.StructuredOutput != protocol.CapabilitySupported ||
+		responses.Tools != protocol.CapabilitySupported || responses.MaxInputImages != 200 {
 		t.Fatalf("responses capabilities = %+v", responses)
 	}
-	if chat := CapabilitiesFor("openai", "gpt-test"); chat.StatefulResponses != agentcore.CapabilityUnsupported {
+	if chat := CapabilitiesFor("openai", "gpt-test"); chat.StatefulResponses != protocol.CapabilityUnsupported {
 		t.Fatalf("chat-completions stateful capability = %q, want unsupported", chat.StatefulResponses)
 	}
 }
@@ -166,11 +166,11 @@ func TestProviderImageBudgetsArePortableAndAntigravityIsExplicitlyTextOnly(t *te
 		VendorClaudeCode: 90, VendorOpenAICodex: 200, "google": 200, "openrouter": 90,
 	} {
 		caps := CapabilitiesFor(vendor, "m")
-		if caps.ImageInput != agentcore.CapabilitySupported || caps.MaxInputImages != want {
+		if caps.ImageInput != protocol.CapabilitySupported || caps.MaxInputImages != want {
 			t.Errorf("%s image capabilities = %+v, want supported/%d", vendor, caps, want)
 		}
 	}
-	if got := CapabilitiesFor(VendorGoogleAntigravity, "m"); got.ImageInput != agentcore.CapabilityUnsupported {
+	if got := CapabilitiesFor(VendorGoogleAntigravity, "m"); got.ImageInput != protocol.CapabilityUnsupported {
 		t.Fatalf("antigravity image capability = %+v", got)
 	}
 }

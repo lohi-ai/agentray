@@ -97,13 +97,12 @@ against what was actually stored rather than what was sent.
   reads and what the store holds are the same list. A model shown a folded list
   sends the folded list back; a store that quietly held more would re-expand the
   render on the next write. `Retired` is a floor, never an overcount.
-- **A crashed run gets its plan back.** `BeginRun` reconstructs the checklist
-  from the `update_plan` calls already in the durable log — reading through
-  `RunInfo.Session`, writing nothing, so the loop stays the only writer. Only a
-  call that would be *accepted* counts: a rejected one left the original run's
-  plan unchanged, so replaying it would install a plan that run never had. A
-  finished run's plan is **not** inherited — `EntryLeaf` clears it, the same rule
-  the goal gate uses, so a new task chained onto the session starts clean.
+- **Native checkpoints preserve the plan.** `RunResult.NativeState` stores
+  items, statuses and the retired count. Pass it to `RunNative` on a fresh agent
+  to continue. Start a new task with a new store and no prior checkpoint.
+- **Durable sessions recover accepted effects.** `BeginRun` reads successful
+  native `update_plan` receipts through `RunInfo.Session`. Requested, denied or
+  failed calls cannot replace the plan. `EntryLeaf` clears the session plan.
 
 ## Composition
 
@@ -112,7 +111,8 @@ store := todo.NewStore()                       // one per run
 agentcore.Build(/* … */, todo.With(store))
 ```
 
-The tool and the hook are registered together because either alone is broken:
+`PiContextHook` is the native request hook; the old typed `ContextHook` has
+been removed. The tool and the hook are registered together because either alone is broken:
 the tool without the hook writes a plan the model never sees again, and the hook
 without the tool pins a plan nothing can write.
 
@@ -121,7 +121,7 @@ plan tool that forgets is worse for the model than no plan tool at all.
 
 ## Known limitations and deferred work
 
-- **Recovery reads the whole log.** `BeginRun` scans for the last accepted
+- **Durable session recovery reads the whole log.** `BeginRun` scans for the last accepted
   `update_plan`, so on a windowed store whose window no longer reaches that call,
   the plan does not come back — no worse than before the recovery existed, but
   not a guarantee either. A dedicated entry kind would fix it, and that is core's
@@ -132,9 +132,29 @@ plan tool that forgets is worse for the model than no plan tool at all.
   The full un-folded list is still in the durable log, which is what
   `internal/runtime`'s `/plan` command reads — so a human sees every step even
   though the model sees a summary of the old ones.
-- **One plan per run.** No nesting, no per-subagent plans; a spawned sub-agent
-  gets its own `Store` or none.
+- **One plan per run.** Child runs automatically get a separate store;
+  their updates cannot replace the parent plan.
 - **Nothing verifies the plan.** An item marked `completed` is completed because
   the model said so. This is a focus mechanism, not an audit trail.
 - **Status vocabulary is fixed** (`pending` / `in_progress` / `completed`). No
   `blocked`, which a long autonomous run arguably wants.
+
+The plugin registers one `ExtensionFactory`. Each run contributes its own
+`update_plan` tool, `NativeContextContributor` and checkpoint state. Forks get
+a fresh plan; the model-facing reminder is a request view, never persisted
+provider history. Standalone callers may still use `NewTool`/`PiContextHook`.
+
+## Phases and atomic deltas
+
+Items optionally include `id` (at most 64 bytes) and `phase` (160 bytes).
+Statuses are `pending`, `in_progress`, `completed`, `blocked`, `abandoned`.
+`update_plan` remains a full replacement; `patch_plan` accepts up to 128 ordered
+`operations` with `action: add|replace|remove`, `id`, and a complete `item` for
+add/replace. The whole resulting plan validates before mutation; a rejected
+operation changes nothing. IDs must be unique and at most one step may be active.
+
+Plans hold at most 128 model-supplied items. Rendered phase/ID labels remain
+bounded; old completed items can be folded out, after which their IDs are no
+longer patch targets. Successful native receipt replay applies deltas in order;
+denied or failed deltas cannot change restored state. Both tools are bookkeeping
+and need explicit policy grants. Child stores stay isolated.

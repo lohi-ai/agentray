@@ -12,8 +12,8 @@ to the provider's prefix cache, and what it cannot do.
 Everything below the loop reaches it through the generic interfaces in
 [`agentcore/extension.go`](../extension.go). The loop dispatches to
 `ToolInterceptor`, `BatchInterceptor`, `StepInterceptor`, `StopInterceptor`,
-`RunObserver`, `LogObserver`, `ToolContributor`, `PromptContributor`,
-`ContextContributor`, `RunCloser`, `SelfGated`, `BookkeepingTool` — never to
+`RunObserver`, `ToolContributor`, `PromptContributor`,
+`ContextContributor`, `NativeContextContributor`, `NativeStateContributor`, `RunController`, `RunCommandHandler`, `RunFinalizer`, `RunCloser`, `SelfGated`, `BookkeepingTool` — never to
 `spill`, `jobs`, `todo`, or `subagent`.
 
 Plugins do not name each other either. Where one capability needs to know
@@ -53,7 +53,7 @@ The capabilities below are real, ejectable plugins:
 
 | Folder | Kind | What it does | Ejecting it means |
 |---|---|---|---|
-| [`memory`](memory/) | Seam + tools | Cross-run recall + curation (`learn`, `memory_edit`) | Forgets between runs |
+| [`memory`](memory/) | Seam + tools | Cross-run recall + curation (`memory_recall`, `learn`, `memory_edit`) | Forgets between runs |
 | [`sandbox`](sandbox/) | Seam + guard | Isolation substrate + command injection guard | No untrusted code execution |
 | [`goal`](goal/) | Hybrid | Completion contract (`STATUS: DONE`) + `update_goal` tool | Runs stop when they like |
 The hybrids (`goal` and `sandbox`) install a recorded decision and its enforcement
@@ -67,24 +67,21 @@ together so the composition cannot express the half-wired failure mode:
   reads what is sent into it, at `PriorityGate`. A backend wired with nothing
   inspecting its arguments is a shell with no one watching.
 
-A contribution is not always a tool or a hook. `WrapProvider` contributes a
-decorator around every model call the run can make — the one shape that can
-*bracket* a call, and therefore the only way to measure its duration or see it
-fail. `observe.Monitor` uses it; a rate limiter or a response cache would too.
+Tracing uses the shared `telemetry` context supplied to `RunNative` (or carried
+with `telemetry.WithContext`). It is not an ejectable agent capability.
+`telemetry/export` delivers completed span batches; `telemetry/llm` adapts native
+request traces to storage/file records. Pricing belongs to `ai`.
 
 ### Contributions — add to the composition
 
-`r.AddTools(...)` / `r.AddHooks(...)` / `r.WrapProvider(...)`. Additive,
+`r.AddTools(...)` / `r.AddHooks(...)`. Additive,
 unkeyed, and resolved **once at compose time** — they carry no per-run state, so
 they need no lifecycle. This is the cheapest kind of plugin, and the right one
 whenever a capability is fully expressed by "here is a tool", "here is a
-listener", or "here is a decorator around every model call".
+listener".
 
 | Folder | Contributes | Ejecting it means |
 |---|---|---|
-| [`todo`](todo/) | `update_plan` + the pinned live plan | a long run drifts off task |
-| [`observe`](observe/) `Hooks` | telemetry at `PriorityLate` | the run is unobservable |
-| [`observe`](observe/) `Monitor` | per-call trace + cost, on every rung | spend is unattributable |
 | [`ask`](ask/) | `ask` tool for mid-run human decisions | the agent guesses instead of asking |
 
 ### Extensions — add something the loop does not do
@@ -93,7 +90,8 @@ listener", or "here is a decorator around every model call".
 point, and they compose in registration order. Unlike a contribution an
 extension is **run-scoped** — the loop instantiates it per run via `BeginRun`,
 which is what lets it hold state (a repeat chain, a nudge budget) with no
-locking and no cross-run leakage, and lets it decline a run outright. A
+cross-run leakage, and lets it decline a run outright. State shared by parallel
+tools still needs synchronization. A
 capability is not a slot — two interceptors bounding a tool result is a
 waterfall, not a conflict.
 
@@ -104,10 +102,10 @@ a new kind does not touch core.
 
 | Folder | Adds | Ejecting it means |
 |---|---|---|
+| [`todo`](todo/) | run-scoped `update_plan`, pinned context and checkpoint | a long run drifts off task |
 | [`advisor`](advisor/) | pre-finish reviewer | the agent never gets a second opinion |
 | [`finishguard`](finishguard/) | verify-on-stop | the first answer is the answer |
 | [`jobs`](jobs/) | async tools + `job_*` | every tool blocks the run |
-| [`observe`](observe/) `LogInvariant` | proves model-visible ⊆ logged | resume corruption goes unnoticed |
 | [`repeatguard`](repeatguard/) | loop-detection reminder | a repeat loop burns the turn budget |
 | [`sessionquery`](sessionquery/) | `session_query` over the log | compaction is lossy in practice |
 | [`spill`](spill/) | lossless bounding + `read_spill` | oversized results are truncated for good |
@@ -118,10 +116,9 @@ a new kind does not touch core.
 agentcore's default agent. `preset.Plugins(cfg)` is pinned to
 `agentcore.New(cfg)` parity;
 `preset.Full(cfg, opts)` is that list plus the capabilities `Config` has no field
-for — `spill`, `jobs`, `repeatguard`, `sessionquery`, and both `observe`
-plugins — and is what a deployment actually composes.
+for — `spill`, `jobs`, `repeatguard`, `sessionquery`, and opt-in todo, subagent, advisor, ask and finish guards — and is what a deployment actually composes.
 
-## Four things the mechanism guarantees
+## Five things the mechanism guarantees
 
 **Replaceability.** A seam has one provider and the plugin that registers it says
 so. `Registry.Describe()` prints which plugin owns which seam; `Agent.Describe()`
@@ -174,9 +171,27 @@ func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore
 	if !p.canServe(info) {
 		return nil, nil // decline; not an error
 	}
-	return &capRun{ /* per-run state, no locking needed */ }, nil
+	return &capRun{ /* state owned by this run */ }, nil
 }
 ```
+
+Use the existing engine bridge; Pi's executable extension loader is in its
+`coding-agent` application. AgentCore's `Register` declares a capability and
+`BeginRun` binds it to one execution:
+
+| Need | Extension interface |
+| --- | --- |
+| Model-callable operations | `ToolContributor`; the host separately grants calls |
+| Stable system instructions | `PromptContributor` |
+| Live reminders after compaction | `NativeContextContributor`; transform detached native JSON, never replay display messages |
+| Resume state | `NativeStateContributor`; core checkpoints it, the host commits it |
+| Tool/turn/finish policy | `ToolInterceptor`, `BatchInterceptor`, `StepInterceptor`, `StopInterceptor` |
+| Run-owned resources | `ContextContributor` and `RunCloser` |
+
+Keep provider fallback in `ai` and tracing in `telemetry`. Soot supplies stores,
+credentials, tool callbacks and orchestration; plugins own the agent behavior.
+Verify a stateful capability through `RunNative`, including checkpoint resume
+and child isolation, rather than only testing its registration.
 
 Then implement whichever optional interfaces apply. Write the README in the
 format the others use — model experience, token effect, KV cache effect, known

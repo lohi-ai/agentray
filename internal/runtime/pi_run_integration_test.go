@@ -36,7 +36,7 @@ func TestPiRunReturnsServerProjectionAndNativeTranscript(t *testing.T) {
 	result, err := RunPi(ctx, PiRunConfig{
 		Input: piSessionJSON("execute"), PricingKnown: true,
 		Sink: func(event agentcore.StreamEvent) { events = append(events, event.Type) },
-		Session: PiSessionConfig{Store: p.Session, SessionID: p.SessionID, Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
+		Session: PiSessionConfig{Store: p.Session, SessionID: p.SessionID, Policy: agentcore.NewAllowList("write"), Pi: NativeAgentConfig{
 			Options: options,
 			Callback: func(ctx context.Context, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
 				if method == "stream" {
@@ -88,7 +88,7 @@ func TestPiRunReturnsServerProjectionAndNativeTranscript(t *testing.T) {
 }
 
 func TestPiRunSurfacesNativeProviderError(t *testing.T) {
-	result, err := RunPi(piSessionContext(t), PiRunConfig{Input: piSessionJSON("fail"), Session: PiSessionConfig{Pi: agentcore.PiConfig{
+	result, err := RunPi(piSessionContext(t), PiRunConfig{Input: piSessionJSON("fail"), Session: PiSessionConfig{Pi: NativeAgentConfig{
 		Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			return nil, errors.New("provider rejected request")
 		},
@@ -100,7 +100,7 @@ func TestPiRunSurfacesNativeProviderError(t *testing.T) {
 
 func TestPiRunResumeBillsOnlyNewCalls(t *testing.T) {
 	ctx := piSessionContext(t)
-	cfg := PiRunConfig{Input: piSessionJSON("first"), Session: PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "resume-billing", Pi: agentcore.PiConfig{
+	cfg := PiRunConfig{Input: piSessionJSON("first"), Session: PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "resume-billing", Pi: NativeAgentConfig{
 		Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			return piSessionReply(false), nil
 		},
@@ -131,7 +131,7 @@ func TestPiRunCancellationRetainsTerminalState(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		result, err := RunPi(runCtx, PiRunConfig{Input: piSessionJSON("cancel"), Session: PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "cancel", Pi: agentcore.PiConfig{
+		result, err := RunPi(runCtx, PiRunConfig{Input: piSessionJSON("cancel"), Session: PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "cancel", Pi: NativeAgentConfig{
 			Callback: func(ctx context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				close(started)
 				<-ctx.Done()

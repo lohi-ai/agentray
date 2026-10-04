@@ -55,7 +55,7 @@ func TestPiSessionNativeRoundTripAndPolicy(t *testing.T) {
 			var streams, effects atomic.Int32
 			var mu sync.Mutex
 			var events []string
-			cfg := PiSessionConfig{Store: store, SessionID: "native", Pi: agentcore.PiConfig{
+			cfg := PiSessionConfig{Store: store, SessionID: "native", Pi: NativeAgentConfig{
 				Options: piSessionOptions(),
 				Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 					if method == "stream" {
@@ -155,7 +155,7 @@ func TestPiSessionDoesNotExecuteBeforeDurableIntent(t *testing.T) {
 	ctx := piSessionContext(t)
 	store := &piFailStore{MemorySessionStore: agentcore.NewMemorySessionStore(), kind: piEffectStart}
 	var effects atomic.Int32
-	s, err := NewPiSession(ctx, PiSessionConfig{Store: store, SessionID: "failing", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
+	s, err := NewPiSession(ctx, PiSessionConfig{Store: store, SessionID: "failing", Policy: agentcore.NewAllowList("write"), Pi: NativeAgentConfig{
 		Options: piSessionOptions(),
 		Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method == "stream" {
@@ -185,7 +185,7 @@ func TestPiSessionInterruptedEffectCannotBeReplayed(t *testing.T) {
 	store := agentcore.NewMemorySessionStore()
 	started, stopped := make(chan struct{}), make(chan struct{})
 	var effects atomic.Int32
-	cfg := PiSessionConfig{Store: store, SessionID: "interrupted", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
+	cfg := PiSessionConfig{Store: store, SessionID: "interrupted", Policy: agentcore.NewAllowList("write"), Pi: NativeAgentConfig{
 		Options: piSessionOptions(),
 		Callback: func(ctx context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method == "stream" {
@@ -231,7 +231,7 @@ func TestPiSessionInterruptedEffectCannotBeReplayed(t *testing.T) {
 
 func TestPiSessionLeaseExcludesConcurrentOwners(t *testing.T) {
 	ctx := piSessionContext(t)
-	cfg := PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "owned", Pi: agentcore.PiConfig{}}
+	cfg := PiSessionConfig{Store: agentcore.NewMemorySessionStore(), SessionID: "owned", Pi: NativeAgentConfig{}}
 	s, err := NewPiSession(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestPiSessionRecoveryAtWorkerPersistenceBoundaries(t *testing.T) {
 	ctx := piSessionContext(t)
 	store := agentcore.NewMemorySessionStore()
 	var streams atomic.Int32
-	cfg := PiSessionConfig{Store: store, SessionID: "boundaries", Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
+	cfg := PiSessionConfig{Store: store, SessionID: "boundaries", Policy: agentcore.NewAllowList("write"), Pi: NativeAgentConfig{
 		Options: piSessionOptions(),
 		Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method == "stream" {
@@ -335,7 +335,7 @@ func TestPiSessionRejectsRevisionDrift(t *testing.T) {
 		t.Run(revision, func(t *testing.T) {
 			store := agentcore.NewMemorySessionStore()
 			_ = store.Append(ctx, "revision", agentcore.SessionEntry{Kind: piStateEntry, Model: revision, Content: `{"messages":[]}`})
-			_, err := NewPiSession(ctx, PiSessionConfig{Store: store, SessionID: "revision", Resume: true, Pi: agentcore.PiConfig{}})
+			_, err := NewPiSession(ctx, PiSessionConfig{Store: store, SessionID: "revision", Resume: true, Pi: NativeAgentConfig{}})
 			if err == nil || !strings.Contains(err.Error(), "revision") {
 				t.Fatalf("accepted mismatched revision: %v", err)
 			}
@@ -356,7 +356,7 @@ func (piRuntimeDenyPolicy) Allow(context.Context, agentcore.ToolCall) agentcore.
 func TestPiSessionRechecksPermissionBeforeExecution(t *testing.T) {
 	ctx := piSessionContext(t)
 	var effects, streams atomic.Int32
-	s, err := NewPiSession(ctx, PiSessionConfig{Policy: piRuntimeDenyPolicy{agentcore.NewAllowList("write")}, Pi: agentcore.PiConfig{
+	s, err := NewPiSession(ctx, PiSessionConfig{Policy: piRuntimeDenyPolicy{agentcore.NewAllowList("write")}, Pi: NativeAgentConfig{
 		Options: piSessionOptions(),
 		Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 			if method == "stream" {
@@ -414,7 +414,7 @@ func TestPiSessionUsesProductionToolComposition(t *testing.T) {
 	var options map[string]any
 	_ = json.Unmarshal(piSessionOptions(), &options)
 	options["initialState"].(map[string]any)["tools"] = definitions
-	s, err := NewPiSession(ctx, PiSessionConfig{Store: p.Session, SessionID: p.SessionID, Policy: agentcore.NewAllowList("write"), Pi: agentcore.PiConfig{
+	s, err := NewPiSession(ctx, PiSessionConfig{Store: p.Session, SessionID: p.SessionID, Policy: agentcore.NewAllowList("write"), Pi: NativeAgentConfig{
 		Options: piSessionJSON(options),
 		Callback: func(ctx context.Context, method string, params json.RawMessage, emit func(json.RawMessage) error) (json.RawMessage, error) {
 			if method == "stream" {

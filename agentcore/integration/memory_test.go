@@ -13,6 +13,7 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // memStore is an in-memory MemoryStore + MemoryCurator with the shipped
@@ -83,10 +84,10 @@ var (
 	_ agentcore.MemoryCurator = (*memStore)(nil)
 )
 
-func buildMemoryAgent(t *testing.T, store agentcore.MemoryStore, pol agentcore.Policy, provider *agentcore.FauxProvider) *agentcore.Agent {
+func buildMemoryAgent(t *testing.T, store agentcore.MemoryStore, pol agentcore.Policy, provider *ai.FallbackProvider) *agentcore.Agent {
 	t.Helper()
 	a, err := agentcore.Build(
-		agentcore.ModelPlugin{Provider: provider, Model: "faux"},
+		agentcore.ModelPlugin{NativeProvider: provider, Model: "test"},
 		agentcore.DefinitionPlugin{Definition: agentcore.AgentDefinition{ScopeID: "agent-1"}},
 		agentcore.PolicyPlugin{Policy: pol},
 		memory.Plugin{Store: store},
@@ -95,6 +96,17 @@ func buildMemoryAgent(t *testing.T, store agentcore.MemoryStore, pol agentcore.P
 		t.Fatalf("build: %v", err)
 	}
 	return a
+}
+
+// systemText returns every system-prompt block the provider was sent.
+func systemText(rec *nativeRecorder) string {
+	var sb strings.Builder
+	for _, m := range rec.all()[0].Messages {
+		if m.Role == agentcore.RoleSystem {
+			sb.WriteString(m.Content)
+		}
+	}
+	return sb.String()
 }
 
 // The primary journey: learn files a lesson, the next run recalls it WITH its
@@ -106,7 +118,7 @@ func TestMemoryCurationEndToEnd(t *testing.T) {
 	allow := agentcore.NewAllowList(memory.ToolLearn, memory.ToolMemoryEdit)
 
 	// Run 1: the model learns a lesson.
-	p1 := agentcore.NewFauxProvider(
+	p1 := scriptedNativeProvider(
 		agentcore.AssistantToolCall("c1", "learn", `{"lesson":"deploys moved to Thursday","tags":["deploy"]}`),
 		agentcore.AssistantText("noted"),
 	)
@@ -120,7 +132,8 @@ func TestMemoryCurationEndToEnd(t *testing.T) {
 
 	// Run 2: recall shows the lesson with its id; the model updates it, then
 	// forgets the successor, then tries a second forget on the retracted id.
-	p2 := agentcore.NewFauxProvider(
+	recorder2 := &nativeRecorder{}
+	p2 := recordedNativeProvider(recorder2,
 		agentcore.AssistantToolCall("c1", "memory_edit", fmt.Sprintf(`{"id":%q,"action":"update","content":"deploys moved to Wednesday"}`, learnedID)),
 		agentcore.AssistantToolCall("c2", "memory_edit", `{"id":"mem-2","action":"forget"}`),
 		agentcore.AssistantToolCall("c3", "memory_edit", `{"id":"mem-2","action":"forget"}`),
@@ -133,8 +146,7 @@ func TestMemoryCurationEndToEnd(t *testing.T) {
 
 	// The recalled block carried the id — the model could only have passed it
 	// back if the prompt rendered it.
-	sys := p2.Recorded[0].Messages[0].Content
-	if !strings.Contains(sys, "id "+learnedID) {
+	if sys := systemText(recorder2); !strings.Contains(sys, "id "+learnedID) {
 		t.Fatalf("recalled block did not render the entry id:\n%s", sys)
 	}
 
@@ -162,11 +174,12 @@ func TestMemoryCurationEndToEnd(t *testing.T) {
 	}
 
 	// Run 3: recall is empty — every row is retracted.
-	p3 := agentcore.NewFauxProvider(agentcore.AssistantText("ok"))
+	recorder3 := &nativeRecorder{}
+	p3 := recordedNativeProvider(recorder3, agentcore.AssistantText("ok"))
 	if _, err := buildMemoryAgent(t, store, allow, p3).Prompt(ctx, "what do you know"); err != nil {
 		t.Fatalf("run 3: %v", err)
 	}
-	if strings.Contains(p3.Recorded[0].Messages[0].Content, "deploys moved") {
+	if strings.Contains(systemText(recorder3), "deploys moved") {
 		t.Error("a retracted memory still appears in recall")
 	}
 }
@@ -176,7 +189,8 @@ func TestMemoryCurationEndToEnd(t *testing.T) {
 func TestMemoryCurationGatedByPolicy(t *testing.T) {
 	ctx := context.Background()
 	store := newMemStore()
-	p := agentcore.NewFauxProvider(
+	recorder := &nativeRecorder{}
+	p := recordedNativeProvider(recorder,
 		agentcore.AssistantToolCall("c1", "learn", `{"lesson":"x"}`),
 		agentcore.AssistantText("done"),
 	)
@@ -184,9 +198,9 @@ func TestMemoryCurationGatedByPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	for _, s := range p.Recorded[0].Tools {
-		if s.Name == memory.ToolLearn || s.Name == memory.ToolMemoryEdit {
-			t.Errorf("%q advertised to a run whose policy denies it", s.Name)
+	for _, name := range recorder.all()[0].Tools {
+		if name == memory.ToolLearn || name == memory.ToolMemoryEdit {
+			t.Errorf("%q advertised to a run whose policy denies it", name)
 		}
 	}
 	if len(res.Tools) != 1 || res.Tools[0].Allowed {
@@ -200,15 +214,15 @@ func TestMemoryCurationGatedByPolicy(t *testing.T) {
 // A run with no memory store gets neither tool — the plugin declines.
 func TestMemoryCurationAbsentWithoutStore(t *testing.T) {
 	ctx := context.Background()
-	p := agentcore.NewFauxProvider(agentcore.AssistantText("ok"))
-	res, err := buildMemoryAgent(t, nil, agentcore.NewAllowList(memory.ToolLearn, memory.ToolMemoryEdit), p).Prompt(ctx, "hi")
+	recorder := &nativeRecorder{}
+	p := recordedNativeProvider(recorder, agentcore.AssistantText("ok"))
+	_, err := buildMemoryAgent(t, nil, agentcore.NewAllowList(memory.ToolLearn, memory.ToolMemoryEdit), p).Prompt(ctx, "hi")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	_ = res
-	for _, s := range p.Recorded[0].Tools {
-		if s.Name == memory.ToolLearn || s.Name == memory.ToolMemoryEdit {
-			t.Errorf("%q advertised on a memoryless run", s.Name)
+	for _, name := range recorder.all()[0].Tools {
+		if name == memory.ToolLearn || name == memory.ToolMemoryEdit {
+			t.Errorf("%q advertised on a memoryless run", name)
 		}
 	}
 }

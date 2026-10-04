@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func unwrapWired(t *testing.T, provider Provider) *wired {
@@ -138,7 +138,7 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	w := unwrapWired(t, p)
-	p.(agentcore.KeyUpdater).UpdateAPIKey("new")
+	p.(protocol.KeyUpdater).UpdateAPIKey("new")
 	if w.APIKey() != "new" {
 		t.Fatalf("wrapper key = %q, want new", w.APIKey())
 	}
@@ -149,7 +149,7 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 		t.Fatalf("Responses peer key = %q, want new", peer.APIKey)
 	}
 	// An empty key is a no-op, not a way to erase the credential.
-	p.(agentcore.KeyUpdater).UpdateAPIKey("")
+	p.(protocol.KeyUpdater).UpdateAPIKey("")
 	if w.APIKey() != "new" {
 		t.Fatalf("empty update erased the key: %q", w.APIKey())
 	}
@@ -159,7 +159,7 @@ func TestWired_UpdateAPIKeyReachesTheWireProvider(t *testing.T) {
 		t.Fatalf("New responses: %v", err)
 	}
 	rw := unwrapWired(t, responses)
-	responses.(agentcore.KeyUpdater).UpdateAPIKey("new")
+	responses.(protocol.KeyUpdater).UpdateAPIKey("new")
 	if inner := rw.inner.(*OpenAIResponsesProvider); inner.APIKey != "new" {
 		t.Fatalf("responses wire key = %q, want new", inner.APIKey)
 	}
@@ -173,7 +173,7 @@ func TestNewPreservesKeyUpdaterCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New static provider: %v", err)
 	}
-	if _, ok := static.(agentcore.KeyUpdater); !ok {
+	if _, ok := static.(protocol.KeyUpdater); !ok {
 		t.Fatalf("static provider %T does not expose KeyUpdater", static)
 	}
 
@@ -186,7 +186,7 @@ func TestNewPreservesKeyUpdaterCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New OAuth provider: %v", err)
 	}
-	if _, ok := oauth.(agentcore.KeyUpdater); ok {
+	if _, ok := oauth.(protocol.KeyUpdater); ok {
 		t.Fatalf("OAuth provider %T unexpectedly exposes KeyUpdater", oauth)
 	}
 }
@@ -199,7 +199,7 @@ func TestNewThreadsOpenAICompatDialect(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := unwrapWired(t, provider)
-	request := w.inner.(*OpenAIProvider).encode(agentcore.ChatRequest{Model: "reasoning", MaxTokens: 2048})
+	request := w.inner.(*OpenAIProvider).encode(protocol.ChatRequest{Model: "reasoning", MaxTokens: 2048})
 	if request.MaxCompletionTokens != 2048 || request.MaxTokens != 0 {
 		t.Fatalf("request = %+v, want max_completion_tokens", request)
 	}

@@ -57,3 +57,35 @@ func TestPiPlanRecoveryRequiresSuccessfulExecution(t *testing.T) {
 		})
 	}
 }
+
+func TestPiPlanIgnoresRequestedCallsAndClearsOnLeaf(t *testing.T) {
+	ctx := context.Background()
+	log := agentcore.NewMemorySessionStore()
+	accepted := agentcore.PiToolOutcome{Executed: true, Trace: agentcore.ToolTrace{Tool: todo.ToolName, Allowed: true, Args: `{"items":[{"content":"accepted plan","status":"pending"}]}`}}
+	payload, _ := json.Marshal(map[string]any{"result": map[string]any{"details": accepted}})
+	for _, entry := range []agentcore.SessionEntry{
+		{Kind: agentcore.EntryPiEffectDone, Content: string(payload)},
+		{Kind: agentcore.EntryMessage, Message: &agentcore.Message{Role: agentcore.RoleAssistant, ToolCalls: []agentcore.ToolCall{{ID: "requested", Name: todo.ToolName, Arguments: resumePlanArgs}}}},
+	} {
+		if err := log.Append(ctx, "plan", entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := todo.NewStore()
+	if _, err := todo.With(plan).BeginRun(ctx, agentcore.RunInfo{Session: log, SessionID: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.List(); len(got) != 1 || got[0].Content != "accepted plan" {
+		t.Fatalf("requested call replaced accepted plan: %+v", got)
+	}
+	if err := log.Append(ctx, "plan", agentcore.SessionEntry{Kind: agentcore.EntryLeaf}); err != nil {
+		t.Fatal(err)
+	}
+	fresh := todo.NewStore()
+	if _, err := todo.With(fresh).BeginRun(ctx, agentcore.RunInfo{Session: log, SessionID: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.List()) != 0 {
+		t.Fatal("finished session plan inherited by a new task")
+	}
+}

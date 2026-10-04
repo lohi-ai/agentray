@@ -2,7 +2,9 @@ package subagent_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"sync"
 	"testing"
@@ -36,49 +38,19 @@ type budgetProbe struct {
 	served   int // parent turns served
 }
 
-func (*budgetProbe) Name() string        { return "budget-probe" }
-func (*budgetProbe) SupportsTools() bool { return true }
-
-func (p *budgetProbe) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
-	for _, m := range req.Messages {
-		if m.Role == agentcore.RoleUser && strings.HasPrefix(m.Content, childTaskPrefix) {
-			return agentcore.AssistantText(childAnswer), nil
+func (p *budgetProbe) Stream(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+	message := nativeAnswer(childAnswer)
+	if agentcore.DelegationDepth(ctx) == 0 {
+		p.mu.Lock()
+		p.served++
+		if p.served > p.attempts {
+			message = nativeAnswer("parent done")
+		} else {
+			message = AssistantToolCall(fmt.Sprintf("s%d", p.served), subagent.ToolSpawnSubagent, fmt.Sprintf(`{"task":%q}`, fmt.Sprintf("%s %d", childTaskPrefix, p.served)))
 		}
+		p.mu.Unlock()
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.served++
-	if p.served > p.attempts {
-		return agentcore.AssistantText("parent done"), nil
-	}
-	return AssistantToolCall(
-		fmt.Sprintf("s%d", p.served),
-		subagent.ToolSpawnSubagent,
-		fmt.Sprintf(`{"task":%q}`, fmt.Sprintf("%s %d", childTaskPrefix, p.served)),
-	), nil
-}
-
-// Stream must be real: the spawn tool drives its child through ContinueStream,
-// so a probe that only implements Chat fails every child for the wrong reason
-// and the budget assertions below would be measuring provider errors.
-func (p *budgetProbe) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	resp, err := p.Chat(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan agentcore.ChatDelta, 4)
-	go func() {
-		defer close(ch)
-		if resp.Message.Content != "" {
-			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
-		}
-		for i := range resp.Message.ToolCalls {
-			tc := resp.Message.ToolCalls[i]
-			ch <- agentcore.ChatDelta{ToolCall: &tc}
-		}
-		ch <- agentcore.ChatDelta{Done: true}
-	}()
-	return ch, nil
+	return ai.ScriptedStream(message)(ctx, model, view, options)
 }
 
 const (
@@ -92,12 +64,12 @@ const (
 func spawnOutcomes(t *testing.T, limits agentcore.Limits, settings subagent.Plugin, attempts int) (ran, blocked int) {
 	t.Helper()
 	agent, err := agentcore.New(agentcore.Config{
-		Provider:   &budgetProbe{attempts: attempts},
-		Model:      "faux-1",
-		Tools:      agentcore.NewToolSet(&echoTool{name: "echo"}),
-		Policy:     agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
-		Limits:     &limits,
-		Extensions: []agentcore.ExtensionFactory{settings},
+		NativeProvider: nativeProvider((&budgetProbe{attempts: attempts}).Stream),
+		Model:          "faux-1",
+		Tools:          agentcore.NewToolSet(&echoTool{name: "echo"}),
+		Policy:         agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
+		Limits:         &limits,
+		Extensions:     []agentcore.ExtensionFactory{settings},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

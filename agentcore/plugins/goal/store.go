@@ -21,7 +21,8 @@ import (
 //
 // A nil *Store is not valid; the plugin always builds one.
 type Store struct {
-	mu sync.Mutex
+	mu    sync.Mutex
+	state *State
 	// goal is the condition currently in force.
 	goal string
 	// pending is set by a write and cleared by the loop's drain. It is what makes

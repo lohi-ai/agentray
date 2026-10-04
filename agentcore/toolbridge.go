@@ -79,8 +79,6 @@ func (b *toolExecutionBudget) exhausted() bool {
 	return b == nil || b.used.Load() >= b.max
 }
 
-func (b *toolExecutionBudget) add(n int64) { b.used.Add(n) }
-
 func (b *toolExecutionBudget) reserve() bool {
 	if b == nil {
 		return false

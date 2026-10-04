@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // oauthTokenApplier is the private seam between pooledProvider and the wire
@@ -23,23 +23,23 @@ import (
 // before the request is built — the request would then go out under another
 // account's credential and Report would blame the wrong account.
 type oauthTokenApplier interface {
-	applyOAuthToken(tok OAuthToken) agentcore.LLMProvider
+	applyOAuthToken(tok OAuthToken) protocol.LLMProvider
 }
 
-// pooledProvider is an agentcore.LLMProvider that draws a live OAuth access
+// pooledProvider is an protocol.LLMProvider that draws a live OAuth access
 // token from a TokenSource for every request instead of holding a static key.
 // It exists because the subscription vendors authenticate a pool of accounts,
 // not one credential: Acquire picks the next usable account (refreshing it when
 // near expiry) and Report feeds the outcome back so a rate-limited or dead
 // account rotates out.
 //
-// It deliberately does NOT implement agentcore.KeyUpdater: the run loop's
+// It deliberately does NOT implement protocol.KeyUpdater: the run loop's
 // per-turn key refresh would overwrite the freshly acquired token with the
 // provider row's sentinel key (OAuthPoolKey), which is never a real credential.
 type pooledProvider struct {
 	vendor       string
 	sessionScope string
-	inner        agentcore.LLMProvider
+	inner        protocol.LLMProvider
 	src          TokenSource
 }
 
@@ -75,7 +75,7 @@ func (s *oauthAttemptState) accept(tok OAuthToken) bool {
 }
 
 func isOAuthAuthFailure(err error) bool {
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) {
 		return false
 	}
@@ -92,7 +92,7 @@ func isOAuthAuthFailure(err error) bool {
 }
 
 func isOAuthConcurrencyCap(err error) bool {
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Status != http.StatusForbidden {
 		return false
 	}
@@ -110,7 +110,7 @@ func (p *pooledProvider) report(ctx context.Context, tok OAuthToken, err error) 
 // token from src. Both arguments are required: a nil source has nothing to
 // draw from, and an inner client that cannot apply a token would send the
 // request unauthenticated.
-func newPooledProvider(vendor string, inner agentcore.LLMProvider, src TokenSource, sessionScope ...string) (*pooledProvider, error) {
+func newPooledProvider(vendor string, inner protocol.LLMProvider, src TokenSource, sessionScope ...string) (*pooledProvider, error) {
 	if src == nil {
 		return nil, fmt.Errorf("ai: provider %q requires a TokenSource (OAuth account pool)", vendor)
 	}
@@ -128,35 +128,35 @@ func newPooledProvider(vendor string, inner agentcore.LLMProvider, src TokenSour
 // the inner wire client with that token installed. An empty pool or an
 // exhausted pool surfaces as a provider error so the loop can escalate rather
 // than retrying a request that has no credential at all.
-func (p *pooledProvider) acquire(ctx context.Context) (agentcore.LLMProvider, OAuthToken, error) {
+func (p *pooledProvider) acquire(ctx context.Context) (protocol.LLMProvider, OAuthToken, error) {
 	tok, err := p.src.Acquire(ctx)
 	if err != nil {
-		return nil, OAuthToken{}, agentcore.NewProviderError(p.vendor, nil, err.Error())
+		return nil, OAuthToken{}, protocol.NewProviderError(p.vendor, nil, err.Error())
 	}
 	return p.inner.(oauthTokenApplier).applyOAuthToken(tok), tok, nil
 }
 
 func (p *pooledProvider) Name() string        { return p.vendor }
 func (p *pooledProvider) SupportsTools() bool { return p.inner.SupportsTools() }
-func (p *pooledProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
-	return agentcore.CapabilitiesOf(p.inner, model)
+func (p *pooledProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
+	return protocol.CapabilitiesOf(p.inner, model)
 }
 
-func (p *pooledProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *pooledProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	state := newOAuthAttemptState()
 	for state.attempts < maxOAuthAuthAttempts {
 		inner, tok, err := p.acquire(ctx)
 		if err != nil {
 			if state.lastAuth != nil {
-				return agentcore.ChatResponse{}, state.lastAuth
+				return protocol.ChatResponse{}, state.lastAuth
 			}
-			return agentcore.ChatResponse{}, err
+			return protocol.ChatResponse{}, err
 		}
 		if !state.accept(tok) {
 			if state.lastAuth != nil {
-				return agentcore.ChatResponse{}, state.lastAuth
+				return protocol.ChatResponse{}, state.lastAuth
 			}
-			return agentcore.ChatResponse{}, agentcore.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
+			return protocol.ChatResponse{}, protocol.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
 		}
 		bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
 		resp, callErr := inner.Chat(ctx, req)
@@ -166,16 +166,16 @@ func (p *pooledProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (a
 		}
 		state.lastAuth = callErr
 	}
-	return agentcore.ChatResponse{}, state.lastAuth
+	return protocol.ChatResponse{}, state.lastAuth
 }
 
-func (p *pooledProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *pooledProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	state := newOAuthAttemptState()
 	ch, tok, cancel, err := p.startStreamAttempt(ctx, req, state)
 	if err != nil {
 		return nil, err
 	}
-	out := make(chan agentcore.ChatDelta, 16)
+	out := make(chan protocol.ChatDelta, 16)
 	go p.runAuthStream(ctx, req, state, tok, ch, cancel, out)
 	return out, nil
 }
@@ -183,7 +183,7 @@ func (p *pooledProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 // startStreamAttempt handles failures raised before a stream channel exists.
 // Those attempts have emitted nothing and are always replay-safe; only typed
 // 401/403 failures consume another credential.
-func (p *pooledProvider) startStreamAttempt(ctx context.Context, req agentcore.ChatRequest, state *oauthAttemptState) (<-chan agentcore.ChatDelta, OAuthToken, context.CancelFunc, error) {
+func (p *pooledProvider) startStreamAttempt(ctx context.Context, req protocol.ChatRequest, state *oauthAttemptState) (<-chan protocol.ChatDelta, OAuthToken, context.CancelFunc, error) {
 	for state.attempts < maxOAuthAuthAttempts {
 		inner, tok, err := p.acquire(ctx)
 		if err != nil {
@@ -196,7 +196,7 @@ func (p *pooledProvider) startStreamAttempt(ctx context.Context, req agentcore.C
 			if state.lastAuth != nil {
 				return nil, OAuthToken{}, nil, state.lastAuth
 			}
-			return nil, OAuthToken{}, nil, agentcore.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
+			return nil, OAuthToken{}, nil, protocol.NewProviderError(p.vendor, nil, "OAuth token source returned an empty or repeated credential")
 		}
 		bindOAuthProviderSession(req.ProviderSession, p.vendor, p.sessionScope, tok)
 		attemptCtx, cancel := context.WithCancel(ctx)
@@ -214,7 +214,7 @@ func (p *pooledProvider) startStreamAttempt(ctx context.Context, req agentcore.C
 	return nil, OAuthToken{}, nil, state.lastAuth
 }
 
-func drainChatDeltas(ch <-chan agentcore.ChatDelta) {
+func drainChatDeltas(ch <-chan protocol.ChatDelta) {
 	go func() {
 		for range ch {
 		}
@@ -225,13 +225,13 @@ func drainChatDeltas(ch <-chan agentcore.ChatDelta) {
 // 401/403 before content rotates credentials and discards that attempt. The
 // first content delta is the commit boundary: after it, errors are forwarded
 // and never replayed, matching agentcore's visible-stream contract.
-func (p *pooledProvider) runAuthStream(ctx context.Context, req agentcore.ChatRequest, state *oauthAttemptState, tok OAuthToken, ch <-chan agentcore.ChatDelta, cancel context.CancelFunc, out chan<- agentcore.ChatDelta) {
+func (p *pooledProvider) runAuthStream(ctx context.Context, req protocol.ChatRequest, state *oauthAttemptState, tok OAuthToken, ch <-chan protocol.ChatDelta, cancel context.CancelFunc, out chan<- protocol.ChatDelta) {
 	defer close(out)
 	defer func() { cancel() }()
 	committed := false
-	var buffered []agentcore.ChatDelta
+	var buffered []protocol.ChatDelta
 
-	send := func(delta agentcore.ChatDelta) bool {
+	send := func(delta protocol.ChatDelta) bool {
 		select {
 		case out <- delta:
 			return true
@@ -256,7 +256,7 @@ func (p *pooledProvider) runAuthStream(ctx context.Context, req agentcore.ChatRe
 			// non-blocking send avoids leaking this goroutine if the caller has
 			// abandoned a full output buffer; agentcore also checks ctx after close.
 			select {
-			case out <- agentcore.ChatDelta{Done: true, Err: ctx.Err()}:
+			case out <- protocol.ChatDelta{Done: true, Err: ctx.Err()}:
 			default:
 			}
 			return

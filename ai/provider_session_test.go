@@ -9,13 +9,13 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
-func adaptiveRequestFixture(session *agentcore.ProviderSession) agentcore.ChatRequest {
-	return agentcore.ChatRequest{
+func adaptiveRequestFixture(session *protocol.ProviderSession) protocol.ChatRequest {
+	return protocol.ChatRequest{
 		Model: "reasoning-model", ProviderSession: session,
-		Messages:        []agentcore.Message{{Role: agentcore.RoleUser, Content: "hello"}},
+		Messages:        []protocol.Message{{Role: protocol.RoleUser, Content: "hello"}},
 		ReasoningEffort: "high", CacheKey: "conversation", CacheRetention: "long",
 		OutputSchema: verdictSchema(),
 	}
@@ -43,7 +43,7 @@ func TestOpenAIChatLearnsUnsupportedHintWithinProviderSession(t *testing.T) {
 	defer srv.Close()
 
 	p := NewOpenAIProvider("k", srv.URL, DefaultCompat())
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	defer session.Close()
 	req := adaptiveRequestFixture(session)
 	if _, err := p.Chat(context.Background(), req); err != nil {
@@ -78,7 +78,7 @@ func TestOpenAIChatLearnsUnsupportedHintWithinProviderSession(t *testing.T) {
 	}
 
 	// A different logical conversation does not inherit private request history.
-	fresh := agentcore.NewProviderSession()
+	fresh := protocol.NewProviderSession()
 	defer fresh.Close()
 	p = NewOpenAIProvider("k", srv.URL, DefaultCompat())
 	if _, err := p.Chat(context.Background(), adaptiveRequestFixture(fresh)); err != nil {
@@ -118,10 +118,10 @@ func TestOpenAIChatLearnsMaxCompletionTokenDialect(t *testing.T) {
 
 	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
 	p.HTTP = srv.Client()
-	session := agentcore.NewProviderSession()
-	req := agentcore.ChatRequest{
+	session := protocol.NewProviderSession()
+	req := protocol.ChatRequest{
 		Model: "reasoning-model", MaxTokens: 2048, ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hello"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "hello"}},
 	}
 	if _, err := p.Chat(context.Background(), req); err != nil {
 		t.Fatalf("first Chat: %v", err)
@@ -164,7 +164,7 @@ func TestOpenAIStreamRetriesUnsupportedHintBeforeExposingOutput(t *testing.T) {
 	defer srv.Close()
 
 	p := NewOpenAIProvider("k", srv.URL, DefaultCompat())
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	defer session.Close()
 	req := adaptiveRequestFixture(session)
 	req.ReasoningEffort = ""
@@ -208,7 +208,7 @@ func TestOpenAIAdaptiveFallbackDoesNotHideInvalidSchema(t *testing.T) {
 	defer srv.Close()
 
 	p := NewOpenAIProvider("k", srv.URL, DefaultCompat())
-	_, err := p.Chat(context.Background(), adaptiveRequestFixture(agentcore.NewProviderSession()))
+	_, err := p.Chat(context.Background(), adaptiveRequestFixture(protocol.NewProviderSession()))
 	if err == nil {
 		t.Fatal("invalid schema was silently retried without response_format")
 	}
@@ -230,12 +230,12 @@ type endpointResetProbe struct{ closes int32 }
 func (p *endpointResetProbe) Close() { atomic.AddInt32(&p.closes, 1) }
 
 func TestOAuthAccountSwitchResetsOnlyAccountScopedProviderState(t *testing.T) {
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	defer session.Close()
 	account := &accountResetProbe{}
 	endpoint := &endpointResetProbe{}
-	session.State("chain", func() agentcore.ProviderSessionState { return account })
-	session.State("endpoint", func() agentcore.ProviderSessionState { return endpoint })
+	session.State("chain", func() protocol.ProviderSessionState { return account })
+	session.State("endpoint", func() protocol.ProviderSessionState { return endpoint })
 
 	bindOAuthProviderSession(session, VendorOpenAICodex, "provider-row-1", OAuthToken{AccountID: "acct-1"})
 	bindOAuthProviderSession(session, VendorOpenAICodex, "provider-row-1", OAuthToken{AccountID: "acct-1"})

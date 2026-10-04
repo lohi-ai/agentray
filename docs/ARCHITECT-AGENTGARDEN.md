@@ -84,7 +84,7 @@ just code in a different folder.
 
 **Plugins** are everything else, and they reach the loop only through the generic
 interfaces in `agentcore/extension.go`: `ToolInterceptor`, `BatchInterceptor`,
-`StepInterceptor`, `StopInterceptor`, `RunObserver`, `LogObserver`,
+`StepInterceptor`, `StopInterceptor`, `RunObserver`,
 `ToolContributor`, `PromptContributor`, `ContextContributor`, `RunCloser`,
 `SelfGated`, `GoalReviser`. The loop discovers what an extension can do by **type assertion** at
 run start, so the set of things a plugin may do is open — adding a new kind of
@@ -123,7 +123,8 @@ them (after every tool result in a batch, never interleaved, which would break
 tool-call/result adjacency) and writes them to the durable log. No plugin touches
 `appendEntry`. That is what makes "model-visible means logged" structurally true
 instead of a convention every new injector has to remember —
-`observe.LogInvariant` checks it at runtime.
+native checkpoint/effect validation checks it during recovery. Tracing uses the
+shared `telemetry` package; there is no observer plugin.
 
 `agentcore/plugins/preset` composes them back into agentcore's default agent, and
 two tests carry the claims: `preset.New(cfg)` and `agentcore.New(cfg)` build the

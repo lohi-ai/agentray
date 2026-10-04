@@ -130,10 +130,11 @@ func TestRecalledBlockClampsAfterDedup(t *testing.T) {
 // not called up front.
 func TestSystemPromptAdvertisesHeadersNotBodies(t *testing.T) {
 	var loaderCalls int
-	faux := NewFauxProvider(AssistantText("done"))
+	recorder := &nativeRecorder{}
+	faux := recordedNativeProvider(recorder, AssistantText("done"))
 	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
+		NativeProvider: faux,
+		Model:          "test",
 		Definition: AgentDefinition{
 			Soul:   "identity",
 			Agents: "mission",
@@ -158,7 +159,12 @@ func TestSystemPromptAdvertisesHeadersNotBodies(t *testing.T) {
 	if loaderCalls != 0 {
 		t.Fatalf("loader must not run during perceive, got %d calls", loaderCalls)
 	}
-	system := faux.Recorded[0].Messages[0].Content
+	var system string
+	for _, m := range recorder.all()[0].Messages {
+		if m.Role == RoleSystem {
+			system = m.Content
+		}
+	}
 	// All enabled headers present; disabled one absent.
 	for _, want := range []string{"id: query", "query-runner", "id: email", "emailer"} {
 		if !strings.Contains(system, want) {
@@ -179,12 +185,12 @@ func TestSystemPromptAdvertisesHeadersNotBodies(t *testing.T) {
 // only that skill.
 func TestReadSkillRoundTrip(t *testing.T) {
 	var loadedIDs []string
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		AssistantToolCall("c1", readSkillToolName, `{"id":"query"}`),
 		AssistantText("loaded and done"),
 	)
 	agent, err := New(Config{
-		Provider: faux,
+		NativeProvider: faux,
 		Model:    "test",
 		Definition: AgentDefinition{
 			Skills: []Skill{
@@ -236,12 +242,12 @@ func TestReadSkillRoundTrip(t *testing.T) {
 // TestReadSkillServesPreloadedBody verifies a preloaded body is returned without
 // a loader configured.
 func TestReadSkillServesPreloadedBody(t *testing.T) {
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		AssistantToolCall("c1", readSkillToolName, `{"id":"sql-runner"}`),
 		AssistantText("done"),
 	)
 	agent, err := New(Config{
-		Provider: faux,
+		NativeProvider: faux,
 		Model:    "test",
 		Definition: AgentDefinition{
 			Skills: []Skill{{Name: "sql-runner", Description: "sql helper", Body: "preloaded body", Enabled: true}},

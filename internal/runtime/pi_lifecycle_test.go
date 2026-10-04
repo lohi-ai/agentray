@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestPiHostLifecyclePreservesExplicitToolRestriction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	cfg := PiRunConfig{Host: host, Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{"tools":[]}}`)}}}
+	cfg := PiRunConfig{Host: host, Session: PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`{"initialState":{"tools":[]}}`)}}}
 	cfg.Session.SessionID = "wrong-session"
 	if _, err := bindPiHostLifecycle(ctx, &cfg, &piRunProjection{}); err == nil {
 		t.Fatal("accepted mismatched tool/persistence session")
@@ -58,7 +59,7 @@ func TestPiHostStartupFailureDoesNotConsumeSteering(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	_, err = RunPi(ctx, PiRunConfig{Host: host, Input: json.RawMessage(`"test"`), Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`null`)}}})
+	_, err = RunPi(ctx, PiRunConfig{Host: host, Input: json.RawMessage(`"test"`), Session: PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`null`)}}})
 	if err == nil || drains != 0 {
 		t.Fatalf("failed startup consumed queued input: drains=%d err=%v", drains, err)
 	}
@@ -75,7 +76,7 @@ func TestPiHostLifecycleRejectsConflictingTurnOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	cfg := PiRunConfig{Host: host, Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["finishTurn"]}`)}}}
+	cfg := PiRunConfig{Host: host, Session: PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["finishTurn"]}`)}}}
 	if _, err := bindPiHostLifecycle(ctx, &cfg, &piRunProjection{}); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("silently replaced existing stop policy: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestPiHostMessagesCannotRewriteProviderArtifacts(t *testing.T) {
 		{Role: agentcore.RoleUser, ToolCallID: "call"},
 		{Role: agentcore.RoleSystem, ContentParts: []agentcore.ContentPart{{Type: agentcore.ContentPartImage}}},
 	} {
-		if _, err := piHostMessages([]agentcore.Message{message}); err == nil {
+		if _, err := nativehost.InputMessages([]agentcore.Message{message}); err == nil {
 			t.Fatalf("accepted invalid host injection: %+v", message)
 		}
 	}

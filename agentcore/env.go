@@ -5,13 +5,15 @@ import (
 	"io"
 )
 
-// Env carries injected capabilities the core depends on rather than reaching
-// for concrete infrastructure. Extend with FileSystem/Shell as consumers need.
+// Env describes host-owned tool execution infrastructure. It is executor
+// configuration, not an agent capability installed through plugins/extensions.
 type Env struct {
 	// Sandbox is the optional isolation substrate for tools that execute
 	// untrusted code (shell, file, browser). nil when no such tools are wired —
 	// the analytics tools never touch it. The concrete backend lives outside
-	// this leaf package and is injected by the host.
+	// this leaf package and is injected by the host. This field records the
+	// backend for diagnostics; the host must also bind it to each tool that uses
+	// it. Setting this field alone does not sandbox a tool.
 	Sandbox Sandbox
 	// Credentials is the optional secret resolver. When set, tool arguments are
 	// passed through it at the trust boundary — after the call has been traced

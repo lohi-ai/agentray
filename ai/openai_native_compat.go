@@ -39,15 +39,16 @@ type OpenAICompletionsCompat struct {
 }
 
 type completionsModel struct {
-	ID, API, Provider, BaseURL string
-	Input                      []string
-	Reasoning                  bool
-	MaxTokens                  float64
-	ContextWindow              float64
-	ThinkingLevelMap           map[string]json.RawMessage
-	SamplingParams             map[string]json.RawMessage
-	Compat                     map[string]json.RawMessage
-	Cost                       completionsCost
+	ID, API, Provider, BaseURL    string
+	Input                         []string
+	Reasoning                     bool
+	MaxTokens                     float64
+	ContextWindow                 float64
+	ThinkingLevelMap              map[string]json.RawMessage
+	SamplingParams                map[string]json.RawMessage
+	SamplingParamsByThinkingLevel map[string]json.RawMessage
+	Compat                        map[string]json.RawMessage
+	Cost                          completionsCost
 }
 
 func ResolveOpenAICompletionsCompat(raw json.RawMessage) (OpenAICompletionsCompat, error) {

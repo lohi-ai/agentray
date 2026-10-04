@@ -6,14 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
-func streamError(t *testing.T, ch <-chan agentcore.ChatDelta) error {
+func streamError(t *testing.T, ch <-chan protocol.ChatDelta) error {
 	t.Helper()
 	var got error
 	for delta := range ch {
@@ -34,81 +33,20 @@ func TestOpenAIStreamClassifiesInBandRateLimit(t *testing.T) {
 
 	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	err = streamError(t, ch)
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) {
 		t.Fatalf("stream error = %T %v, want ProviderError", err, err)
 	}
 	if providerErr.Status != http.StatusTooManyRequests || providerErr.RetryAfter != 2500*time.Millisecond {
 		t.Fatalf("provider error = %+v, want status=429 retry_after=2.5s", providerErr)
 	}
-	if !agentcore.IsRetryable(err) {
+	if !protocol.IsRetryable(err) {
 		t.Fatalf("in-band rate limit is not retryable: %v", err)
-	}
-}
-
-func TestAgentRetriesPreOutputInBandThrottle(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if calls.Add(1) == 1 {
-			_, _ = w.Write([]byte("data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n"))
-			return
-		}
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\n" +
-			"data: [DONE]\n\n"))
-	}))
-	defer srv.Close()
-
-	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
-	p.StreamHTTP = srv.Client()
-	retry := agentcore.RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
-	agent, err := agentcore.New(agentcore.Config{Provider: p, Model: "m", Retry: &retry})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	var visible strings.Builder
-	result, err := agent.PromptStream(context.Background(), "go", func(event agentcore.StreamEvent) {
-		visible.WriteString(event.Token)
-	})
-	if err != nil {
-		t.Fatalf("PromptStream: %v", err)
-	}
-	if result.Final != "recovered" || visible.String() != "recovered" || calls.Load() != 2 {
-		t.Fatalf("final=%q visible=%q calls=%d, want recovered/recovered/2", result.Final, visible.String(), calls.Load())
-	}
-}
-
-func TestAgentDoesNotReplayInBandErrorAfterVisibleOutput(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n" +
-			"data: {\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}\n\n"))
-	}))
-	defer srv.Close()
-
-	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
-	p.StreamHTTP = srv.Client()
-	retry := agentcore.RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond}
-	agent, err := agentcore.New(agentcore.Config{Provider: p, Model: "m", Retry: &retry})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	var visible strings.Builder
-	_, err = agent.PromptStream(context.Background(), "go", func(event agentcore.StreamEvent) {
-		visible.WriteString(event.Token)
-	})
-	if err == nil {
-		t.Fatal("PromptStream succeeded after an in-band failure")
-	}
-	if visible.String() != "partial" || calls.Load() != 1 {
-		t.Fatalf("visible=%q calls=%d, want partial/1", visible.String(), calls.Load())
 	}
 }
 
@@ -121,12 +59,12 @@ func TestOpenAIStreamInBandQuotaIsTerminal(t *testing.T) {
 
 	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	err = streamError(t, ch)
-	if err == nil || agentcore.IsRetryable(err) {
+	if err == nil || protocol.IsRetryable(err) {
 		t.Fatalf("quota error = %v, want terminal", err)
 	}
 }
@@ -140,16 +78,16 @@ func TestAnthropicStreamClassifiesInBandOverload(t *testing.T) {
 
 	p := NewAnthropicProvider("key", srv.URL)
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	err = streamError(t, ch)
-	var providerErr *agentcore.ProviderError
+	var providerErr *protocol.ProviderError
 	if !errors.As(err, &providerErr) || providerErr.Status != http.StatusServiceUnavailable {
 		t.Fatalf("stream error = %T %+v, want ProviderError status=503", err, providerErr)
 	}
-	if !agentcore.IsRetryable(err) {
+	if !protocol.IsRetryable(err) {
 		t.Fatalf("in-band overload is not retryable: %v", err)
 	}
 }
@@ -163,12 +101,12 @@ func TestOpenAIStreamRequiresTerminalEvent(t *testing.T) {
 
 	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	err = streamError(t, ch)
-	if err == nil || !agentcore.IsRetryable(err) {
+	if err == nil || !protocol.IsRetryable(err) {
 		t.Fatalf("truncated stream error = %v, want retryable", err)
 	}
 }
@@ -182,12 +120,12 @@ func TestAnthropicStreamRequiresMessageStop(t *testing.T) {
 
 	p := NewAnthropicProvider("key", srv.URL)
 	p.StreamHTTP = srv.Client()
-	ch, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	ch, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
 	err = streamError(t, ch)
-	if err == nil || !agentcore.IsRetryable(err) {
+	if err == nil || !protocol.IsRetryable(err) {
 		t.Fatalf("truncated stream error = %v, want retryable", err)
 	}
 }
@@ -201,7 +139,7 @@ func TestProviderHTTPErrorBodyIsBounded(t *testing.T) {
 
 	p := NewOpenAIProvider("key", srv.URL, DefaultCompat())
 	p.StreamHTTP = srv.Client()
-	_, err := p.Stream(context.Background(), agentcore.ChatRequest{Model: "m"})
+	_, err := p.Stream(context.Background(), protocol.ChatRequest{Model: "m"})
 	if err == nil {
 		t.Fatal("Stream succeeded, want HTTP error")
 	}
@@ -220,7 +158,7 @@ func TestInBandProviderErrorAcceptsFlatAndCamelCaseSignals(t *testing.T) {
 		`{"error":{"type":"rateLimitError","message":"busy"}}`,
 	} {
 		err, ok := inBandProviderError("compat", nil, []byte(payload))
-		if !ok || err.Status != http.StatusTooManyRequests || !agentcore.IsRetryable(err) {
+		if !ok || err.Status != http.StatusTooManyRequests || !protocol.IsRetryable(err) {
 			t.Errorf("payload %s => ok=%v err=%+v, want retryable 429", payload, ok, err)
 		}
 	}

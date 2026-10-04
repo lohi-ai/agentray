@@ -7,7 +7,7 @@
 // ever drifts from Config, that test fails.
 //
 // Full(cfg, opts) is that same list plus the capabilities Config has no field
-// for — spill, jobs, the repeat guard, session retrieval, the observers — and
+// for — spill, jobs, the repeat guard, session retrieval, telemetry supplied by the host — and
 // is what a real deployment composes.
 //
 // Use either as the starting point for a custom agent. Take the list, drop or
@@ -15,23 +15,25 @@
 // to agentcore.Build:
 //
 //	ps := preset.Full(cfg, preset.Options{Spill: myStore})
-//	ps = append(ps, myDriverPlugin{}, myCapability{})  // e.g. r.SetDriver(...)
+//	ps = append(ps, myCapability{})
 //	agent, err := agentcore.Build(ps...)
 //
-// Control flow needs no entry here: Build installs agentcore.DefaultDriver
-// when no plugin claims the driver seam, and a composition that wants a
-// different loop registers a plugin whose Register calls r.SetDriver.
+// Plugins configure the native engine through hooks and extensions.
 package preset
 
 import (
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
+	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
+	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/jobs"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/repeatguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/sessionquery"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
+	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
 )
 
 // Plugins returns the plugin set that reproduces agentcore.New(cfg).
@@ -40,10 +42,10 @@ import (
 // capabilities and extensions come from their respective plugin packages.
 func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 	list := []agentcore.Plugin{
-		// spine — the driver seam is left unclaimed; Build defaults it to the
-		// built-in reason→act loop, and a custom driver claims it via SetDriver.
+		// Model transport and native fallback.
 		agentcore.ModelPlugin{
 			Provider:          cfg.Provider,
+			NativeProvider:    cfg.NativeProvider,
 			Model:             cfg.Model,
 			ContextWindow:     cfg.ContextWindow,
 			Escalation:        cfg.Escalation,
@@ -106,23 +108,29 @@ func Plugins(cfg agentcore.Config) []agentcore.Plugin {
 // installed" rather than to a broken one — a partially wired composition must
 // lose a feature, never gain a silently wrong one.
 type Options struct {
+	// Plan pins and checkpoints this run's checklist; forks get an isolated plan.
+	Plan *todo.Store
+	// Subagents enables governed delegation with these host-selected bounds.
+	Subagents *subagent.Plugin
+	// NativeAdvisor reviews finished work with cfg.NativeProvider and accounts usage.
+	NativeAdvisor  bool
+	AdvisorOptions advisor.Plugin
+	// GoalLifecycle opts into durable lifecycle controls; optional budgets are absolute.
+	GoalLifecycle *goal.Plugin
+	// ConsolidateMemory enables native distillation when Memory supports ConsolidationStore.
+	ConsolidateMemory bool
+	// Interactive exposes ask; the host must publish questions and resume answers.
+	Interactive bool
+	// NativeHistory enables retrieval from opaque native checkpoints.
+	NativeHistory bool
+	// FinishGuard supplies the host's completion evidence rule, if any.
+	FinishGuard finishguard.Guard
 	// Spill persists an oversized tool result and hands the model a locator for
 	// the rest. nil leaves spilling OFF (the loop's head+tail truncation stands),
 	// which is the honest default: the locator is written to the durable session
 	// log, so a store that cannot outlive the process would mint locators that a
 	// resumed run reads back as not-found. Supply a durable store to turn it on.
 	Spill spill.SpillStore
-	// ReportLogInvariant receives each divergence between the live history and
-	// the durable log — the "model-visible means logged" check that catches
-	// resume corruption at the turn it is introduced rather than in a resumed run
-	// weeks later. nil installs no detector. Advisory by design: it reports and
-	// never alters the run, so an error-level log is the right sink in production.
-	ReportLogInvariant func(observe.LogInvariantViolation)
-	// Observe installs the run's outward watchers (turn boundaries, provider
-	// calls, executed tool calls, run end). The zero value installs nothing, so a
-	// composition can wire it unconditionally and let configuration decide what
-	// is actually metered.
-	Observe observe.Hooks
 	// Jobs owns background work. nil uses a fresh in-process store per run —
 	// correct for a single server, since a job cannot outlive the run that
 	// started it anyway.
@@ -134,7 +142,7 @@ type Options struct {
 
 // Full is the default agent plus the capabilities that agentcore.Config has no
 // field for: retrieval over the run's own history, background work, oversized
-// output, the repeat-loop nudge, and the two observers.
+// output, the repeat-loop nudge, and native lifecycle hooks.
 //
 // The split from Plugins is the point. Plugins is pinned to agentcore.New(cfg)
 // parity — every entry there answers to a Config field, and preset_test proves
@@ -146,17 +154,59 @@ type Options struct {
 // "spill") is a complete agent minus spilling, with no trace of it left.
 func Full(cfg agentcore.Config, o Options) []agentcore.Plugin {
 	list := Plugins(cfg)
+	if o.GoalLifecycle != nil {
+		g := *o.GoalLifecycle
+		g.Goal = cfg.Goal
+		g.Lifecycle = true
+		for i, p := range list {
+			if p.Name() == g.Name() {
+				list[i] = g
+				break
+			}
+		}
+	}
+	if o.ConsolidateMemory && cfg.Memory != nil {
+		provider := cfg.NativeProvider
+		if provider != nil && cfg.Retry != nil {
+			copy := *provider
+			copy.Retry = *cfg.Retry
+			provider = &copy
+		}
+		for i, p := range list {
+			if p.Name() == "memory" {
+				list[i] = memory.Plugin{Store: cfg.Memory, NativeProvider: provider}
+				break
+			}
+		}
+	}
+	if o.Interactive {
+		list = append(list, ask.Plugin{})
+	}
 	if o.Spill != nil {
 		list = append(list, spill.To(o.Spill))
 	}
 	list = append(list,
 		jobs.Plugin{Store: o.Jobs},
 		repeatguard.Default(),
-		sessionquery.Plugin{Provider: o.SessionQuery},
-		o.Observe,
+		sessionquery.Plugin{Provider: o.SessionQuery, Native: o.NativeHistory},
 	)
-	if o.ReportLogInvariant != nil {
-		list = append(list, observe.LogInvariant{Report: o.ReportLogInvariant})
+	if o.Plan != nil {
+		list = append(list, todo.With(o.Plan))
+	}
+	if o.Subagents != nil {
+		list = append(list, *o.Subagents)
+	}
+	if o.FinishGuard != nil {
+		list = append(list, finishguard.Of(o.FinishGuard))
+	}
+	if o.NativeAdvisor {
+		provider := cfg.NativeProvider
+		if provider != nil && cfg.Retry != nil {
+			copy := *provider
+			copy.Retry = *cfg.Retry
+			provider = &copy
+		}
+		list = append(list, advisor.NativeWithOptions(provider, o.AdvisorOptions))
 	}
 	return list
 }

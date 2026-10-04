@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -35,7 +35,7 @@ func readProviderErrorBody(r io.Reader) []byte {
 // explicit recognized status field or a known machine-readable error code;
 // prose mentioning a status cannot accidentally enter an authentication or
 // retry lane.
-func inBandProviderError(provider string, resp *http.Response, payload []byte) (*agentcore.ProviderError, bool) {
+func inBandProviderError(provider string, resp *http.Response, payload []byte) (*protocol.ProviderError, bool) {
 	trimmed := strings.TrimSpace(string(payload))
 	if trimmed == "" {
 		return nil, false
@@ -47,7 +47,7 @@ func inBandProviderError(provider string, resp *http.Response, payload []byte) (
 		if status == 0 {
 			return nil, false
 		}
-		pe := agentcore.NewProviderError(provider, resp, limitErrorDetail(trimmed))
+		pe := protocol.NewProviderError(provider, resp, limitErrorDetail(trimmed))
 		pe.Status = status
 		return pe, true
 	}
@@ -86,7 +86,7 @@ func inBandProviderError(provider string, resp *http.Response, payload []byte) (
 	if status == 0 {
 		status = knownStatus
 	}
-	pe := agentcore.NewProviderError(provider, resp, limitErrorDetail(message))
+	pe := protocol.NewProviderError(provider, resp, limitErrorDetail(message))
 	if status != 0 {
 		pe.Status = status
 	} else if strictToolsRejectionMessage(message) {
@@ -262,8 +262,8 @@ func leadingRetryableStatus(message string) int {
 
 // providerErrorWithStatus retains retry/reset headers from the HTTP response
 // while applying the status carried by an HTTP-200 stream event.
-func providerErrorWithStatus(provider string, resp *http.Response, status int, message string) *agentcore.ProviderError {
-	err := agentcore.NewProviderError(provider, resp, message)
+func providerErrorWithStatus(provider string, resp *http.Response, status int, message string) *protocol.ProviderError {
+	err := protocol.NewProviderError(provider, resp, message)
 	err.Status = status
 	return err
 }

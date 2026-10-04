@@ -185,7 +185,7 @@ Already shipped: hardened sandbox image and credential vault.
 | Repeated-tool-call reminder | `agentcore/plugins/repeatguard/` |
 | Verify-on-stop (evidence guard) | `agentcore/plugins/finishguard/` |
 | Delegation (`spawn_subagent`) | `agentcore/plugins/subagent/` |
-| "Model-visible means logged" invariant | `agentcore/plugins/observe/` |
+| "Model-visible means logged" invariant | `agentcore/native_session.go` and `agentcore/host/` (native recovery validation) |
 | Sandbox contract | `agentcore/env.go` |
 | Docker sandbox + injection guard | `sandbox/` |
 | Credential vault | `credential/`; `internal/shared/credential/` retains host env loading and compatibility |

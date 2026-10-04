@@ -948,11 +948,6 @@ func RecoverSession(log []SessionEntry, tools *ToolSet, policy RecoveryPolicy) R
 // level resume path so the model always sees the same wording.
 const interruptedCallNote = "[interrupted: this tool call did not complete before the run was suspended and was not re-run automatically]"
 
-// draftMarker prefixes the system message a resumed run carries for a crashed
-// turn's partial assistant text (trailing EntryAssistantFrame records), so the
-// model reads it as its own interrupted work rather than user input.
-const draftMarker = "[interrupted draft: the previous run was cut off mid-reply; this is the text it had produced so far]"
-
 // CloseDanglingCalls returns a transcript in which every assistant tool call
 // that never received a result is satisfied by a synthesized interrupted-note
 // tool message. Providers reject a history with an unanswered tool call, so
@@ -986,17 +981,6 @@ func CloseDanglingCalls(messages []Message) []Message {
 		}
 	}
 	return out
-}
-
-// logHasQuestion reports whether the log already carries an EntryQuestion for
-// callID — the dedupe check a re-park runs before recording the question again.
-func logHasQuestion(log []SessionEntry, callID string) bool {
-	for _, e := range log {
-		if e.Kind == EntryQuestion && e.CallID == callID {
-			return true
-		}
-	}
-	return false
 }
 
 // PendingQuestion returns the newest parked call still awaiting an answer: an

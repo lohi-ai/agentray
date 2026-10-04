@@ -93,11 +93,11 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 		provider := a.config.StreamFn
 		if provider == nil {
 			if options.InitialState.Model != nil {
-				if err := validateNativeProviderModel(options.InitialState.Model); err != nil {
+				if err := ai.ValidateNativeModel(options.InitialState.Model); err != nil {
 					return options, err
 				}
 			}
-			provider = NativeProviderStream
+			provider = (ai.NativeProvider{}).Stream
 		}
 		stream = a.nativeProviderStream(provider)
 	}

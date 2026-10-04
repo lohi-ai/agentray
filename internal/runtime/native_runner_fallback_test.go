@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 )
 
@@ -96,8 +96,8 @@ func TestNativeRunnerFallbackCompactionToolAndResume(t *testing.T) {
 		return id + "-fresh", nil
 	}
 	var mu sync.Mutex
-	var traces []observe.TraceRecord
-	p.Tracer = observe.SinkFunc(func(record observe.TraceRecord) { mu.Lock(); defer mu.Unlock(); traces = append(traces, record) })
+	var traces []llm.TraceRecord
+	p.Tracer = llm.SinkFunc(func(record llm.TraceRecord) { mu.Lock(); defer mu.Unlock(); traces = append(traces, record) })
 	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{}))
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "write and finish", NativeHistory: piRequestJSON(piLongRequest())}, tier, nil)
 	if err != nil || result.Final != "finished" || effects.Load() != 1 || primary.Load() != 1 || fallback.Load() != 2 || summaryPrimary.Load() != 1 || summaryFallback.Load() != 1 {
@@ -233,7 +233,7 @@ func TestNativeRunnerFallbackChildOwnsSelection(t *testing.T) {
 	p.Tools = nil
 	var traceMu sync.Mutex
 	traceCount, traceInput := 0, 0
-	p.Tracer = observe.SinkFunc(func(record observe.TraceRecord) {
+	p.Tracer = llm.SinkFunc(func(record llm.TraceRecord) {
 		traceMu.Lock()
 		defer traceMu.Unlock()
 		traceCount++

@@ -3,7 +3,7 @@ package ai
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Anchor placement is the LOOP's (agentcore/cacheanchor.go); translating a
@@ -16,16 +16,16 @@ import (
 // the request stays within Anthropic's 4-breakpoint cap.
 func TestAnthropicEncodeHonorsAnchors(t *testing.T) {
 	p := NewAnthropicProvider("k", "")
-	req := agentcore.ChatRequest{
+	req := protocol.ChatRequest{
 		Model:    "claude-x",
 		CacheKey: "s",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "sys", CacheAnchor: true}, // hoisted — no attachment point
-			{Role: agentcore.RoleUser, Content: "u1", CacheAnchor: true},
-			{Role: agentcore.RoleAssistant, Content: "a1", CacheAnchor: true},
-			{Role: agentcore.RoleUser, Content: "u2", CacheAnchor: true},
-			{Role: agentcore.RoleAssistant, Content: "a2", CacheAnchor: true},
-			{Role: agentcore.RoleUser, Content: "u3"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "sys", CacheAnchor: true}, // hoisted — no attachment point
+			{Role: protocol.RoleUser, Content: "u1", CacheAnchor: true},
+			{Role: protocol.RoleAssistant, Content: "a1", CacheAnchor: true},
+			{Role: protocol.RoleUser, Content: "u2", CacheAnchor: true},
+			{Role: protocol.RoleAssistant, Content: "a2", CacheAnchor: true},
+			{Role: protocol.RoleUser, Content: "u3"},
 		},
 	}
 	out := p.encode(req)
@@ -47,12 +47,12 @@ func TestAnthropicEncodeHonorsAnchors(t *testing.T) {
 // still apply.
 func TestAnthropicEncodeAnchorFallback(t *testing.T) {
 	p := NewAnthropicProvider("k", "")
-	out := p.encode(agentcore.ChatRequest{
+	out := p.encode(protocol.ChatRequest{
 		Model:    "claude-x",
 		CacheKey: "s",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleUser, Content: "u1"},
-			{Role: agentcore.RoleAssistant, Content: "a1"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleUser, Content: "u1"},
+			{Role: protocol.RoleAssistant, Content: "a1"},
 		},
 	})
 	last := out.Messages[len(out.Messages)-1]
@@ -77,17 +77,17 @@ func TestAnthropicEncodeAnchorFallback(t *testing.T) {
 // use; anchors requested and unmappable is not.
 func TestAnthropicEncodeDoesNotFallBackOverADeliberateAnchor(t *testing.T) {
 	p := NewAnthropicProvider("k", "")
-	out := p.encode(agentcore.ChatRequest{
+	out := p.encode(protocol.ChatRequest{
 		Model:    "claude-x",
 		CacheKey: "s",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleUser, Content: "u1"},
-			{Role: agentcore.RoleAssistant, Content: "a1"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleUser, Content: "u1"},
+			{Role: protocol.RoleAssistant, Content: "a1"},
 			// The loop's chosen breakpoint: a system message (a compaction
 			// checkpoint or the pinned requirement), hoisted out of Messages.
-			{Role: agentcore.RoleSystem, Content: "checkpoint", CacheAnchor: true},
+			{Role: protocol.RoleSystem, Content: "checkpoint", CacheAnchor: true},
 			// The hook's regenerated trailer, which must NOT be anchored.
-			{Role: agentcore.RoleUser, Content: "[run plan]\n[~] step one"},
+			{Role: protocol.RoleUser, Content: "[run plan]\n[~] step one"},
 		},
 	})
 	for i, m := range out.Messages {

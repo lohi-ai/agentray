@@ -143,12 +143,12 @@ func (s *LabService) RunTest(ctx context.Context, userID, projectID, agentID, in
 // so the verdict stays reproducible. Any provider/parse failure is returned as an
 // error so RunTest can degrade to the deterministic diff rather than guess.
 func (s *LabService) judge(ctx context.Context, projectID, want, actual string) (bool, string, error) {
-	prov, model, err := s.runner.CheapProvider(ctx, projectID)
+	tier, err := s.runner.cheapTier(ctx, projectID)
 	if err != nil {
 		return false, "", err
 	}
-	resp, err := prov.Chat(ctx, agentcore.ChatRequest{
-		Model:     model,
+	resp, err := tier.complete(ctx, s.runner.Tracer, agentcore.ChatRequest{
+		Model:     tier.Model,
 		MaxTokens: 256,
 		Messages: []agentcore.Message{
 			{Role: agentcore.RoleSystem, Content: labJudgeSystemPrompt},

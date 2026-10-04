@@ -227,3 +227,44 @@ func TestPiContextHooksPreserveNativeMessagesOnFailure(t *testing.T) {
 		})
 	}
 }
+
+type nativeContextTestExtension struct {
+	label     string
+	transform PiContextHook
+}
+
+func (e nativeContextTestExtension) Name() string { return e.label }
+func (e nativeContextTestExtension) BeginRun(context.Context, RunInfo) (Extension, error) {
+	return e, nil
+}
+func (e nativeContextTestExtension) TransformNativeContext(ctx context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+	return e.transform(ctx, messages)
+}
+
+func TestPiContextExtensionsComposeAndIsolateFailedMutations(t *testing.T) {
+	ctx := context.Background()
+	var reports []string
+	a := piHostAgent(t, Config{
+		Hooks: Hooks{ErrorPolicy: HookThrow, OnError: func(source string, _ error) { reports = append(reports, source) }},
+		Extensions: []ExtensionFactory{
+			nativeContextTestExtension{label: "broken", transform: func(_ context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+				messages[0][0] = '!'
+				return nil, errors.New("failed context extension")
+			}},
+			nativeContextTestExtension{label: "reminder", transform: func(_ context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+				return append(messages, json.RawMessage(`{"role":"system","content":"run-local reminder"}`)), nil
+			}},
+		},
+	})
+	host, err := a.OpenPiTools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	input := json.RawMessage(`[{"role":"assistant","content":[{"type":"thinking","thinking":"private","thinkingSignature":"native-signature"}],"opaque":9007199254740993}]`)
+	before := string(input)
+	output := host.TransformPiContext(ctx, input)
+	if !reflect.DeepEqual(reports, []string{"extension_context[broken]"}) || !strings.Contains(string(output), "run-local reminder") || !strings.Contains(string(output), "9007199254740993") || !strings.Contains(string(output), "native-signature") || string(input) != before {
+		t.Fatalf("extension transform lost context or isolation: reports=%v output=%s", reports, output)
+	}
+}

@@ -17,7 +17,10 @@ package goal_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +36,7 @@ type scriptProvider struct {
 	turns   int
 	systems []string   // the system message shown on each turn
 	tools   [][]string // the tool names offered to the model on each turn
-	script  func(turn int) agentcore.ChatResponse
+	script  func(turn int) ai.Message
 }
 
 // offered reports whether the model was ever shown a schema by this name. It is
@@ -52,73 +55,19 @@ func (p *scriptProvider) offered(name string) bool {
 	return false
 }
 
-func (*scriptProvider) Name() string        { return "script" }
-func (*scriptProvider) SupportsTools() bool { return true }
-
-func (p *scriptProvider) Chat(_ context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *scriptProvider) Stream(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.turns++
-	sys := ""
-	if len(req.Messages) > 0 && req.Messages[0].Role == agentcore.RoleSystem {
-		sys = req.Messages[0].Content
-	}
-	p.systems = append(p.systems, sys)
-	names := make([]string, 0, len(req.Tools))
-	for _, s := range req.Tools {
-		names = append(names, s.Name)
+	p.systems = append(p.systems, ai.GetCurrentSystemPrompt(view.Messages()))
+	var names []string
+	for _, tool := range ai.GetCurrentTools(view.Messages()) {
+		names = append(names, tool.Name)
 	}
 	p.tools = append(p.tools, names)
-	return p.script(p.turns), nil
+	message := p.script(p.turns)
+	p.mu.Unlock()
+	return ai.ScriptedStream(message)(ctx, model, view, options)
 }
-
-func (p *scriptProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
-	resp, err := p.Chat(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	ch := make(chan agentcore.ChatDelta, 4)
-	go func() {
-		defer close(ch)
-		if resp.Message.Content != "" {
-			ch <- agentcore.ChatDelta{ContentDelta: resp.Message.Content}
-		}
-		for i := range resp.Message.ToolCalls {
-			tc := resp.Message.ToolCalls[i]
-			ch <- agentcore.ChatDelta{ToolCall: &tc}
-		}
-		ch <- agentcore.ChatDelta{Done: true}
-	}()
-	return ch, nil
-}
-
-// memStore is the smallest durable session that still answers the question the
-// resume assertions ask: what did the run actually write down?
-type memStore struct {
-	mu  sync.Mutex
-	log map[string][]agentcore.SessionEntry
-}
-
-func newMemStore() *memStore { return &memStore{log: map[string][]agentcore.SessionEntry{}} }
-
-func (s *memStore) Append(_ context.Context, id string, e agentcore.SessionEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.log[id] = append(s.log[id], e)
-	return nil
-}
-
-func (s *memStore) Log(_ context.Context, id string) ([]agentcore.SessionEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]agentcore.SessionEntry(nil), s.log[id]...), nil
-}
-
-type cfgPlugin struct{ cfg agentcore.Config }
-
-func (cfgPlugin) Name() string { return "config" }
-
-func (c cfgPlugin) Register(r *agentcore.Registry) error { return r.ApplyConfig(c.cfg) }
 
 const (
 	origGoal  = "Every shard in the ledger corpus audited and one report filed per region"
@@ -127,8 +76,8 @@ const (
 )
 
 // reviseCall is the tool call the scripted model makes to change the objective.
-func reviseCall(id string) agentcore.ChatResponse {
-	return agentcore.AssistantToolCall(id, goal.ToolName,
+func reviseCall(id string) ai.Message {
+	return nativeCall(id, goal.ToolName,
 		fmt.Sprintf(`{"goal":%q,"reason":%q}`, newGoal, theReason))
 }
 
@@ -141,32 +90,29 @@ func reviseCall(id string) agentcore.ChatResponse {
 // it about.
 func TestRevisedGoalIsWhatTheModelReadsAndTheGateEnforces(t *testing.T) {
 	prov := &scriptProvider{}
-	prov.script = func(turn int) agentcore.ChatResponse {
+	prov.script = func(turn int) ai.Message {
 		switch turn {
 		case 1:
 			return reviseCall("r1")
 		case 2:
 			// Finishing with no sentinel: the gate must still be armed.
-			return agentcore.AssistantText("Escalated CLEARING-7742.")
+			return nativeAnswer("Escalated CLEARING-7742.")
 		default:
-			return agentcore.AssistantText("Escalated CLEARING-7742.\n" + goal.Done)
+			return nativeAnswer("Escalated CLEARING-7742.\n" + goal.Done)
 		}
 	}
 
-	store := newMemStore()
 	plugin, trail := goal.UntilRevisable(origGoal)
 	limits := agentcore.DefaultLimits()
 	limits.MaxTurns = 10
 	limits.MaxToolCalls = 10
 
-	agent, err := agentcore.Build(cfgPlugin{cfg: agentcore.Config{
-		Provider: prov, Model: "m",
-		Tools:     agentcore.NewToolSet(),
-		Policy:    agentcore.NewAllowList(goal.ToolName),
-		Limits:    &limits,
-		Session:   store,
-		SessionID: "revise",
-	}}, plugin)
+	agent, err := agentcore.Build(agentcore.ConfigPlugin(agentcore.Config{
+		NativeProvider: nativeProvider(prov.Stream), Model: "test",
+		Tools:  agentcore.NewToolSet(),
+		Policy: agentcore.NewAllowList(goal.ToolName),
+		Limits: &limits,
+	}), plugin)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -227,58 +173,49 @@ func TestRevisedGoalIsWhatTheModelReadsAndTheGateEnforces(t *testing.T) {
 	}
 }
 
-// A revision that never reaches the log is a revision a crash undoes: goalFromLog
-// takes the LAST EntryGoal, so a resume would re-arm the original condition and
-// hold the recovered run to an objective it had explicitly moved past.
+// The checkpoint retains both the current condition and the revision's reason
+// and previous condition. Resuming it must not create a duplicate revision.
 func TestRevisedGoalIsDurable(t *testing.T) {
-	prov := &scriptProvider{}
-	prov.script = func(turn int) agentcore.ChatResponse {
-		if turn == 1 {
-			return reviseCall("r1")
+	makeAgent := func(stream ai.StreamFn) *agentcore.Agent {
+		t.Helper()
+		plugin, _ := goal.UntilRevisable(origGoal)
+		a, err := agentcore.Build(agentcore.ConfigPlugin(agentcore.Config{NativeProvider: nativeProvider(stream), Model: "test", Policy: agentcore.NewAllowList(goal.ToolName)}), plugin)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return agentcore.AssistantText("done\n" + goal.Done)
+		return a
 	}
-
-	store := newMemStore()
-	plugin, _ := goal.UntilRevisable(origGoal)
-	limits := agentcore.DefaultLimits()
-
-	agent, err := agentcore.Build(cfgPlugin{cfg: agentcore.Config{
-		Provider: prov, Model: "m",
-		Tools:     agentcore.NewToolSet(),
-		Policy:    agentcore.NewAllowList(goal.ToolName),
-		Limits:    &limits,
-		Session:   store,
-		SessionID: "durable",
-	}}, plugin)
+	result, err := makeAgent(ai.ScriptedStream(reviseCall("r1"), nativeAnswer("done\n"+goal.Done))).Prompt(context.Background(), "Audit the ledger corpus.")
 	if err != nil {
-		t.Fatalf("Build: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := agent.Prompt(context.Background(), "Audit the ledger corpus."); err != nil {
-		t.Fatalf("Prompt: %v", err)
+	var saved struct {
+		Goal          string
+		GoalRevisions []agentcore.GoalRevision
 	}
-
-	log, err := store.Log(context.Background(), "durable")
-	if err != nil {
-		t.Fatalf("Log: %v", err)
+	if err := json.Unmarshal(result.NativeState, &saved); err != nil {
+		t.Fatal(err)
 	}
-	var goals []string
-	for _, e := range log {
-		if e.Kind == agentcore.EntryGoal {
-			goals = append(goals, e.Goal)
+	want := []agentcore.GoalRevision{{Previous: origGoal, Goal: newGoal, Reason: theReason}}
+	if saved.Goal != newGoal || !reflect.DeepEqual(saved.GoalRevisions, want) {
+		t.Fatalf("revision not checkpointed: %+v", saved)
+	}
+	resumed := makeAgent(func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		prompt := ai.GetCurrentSystemPrompt(view.Messages())
+		if !strings.Contains(prompt, newGoal) || strings.Contains(prompt, origGoal) {
+			t.Errorf("resumed stale condition: %s", prompt)
 		}
+		return ai.ScriptedStream(nativeAnswer("still done\n"+goal.Done))(ctx, model, view, options)
+	})
+	next, err := resumed.RunNative(context.Background(), agentcore.NativeRun{State: result.NativeState, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "continue"}}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(goals) != 2 {
-		t.Fatalf("want two EntryGoal records (the original and the revision), got %d: %q", len(goals), goals)
+	if err := json.Unmarshal(next.NativeState, &saved); err != nil {
+		t.Fatal(err)
 	}
-	if goals[0] != origGoal {
-		t.Fatalf("the original condition was not recorded first: %q", goals[0])
-	}
-	// The last one wins on resume — that is goalFromLog's fold — so this is the
-	// condition a recovered run comes back holding.
-	if goals[len(goals)-1] != newGoal {
-		t.Fatalf("the log's last goal is %q, so a resumed run would re-arm the superseded "+
-			"condition", goals[len(goals)-1])
+	if saved.Goal != newGoal || !reflect.DeepEqual(saved.GoalRevisions, want) {
+		t.Fatalf("resume added a revision: %+v", saved)
 	}
 }
 
@@ -347,16 +284,16 @@ func TestTheToolIsOptIn(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prov := &scriptProvider{}
-			prov.script = func(int) agentcore.ChatResponse {
-				return agentcore.AssistantText("done\n" + goal.Done)
+			prov.script = func(int) ai.Message {
+				return nativeAnswer("done\n" + goal.Done)
 			}
 			limits := agentcore.DefaultLimits()
-			agent, err := agentcore.Build(cfgPlugin{cfg: agentcore.Config{
-				Provider: prov, Model: "m",
+			agent, err := agentcore.Build(agentcore.ConfigPlugin(agentcore.Config{
+				NativeProvider: nativeProvider(prov.Stream), Model: "test",
 				Tools:  agentcore.NewToolSet(),
 				Policy: agentcore.NewAllowList(goal.ToolName),
 				Limits: &limits,
-			}}, tc.plugin)
+			}), tc.plugin)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
 			}
@@ -375,22 +312,22 @@ func TestTheToolIsOptIn(t *testing.T) {
 // recording an unexplained narrowing.
 func TestRevisionRequiresAReason(t *testing.T) {
 	prov := &scriptProvider{}
-	prov.script = func(turn int) agentcore.ChatResponse {
+	prov.script = func(turn int) ai.Message {
 		if turn == 1 {
-			return agentcore.AssistantToolCall("r1", goal.ToolName,
+			return nativeCall("r1", goal.ToolName,
 				fmt.Sprintf(`{"goal":%q}`, newGoal))
 		}
-		return agentcore.AssistantText("done\n" + goal.Done)
+		return nativeAnswer("done\n" + goal.Done)
 	}
 
 	plugin, trail := goal.UntilRevisable(origGoal)
 	limits := agentcore.DefaultLimits()
-	agent, err := agentcore.Build(cfgPlugin{cfg: agentcore.Config{
-		Provider: prov, Model: "m",
+	agent, err := agentcore.Build(agentcore.ConfigPlugin(agentcore.Config{
+		NativeProvider: nativeProvider(prov.Stream), Model: "test",
 		Tools:  agentcore.NewToolSet(),
 		Policy: agentcore.NewAllowList(goal.ToolName),
 		Limits: &limits,
-	}}, plugin)
+	}), plugin)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

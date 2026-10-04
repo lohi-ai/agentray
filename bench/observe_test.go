@@ -11,17 +11,15 @@ package bench_test
 //   - tool-timeline.json — one entry per EXECUTED tool call (hooks run after the
 //     policy gate, so a blocked call never appears as executed), with the turn
 //     it belonged to, argument preview, result size, and error.
-//   - request-trace.json — one entry per provider call, via observe.Monitor's
-//     decorator, so failed calls are visible too (a hook only fires on success).
+//   - request-trace.json — one entry per provider call, via native telemetry attempt events, so failed calls are visible too (a hook only fires on success).
 //     Messages are digested, never dumped: count, bytes, and which compaction
 //     marker the prompt carried.
-//   - observer-summary.json — the run-level rollup, computed by observe.FoldRun
+//   - observer-summary.json — the run-level rollup, computed by FoldRun
 //     over the RunResult and the trace stream rather than over the hooks. That is
 //     what makes a BLOCKED call and tool coverage (advertised vs invoked vs
 //     unused) visible here at all; the hook streams above cannot see either.
 //
-// All three are cheap and additive: the composition is preset.Plugins(cfg) plus the
-// monitor, so what runs is still the default agent.
+// The host supplies a telemetry backend; the composition is preset.Plugins(cfg).
 
 import (
 	"context"
@@ -33,8 +31,8 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 )
 
 // toolEvent is one executed tool call as the loop saw it.
@@ -88,12 +86,12 @@ type runObserver struct {
 	requests []requestEvent
 	turns    []turnEvent
 	// records are the raw provider-seam records, kept alongside the digested
-	// requests because observe.FoldRun folds them (advertised tool names, stop
+	// requests because FoldRun folds them (advertised tool names, stop
 	// reasons, delegation depth) and requestEvent has already thrown those away.
 	// Messages are stripped first: they are digested into PromptBytes/Compaction
 	// above, the fold never reads them, and a long bench run would otherwise hold
 	// the whole transcript twice.
-	records []observe.TraceRecord
+	records []llm.TraceRecord
 }
 
 func newRunObserver() *runObserver { return &runObserver{start: time.Now()} }
@@ -136,9 +134,9 @@ func (o *runObserver) hooks() agentcore.Hooks {
 	}
 }
 
-// sink returns the observe.Sink that digests each provider call.
-func (o *runObserver) sink() observe.Sink {
-	return observe.SinkFunc(func(r observe.TraceRecord) {
+// sink returns the llm.Sink that digests each provider call.
+func (o *runObserver) sink() llm.Sink {
+	return llm.SinkFunc(func(r llm.TraceRecord) {
 		ev := requestEvent{
 			AtSeconds:  o.since(),
 			Model:      r.Model,
@@ -177,16 +175,16 @@ func (o *runObserver) sink() observe.Sink {
 	})
 }
 
-// build composes the DEFAULT agent (preset.Plugins) plus the monitor decorator,
+// build composes the default agent (preset.Plugins),
 // with the hooks carried on the config exactly as a caller would set them.
 func (o *runObserver) build(cfg agentcore.Config) (*agentcore.Agent, error) {
 	cfg.Hooks = o.hooks()
-	return agentcore.Build(append(preset.Plugins(cfg), observe.Monitor{Sink: o.sink()})...)
+	return agentcore.Build(preset.Plugins(cfg)...)
 }
 
 // observerSummary is the one-line behavioral digest printed into the test log.
 //
-// Its run-level half is no longer computed here: observe.FoldRun folds
+// Its run-level half is no longer computed here: FoldRun folds
 // agentcore.RunResult.Tools, which is why this artifact can finally report a
 // BLOCKED call (the After hook that used to feed these counts runs post-gate and
 // structurally never saw one) and tool COVERAGE — which of the tools the persona
@@ -196,17 +194,17 @@ func (o *runObserver) build(cfg agentcore.Config) (*agentcore.Agent, error) {
 // parallel-group size, prompt size, slowest call. Those are harness questions
 // about THIS suite, not run facts, so they do not belong in agentcore.
 type observerSummary struct {
-	Turns        int                             `json:"turns"`
-	Requests     int                             `json:"requests"`
-	FailedCalls  int                             `json:"failed_provider_calls"`
-	ToolCalls    int                             `json:"tool_calls"`
-	ToolErrors   int                             `json:"tool_errors"`
-	ToolsBlocked int                             `json:"tools_blocked"`
-	ToolsAborted int                             `json:"tools_aborted,omitempty"`
-	GhostRun     bool                            `json:"ghost_run,omitempty"`
-	ByTool       map[string]observe.ToolCounters `json:"by_tool"`
-	ByStopReason map[string]int                  `json:"by_stop_reason,omitempty"`
-	Coverage     observe.RunCoverage             `json:"coverage"`
+	Turns        int                     `json:"turns"`
+	Requests     int                     `json:"requests"`
+	FailedCalls  int                     `json:"failed_provider_calls"`
+	ToolCalls    int                     `json:"tool_calls"`
+	ToolErrors   int                     `json:"tool_errors"`
+	ToolsBlocked int                     `json:"tools_blocked"`
+	ToolsAborted int                     `json:"tools_aborted,omitempty"`
+	GhostRun     bool                    `json:"ghost_run,omitempty"`
+	ByTool       map[string]ToolCounters `json:"by_tool"`
+	ByStopReason map[string]int          `json:"by_stop_reason,omitempty"`
+	Coverage     RunCoverage             `json:"coverage"`
 
 	ParallelTurns int   `json:"parallel_tool_turns"`
 	MaxParallel   int   `json:"max_parallel_group"`
@@ -221,7 +219,7 @@ type observerSummary struct {
 func (o *runObserver) summarize(res agentcore.RunResult) observerSummary {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	run, coverage := observe.FoldRun(res, o.records)
+	run, coverage := FoldRun(res, o.records)
 	s := observerSummary{
 		Turns:        run.Turns,
 		Requests:     run.ProviderCalls,

@@ -8,9 +8,9 @@
 // point of the capability: it is what keeps a long autonomous run on its
 // original objective.
 //
-// It is a CONTRIBUTION plugin, the cheapest kind: a tool plus a hook, resolved
-// once at compose time, with no per-run state of its own (the Store belongs to
-// the caller, one per run). Nothing here needs BeginRun.
+// Tools and request hooks share a run-bound store. Native checkpoints preserve
+// its bounded plan state; forks get a fresh store so child plans cannot replace
+// the parent's checklist.
 package todo
 
 import (
@@ -34,11 +34,15 @@ const (
 	StatusPending    = "pending"
 	StatusInProgress = "in_progress"
 	StatusCompleted  = "completed"
+	StatusBlocked    = "blocked"
+	StatusAbandoned  = "abandoned"
 )
 
 // Item is one step in the run's plan: a short imperative description and its
 // current status.
 type Item struct {
+	ID      string `json:"id,omitempty"`
+	Phase   string `json:"phase,omitempty"`
 	Content string `json:"content"`
 	Status  string `json:"status"`
 }
@@ -73,14 +77,15 @@ const (
 // Store holds a single run's live plan. It is the out-of-band state that
 // makes a long run goal-stable: the plan is owned here, not in the transcript,
 // so compaction can never trim it. The loop re-injects a rendering of it before
-// every provider request (agentcore.ContextHook), so the model always sees its own
+// every native provider request (PiContextHook), so the model always sees its own
 // up-to-date checklist regardless of how much history was summarized away.
 //
 // A Store is safe for concurrent use; the tool writes it while a context
 // hook reads it.
 type Store struct {
-	mu    sync.RWMutex
-	items []Item
+	mutation sync.Mutex
+	mu       sync.RWMutex
+	items    []Item
 	// retired counts completed steps folded away to keep the pinned plan bounded.
 	// It is a floor, not an exact tally: the model sends the full list each time,
 	// so a step it drops from its own list on its own initiative is never counted
@@ -103,10 +108,17 @@ func NewStore() *Store { return &Store{} }
 // shown a folded list sends the folded list back, and a store that quietly held
 // more would re-expand the render on the next write.
 func (s *Store) Set(items []Item) {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	s.set(items)
+}
+
+func (s *Store) set(items []Item) {
 	cp := make([]Item, 0, len(items))
 	completed := 0
 	for _, it := range items {
 		it.Content = clampItem(it.Content)
+		it.Phase = clampItem(it.Phase)
 		if it.Status == StatusCompleted {
 			completed++
 		}
@@ -146,7 +158,7 @@ func clampItem(content string) string {
 	if len(content) <= maxItemBytes {
 		return content
 	}
-	return strings.TrimSpace(content[:maxItemBytes]) + "…"
+	return agentcore.TruncateBytes(content, maxItemBytes)
 }
 
 // List returns a copy of the current plan.
@@ -179,7 +191,14 @@ func (s *Store) Render() string {
 
 	lines := make([]string, len(items))
 	for i, it := range items {
-		lines[i] = statusBox(it.Status) + " " + it.Content
+		label := it.Content
+		if it.Phase != "" {
+			label = "[" + it.Phase + "] " + label
+		}
+		if it.ID != "" {
+			label = it.ID + ": " + label
+		}
+		lines[i] = statusBox(it.Status) + " " + label
 	}
 	return strings.TrimRight(head+fitLines(lines, items, maxRenderBytes-len(head)), "\n")
 }
@@ -243,6 +262,10 @@ func statusBox(status string) string {
 		return "[x]"
 	case StatusInProgress:
 		return "[~]"
+	case StatusBlocked:
+		return "[!]"
+	case StatusAbandoned:
+		return "[-]"
 	default:
 		return "[ ]"
 	}
@@ -252,30 +275,11 @@ func statusBox(status string) string {
 // transcript and never confused with model-authored content.
 const ContextPrefix = "[run plan]"
 
-// ContextHook returns a agentcore.ContextHook that appends the current plan as a
-// trailing system reminder to every outgoing request. Because it is applied to
-// the request view (not persisted history) on every turn, the plan survives
-// compaction by construction: even after the original task and all early turns
-// are summarized away, the freshly rendered checklist is right there in front of
-// the model. An empty plan injects nothing.
-func ContextHook(store *Store) agentcore.ContextHook {
-	return func(_ context.Context, msgs []agentcore.Message) []agentcore.Message {
-		rendered := store.Render()
-		if rendered == "" {
-			return msgs
-		}
-		out := make([]agentcore.Message, 0, len(msgs)+1)
-		out = append(out, msgs...)
-		out = append(out, agentcore.Message{Role: agentcore.RoleSystem, Content: ContextPrefix + "\n" + rendered})
-		return out
-	}
-}
-
-// PiContextHook pins the same bounded plan into Pi's outgoing native view.
+// PiContextHook pins the bounded plan into Pi's outgoing native view.
 // Raw provider messages pass through untouched, and the reminder never becomes
 // another persisted conversation message on each turn.
 func PiContextHook(store *Store) agentcore.PiContextHook {
-	return func(_ context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+	return func(ctx context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
 		rendered := store.Render()
 		if rendered == "" {
 			return messages, nil
@@ -297,7 +301,7 @@ type planTool struct {
 
 // NewTool returns the built-in update_plan tool bound to a run's plan store.
 // The model calls it to record and revise its checklist for a multi-step task;
-// the stored plan is then pinned into every later turn by agentcore.ContextHook.
+// the stored plan is then pinned into every later native request by PiContextHook.
 func NewTool(store *Store) agentcore.Tool { return &planTool{store: store} }
 
 func (t *planTool) Name() string { return ToolName }
@@ -309,7 +313,8 @@ func (t *planTool) Schema() agentcore.ToolSchema {
 		Description: "Record or update your plan as a todo list for a multi-step task. " +
 			"Send the FULL list every time (it replaces the previous plan). Mark exactly one " +
 			"item in_progress (the step you are doing now), completed for finished steps, and " +
-			"pending for the rest. The plan is pinned into your context and survives summarization, " +
+			"pending for the rest; use blocked for waiting on a dependency and abandoned for explicitly dropped work. " +
+			"Give steps stable IDs and optional phase labels; patch_plan can update identified steps atomically. The plan is pinned into your context and survives summarization, " +
 			"so use it to stay on the original goal across a long run. Because it is pinned, keep it " +
 			"a plan and not a log: one short line per step. Older completed steps are folded into a " +
 			"running count automatically — that count is not an item, and you do not need to restate " +
@@ -320,13 +325,16 @@ func (t *planTool) Schema() agentcore.ToolSchema {
 				"items": map[string]any{
 					"type":        "array",
 					"description": "The full ordered todo list.",
+					"maxItems":    128,
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
+							"id":      map[string]any{"type": "string", "maxLength": 64, "description": "Stable item identifier for patch_plan."},
+							"phase":   map[string]any{"type": "string", "maxLength": 160, "description": "Optional phase, such as investigate, implement, verify."},
 							"content": map[string]any{"type": "string", "description": "Short imperative description of the step."},
 							"status": map[string]any{
 								"type":        "string",
-								"enum":        []string{StatusPending, StatusInProgress, StatusCompleted},
+								"enum":        []string{StatusPending, StatusInProgress, StatusCompleted, StatusBlocked, StatusAbandoned},
 								"description": "Step status.",
 							},
 						},
@@ -339,13 +347,14 @@ func (t *planTool) Schema() agentcore.ToolSchema {
 	}
 }
 
-func (t *planTool) Run(_ context.Context, args string) (string, error) {
+func (t *planTool) Run(ctx context.Context, args string) (string, error) {
 	items, err := parseItems(args)
 	if err != nil {
 		return "", err
 	}
-	t.store.Set(items)
-	return "Plan updated.\n" + t.store.Render(), nil
+	store := t.store
+	store.Set(items)
+	return "Plan updated.\n" + store.Render(), nil
 }
 
 // parseItems decodes and validates one update_plan payload. It is separate from
@@ -359,13 +368,26 @@ func parseItems(args string) ([]Item, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return nil, fmt.Errorf("update_plan: invalid arguments: %w", err)
 	}
+	if len(in.Items) > 128 {
+		return nil, fmt.Errorf("update_plan: at most 128 items")
+	}
+	ids := map[string]bool{}
 	inProgress := 0
 	for i, it := range in.Items {
+		if len(it.ID) > 64 || len(it.Phase) > 160 {
+			return nil, fmt.Errorf("update_plan: oversized id or phase")
+		}
+		if it.ID != "" {
+			if ids[it.ID] {
+				return nil, fmt.Errorf("update_plan: duplicate id %q", it.ID)
+			}
+			ids[it.ID] = true
+		}
 		if strings.TrimSpace(it.Content) == "" {
 			return nil, fmt.Errorf("update_plan: item %d has empty content", i+1)
 		}
 		switch it.Status {
-		case StatusPending, StatusInProgress, StatusCompleted:
+		case StatusPending, StatusInProgress, StatusCompleted, StatusBlocked, StatusAbandoned:
 		case "":
 			in.Items[i].Status = StatusPending
 		default:
@@ -405,59 +427,74 @@ func With(s *Store) Plugin { return Plugin{Store: s} }
 // Name identifies the plugin.
 func (Plugin) Name() string { return "todo" }
 
-// Register contributes the tool and the hook together. They are one call
-// because either alone is broken: the tool without the hook writes a plan the
-// model never sees again, and the hook without the tool pins a plan nothing can
-// write.
-//
-// The extension is the third piece, and it only does anything on a resume: it
-// puts the plan back.
+// Register installs a run-scoped extension. Its tools, native context transform
+// and checkpoint all use the same isolated plan, including on child forks.
 func (p Plugin) Register(r *agentcore.Registry) error {
 	if p.Store == nil {
 		return errNoStore
 	}
-	r.AddTools(NewTool(p.Store))
-	r.AddHooks(agentcore.PriorityDefault, agentcore.Hooks{
-		Context:   []agentcore.ContextHook{ContextHook(p.Store)},
-		PiContext: []agentcore.PiContextHook{PiContextHook(p.Store)},
-	})
 	r.AddExtension(p)
 	return nil
 }
 
-// BeginRun restores the plan a crashed run had written.
-//
-// A long run's durable intent is three things: the user's requirement (pinned
-// through compaction), the goal (EntryGoal, recovered by the loop), and this
-// checklist. The first two came back after a crash and the third did not, which
-// is worst in exactly the case it matters most — a run long enough to have been
-// compacted has had its original task summarized away, so the plan is the
-// agent's remaining record of what it decided to do. Resuming with an empty one
-// means re-planning from a summary, which is how a recovered run quietly does
-// different work than the run it is recovering.
-//
-// The recovery reads the run's OWN log through RunInfo.Session, which is handed
-// over for precisely this. It writes nothing: the plan is reconstructed from the
-// update_plan calls already in the record, so the loop stays the only writer and
-// "model-visible means logged" still holds.
-//
-// It returns a nil Extension in every case — there is nothing to do for the rest
-// of the run, and the plugin has no per-turn behavior. A fresh run, a run with a
-// plan already in hand, and a log with no plan in it all take the same path.
-func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
-	if p.Store == nil || info.Session == nil || len(p.Store.List()) > 0 {
-		return nil, nil
-	}
-	entries, err := info.Session.Log(ctx, info.SessionID)
+type runPlan struct{ store *Store }
+
+func (*runPlan) Name() string { return "todo" }
+func (r *runPlan) Tools() []agentcore.Tool {
+	return []agentcore.Tool{NewTool(r.store), &patchTool{r.store}}
+}
+func (r *runPlan) TransformNativeContext(ctx context.Context, messages []json.RawMessage) ([]json.RawMessage, error) {
+	return PiContextHook(r.store)(ctx, messages)
+}
+func (r *runPlan) NativeState() (json.RawMessage, error) {
+	r.store.mu.RLock()
+	defer r.store.mu.RUnlock()
+	return json.Marshal(struct {
+		Items   []Item `json:"items"`
+		Retired int    `json:"retired"`
+	}{r.store.items, r.store.retired})
+}
+func (r *runPlan) RestoreNativeState(raw json.RawMessage) error {
+	items, err := parseItems(string(raw))
 	if err != nil {
-		// A resume whose log cannot be read is already failing louder elsewhere;
-		// losing the plan is not the error worth aborting a run over.
-		return nil, nil
+		return err
 	}
-	if items, ok := planFromLog(entries); ok {
-		p.Store.Set(items)
+	var state struct {
+		Retired int `json:"retired"`
 	}
-	return nil, nil
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+	if state.Retired < 0 {
+		return fmt.Errorf("todo: negative retired count")
+	}
+	r.store.mu.Lock()
+	r.store.items = nil
+	r.store.retired = state.Retired
+	r.store.mu.Unlock()
+	r.store.Set(items)
+	return nil
+}
+
+func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
+	store := p.Store
+	// A fork inherits capabilities, never the parent's mutable checklist.
+	if info.Depth > 0 {
+		store = NewStore()
+	}
+	if store == nil {
+		return nil, errNoStore
+	}
+	if info.Session != nil && len(store.List()) == 0 {
+		entries, err := info.Session.Log(ctx, info.SessionID)
+		if err != nil {
+			return nil, err
+		}
+		if items, ok := planFromLog(entries); ok {
+			store.Set(items)
+		}
+	}
+	return &runPlan{store: store}, nil
 }
 
 // planFromLog folds the log down to the plan in force: the last update_plan call
@@ -465,14 +502,28 @@ func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore
 // chained onto a finished session starts with a clean checklist rather than
 // inheriting the previous task's.
 //
-// Only a call that would be ACCEPTED counts. A rejected one (two steps in
-// progress, empty content) left the original run's plan unchanged, so replaying
-// it on resume would install a plan the crashed run never had. Reusing the
-// tool's own validator is what keeps the two answers the same.
+// Only successful native effect receipts count. Requested calls and failed or
+// denied executions cannot replace the accepted plan. The tool validator also
+// rejects malformed receipt arguments.
 func planFromLog(entries []agentcore.SessionEntry) ([]Item, bool) {
 	var found []Item
 	ok := false
 	for _, e := range entries {
+		apply := func(trace agentcore.ToolTrace, executed bool) {
+			if !executed || !trace.Allowed || trace.Error != "" {
+				return
+			}
+			if trace.Tool == ToolName {
+				if items, err := parseItems(trace.Args); err == nil {
+					found, ok = items, true
+				}
+			}
+			if trace.Tool == PatchToolName {
+				if items, err := patchItems(found, trace.Args); err == nil {
+					found, ok = items, true
+				}
+			}
+		}
 		switch e.Kind {
 		case agentcore.EntryPiEffectDone:
 			// Only a settled, successful execution can update the native plan.
@@ -485,34 +536,12 @@ func planFromLog(entries []agentcore.SessionEntry) ([]Item, bool) {
 				continue
 			}
 			audit := receipt.Result.Details
-			if audit.Executed && audit.Trace.Tool == ToolName && audit.Trace.Allowed && audit.Trace.Error == "" {
-				if items, err := parseItems(audit.Trace.Args); err == nil {
-					found, ok = items, true
-				}
-			}
+			apply(audit.Trace, audit.Executed)
 			for _, call := range audit.Invocations {
-				if call.Executed && call.Trace.Tool == ToolName && call.Trace.Allowed && call.Trace.Error == "" {
-					if items, err := parseItems(call.Trace.Args); err == nil {
-						found, ok = items, true
-					}
-				}
+				apply(call.Trace, call.Executed)
 			}
 		case agentcore.EntryLeaf:
 			found, ok = nil, false
-		case agentcore.EntryMessage:
-			if e.Message == nil {
-				continue
-			}
-			for _, tc := range e.Message.ToolCalls {
-				if tc.Name != ToolName {
-					continue
-				}
-				items, err := parseItems(tc.Arguments)
-				if err != nil {
-					continue
-				}
-				found, ok = items, true
-			}
 		}
 	}
 	return found, ok

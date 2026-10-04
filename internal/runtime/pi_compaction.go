@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+"github.com/lohi-ai/agentray/ai"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,8 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -34,7 +36,7 @@ type piCompactionPlan struct {
 // Pending human questions retain their durable session's complete transcript.
 func planPiCompaction(history PiConversationHistory, window int, force bool) (piCompactionPlan, error) {
 	var plan piCompactionPlan
-	if err := validatePiConversationMessages(history.Messages); err != nil {
+	if err := nativehost.ValidateMessages(history.Messages); err != nil {
 		return plan, err
 	}
 	if err := json.Unmarshal(history.Messages, &plan.messages); err != nil {
@@ -141,13 +143,13 @@ func foldPiCompaction(entry storage.AgentConversationEntry, leaf, revision strin
 	var first struct{ Role string }
 	_ = json.Unmarshal(messages[p.KeepFrom], &first)
 	raw, _ := json.Marshal(messages)
-	if first.Role != "user" || validatePiConversationMessages(raw) != nil {
+	if first.Role != "user" || nativehost.ValidateMessages(raw) != nil {
 		return nil, errors.New("native compaction splits an incomplete turn")
 	}
 	summary, _ := json.Marshal(map[string]any{"role": "user", "content": "[Earlier conversation summary]\n" + p.Summary, "timestamp": entry.CreatedAt.UnixMilli(), "agentrayCompactionId": entry.ID})
 	// System messages carry Pi's tool declarations and named-section deltas.
 	// Keep them verbatim: a prose summary cannot replace their executable state.
-	return piSummaryView(messages, p.KeepFrom, summary), nil
+	return nativehost.SummaryView(messages, p.KeepFrom, summary), nil
 }
 
 func (s *ChatService) piSummarizer(projectID string) piSummarizer {
@@ -156,7 +158,7 @@ func (s *ChatService) piSummarizer(projectID string) piSummarizer {
 		if err != nil {
 			return "", err
 		}
-		runtime := *s.runner.Pi
+		runtime := s.runner.Pi
 		refresh := s.runner.keyRefresher(projectID)
 
 		params := BuildParams{RefreshProviderKey: s.runner.nativeKeyRefresher(projectID)}
@@ -172,12 +174,12 @@ func (s *ChatService) piSummarizer(projectID string) piSummarizer {
 // Use the selected runtime and provider for this auxiliary call too. Original
 // message blocks enter as native history; a new user instruction requests the
 // summary. No business tools are advertised or executable.
-func summarizePiHistory(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, refresh func(context.Context, string) (string, error), sink observe.Sink) (string, error) {
+func summarizePiHistory(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, refresh func(context.Context, string) (string, error), sink llm.Sink) (string, error) {
 	text, _, err := summarizePiHistoryWithUsage(ctx, runtime, tier, messages, revision, refresh, sink)
 	return text, err
 }
 
-func summarizePiHistoryWithUsage(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, refresh func(context.Context, string) (string, error), sink observe.Sink) (string, agentcore.Usage, error) {
+func summarizePiHistoryWithUsage(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, refresh func(context.Context, string) (string, error), sink llm.Sink) (string, agentcore.Usage, error) {
 	optionsFor, err := (BuildParams{}).nativeLadderOptions(tier, piSummaryModelOptions(refresh))
 	if err != nil {
 		return "", agentcore.Usage{}, err
@@ -186,13 +188,13 @@ func summarizePiHistoryWithUsage(ctx context.Context, runtime PiRuntimeConfig, t
 }
 
 func piSummaryModelOptions(refresh func(context.Context, string) (string, error)) PiModelOptions {
-	return PiModelOptions{MaxTokens: 1024, Pricing: observe.DefaultPricing(), RefreshKey: refresh, ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNone}}
+	return PiModelOptions{MaxTokens: 1024, Pricing: ai.DefaultPricing(), RefreshKey: refresh, ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNone}}
 }
 
-func summarizePiHistoryWithModelOptions(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, optionsFor func(ModelTier) (PiModelOptions, error), sink observe.Sink) (string, agentcore.Usage, error) {
+func summarizePiHistoryWithModelOptions(ctx context.Context, runtime PiRuntimeConfig, tier ModelTier, messages json.RawMessage, revision string, optionsFor func(ModelTier) (PiModelOptions, error), sink llm.Sink) (string, agentcore.Usage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	if err := validatePiConversationMessages(messages); err != nil {
+	if err := nativehost.ValidateMessages(messages); err != nil {
 		return "", agentcore.Usage{}, err
 	}
 	var source []json.RawMessage
@@ -214,7 +216,7 @@ func summarizePiHistoryWithModelOptions(ctx context.Context, runtime PiRuntimeCo
 		}
 	}
 	options, _ := json.Marshal(map[string]any{"initialState": map[string]any{"systemPrompt": compactionSystem, "messages": source, "thinkingLevel": "off", "tools": []any{}}, "callbacks": []string{"finishTurn"}, "streamOptions": map[string]any{"temperature": 0.2}})
-	binding := agentcore.PiConfig{Options: options, Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	binding := NativeAgentConfig{Options: options, Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		return json.RawMessage(`{"action":"end"}`), nil
 	}}
 	var known bool

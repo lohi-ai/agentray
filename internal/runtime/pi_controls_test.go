@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"github.com/lohi-ai/agentray/ai"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestPiPayloadControlsPreserveNativeFieldsAcrossDialects(t *testing.T) {
 	} {
 		t.Run(tc.api, func(t *testing.T) {
 			raw := json.RawMessage(`{"messages":[{"signed":"opaque"}],"extension":9007199254740993,"text":{"verbosity":"low"},"output_config":{"effort":"high"},"tools":` + tc.tools + `}`)
-			result, err := piControlledPayload(tc.api, raw, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "write"}, ParallelToolCalls: &parallel, OutputSchema: schema})
+			result, err := ai.ApplyNativeControls(tc.api, raw, ai.NativeGenerationControls{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "write"}, ParallelToolCalls: &parallel, OutputSchema: schema})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,14 +51,14 @@ func TestPiPayloadControlsPreserveNativeFieldsAcrossDialects(t *testing.T) {
 
 func TestPiToolChoiceValidationAndToolFreeWrap(t *testing.T) {
 	for _, choice := range []agentcore.ToolChoice{{Mode: "invalid"}, {Mode: agentcore.ToolChoiceRequired}, {Mode: agentcore.ToolChoiceNamed, Name: "missing"}} {
-		if err := piValidateToolChoice(choice, nil); err == nil {
+		if err := ai.ValidateNativeToolChoice(choice, nil); err == nil {
 			t.Fatalf("invalid choice accepted: %+v", choice)
 		}
 	}
 	for _, api := range []string{"openai-completions", "openai-responses", "anthropic-messages", "azure-openai-responses"} {
 		for _, mode := range []agentcore.ToolChoiceMode{agentcore.ToolChoiceAuto, agentcore.ToolChoiceNone, agentcore.ToolChoiceRequired} {
 			raw := json.RawMessage(`{"tools":[{"name":"write","function":{"name":"write"}}]}`)
-			result, err := piControlledPayload(api, raw, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: mode}})
+			result, err := ai.ApplyNativeControls(api, raw, ai.NativeGenerationControls{ToolChoice: agentcore.ToolChoice{Mode: mode}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -73,12 +74,12 @@ func TestPiToolChoiceValidationAndToolFreeWrap(t *testing.T) {
 			}
 		}
 		parallel := true
-		result, err := piControlledPayload(api, json.RawMessage(`{"messages":[]}`), PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}, ParallelToolCalls: &parallel})
+		result, err := ai.ApplyNativeControls(api, json.RawMessage(`{"messages":[]}`), ai.NativeGenerationControls{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}, ParallelToolCalls: &parallel})
 		if err != nil || string(result) != `{"messages":[]}` {
 			t.Fatalf("tool-free finalization forced another call: %s %v", result, err)
 		}
 	}
-	if _, err := piControlledPayload("openai-completions", json.RawMessage(`{"tools":[{"function":{"name":"write"}}]}`), PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "hidden"}}); err == nil {
+	if _, err := ai.ApplyNativeControls("openai-completions", json.RawMessage(`{"tools":[{"function":{"name":"write"}}]}`), ai.NativeGenerationControls{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "hidden"}}); err == nil {
 		t.Fatal("named choice bypassed request tool filtering")
 	}
 }
@@ -87,7 +88,7 @@ func TestPiModelControlCapabilitiesAndHookComposition(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "test", BaseURL: "https://example.test/v1"}}
 	parallel := false
 	opts := PiModelOptions{ParallelToolCalls: &parallel, OutputSchema: &agentcore.OutputSchema{Schema: map[string]any{"type": "object"}}}
-	cfg, _, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["onPayload"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	cfg, _, err := tier.BindPi(NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["onPayload"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "onPayload" {
 			t.Fatal(method)
 		}
@@ -108,12 +109,12 @@ func TestPiModelControlCapabilitiesAndHookComposition(t *testing.T) {
 		t.Fatal("payload callback accepted unbound model")
 	}
 	tier.Capabilities.ToolChoice = agentcore.CapabilityUnsupported
-	if _, _, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}}); err == nil {
+	if _, _, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}}); err == nil {
 		t.Fatal("forced choice bypassed model capability")
 	}
 	tier.Capabilities.StructuredOutput = agentcore.CapabilityUnsupported
 	opts.ToolChoice = agentcore.ToolChoice{Mode: agentcore.ToolChoiceNone}
-	cfg, _, err = tier.BindPi(agentcore.PiConfig{}, opts)
+	cfg, _, err = tier.BindPi(NativeAgentConfig{}, opts)
 	if err != nil || !strings.Contains(string(cfg.Options), `"tools":[]`) || strings.Contains(string(cfg.Options), `"onPayload"`) {
 		t.Fatalf("capability filtering lost none or retained unsupported hints: %s %v", cfg.Options, err)
 	}

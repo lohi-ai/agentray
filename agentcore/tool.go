@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -294,4 +295,38 @@ func truncateMiddle(s string, maxBytes int) string {
 		start++
 	}
 	return s[:head] + fmt.Sprintf("\n…[%d bytes truncated]…\n", start-head) + s[start:]
+}
+
+// StringTool declares a callback tool with string-valued JSON arguments. The
+// host supplies only its schema and action; AgentCore validates and dispatches
+// it through the same governance boundary as any other Tool.
+type StringTool struct {
+	ToolName, Description string
+	Properties            map[string]any
+	Required              []string
+	Execute               func(context.Context, map[string]string) (string, error)
+}
+
+func (t StringTool) Name() string { return t.ToolName }
+func (t StringTool) Schema() ToolSchema {
+	return ToolSchema{Name: t.ToolName, Description: t.Description, Parameters: map[string]any{"type": "object", "properties": t.Properties, "required": t.Required, "additionalProperties": false}}
+}
+func (t StringTool) Run(ctx context.Context, args string) (string, error) {
+	var input map[string]string
+	if err := json.Unmarshal([]byte(args), &input); err != nil {
+		return "", err
+	}
+	if t.Execute == nil {
+		return "", fmt.Errorf("tool %s has no executor", t.ToolName)
+	}
+	return t.Execute(ctx, input)
+}
+
+// StringProperties builds bounded, non-empty text arguments for a declaration.
+func StringProperties(names ...string) map[string]any {
+	properties := make(map[string]any, len(names))
+	for _, name := range names {
+		properties[name] = map[string]any{"type": "string", "minLength": 1, "maxLength": 2048}
+	}
+	return properties
 }

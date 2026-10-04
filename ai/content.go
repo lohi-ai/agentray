@@ -4,29 +4,29 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // messageText joins the compatibility text with explicit text parts. RichTool
 // currently places ordinary text in Message.Content, but accepting text parts
 // here keeps the neutral message contract complete for host-injected callers.
-func messageText(message agentcore.Message) string {
+func messageText(message protocol.Message) string {
 	parts := make([]string, 0, 1+len(message.ContentParts))
 	if message.Content != "" {
 		parts = append(parts, message.Content)
 	}
 	for _, part := range message.ContentParts {
-		if part.Type == agentcore.ContentPartText && part.Text != "" {
+		if part.Type == protocol.ContentPartText && part.Text != "" {
 			parts = append(parts, part.Text)
 		}
 	}
 	return strings.Join(parts, "\n")
 }
 
-func messageImages(message agentcore.Message) []agentcore.ContentPart {
-	images := make([]agentcore.ContentPart, 0, len(message.ContentParts))
+func messageImages(message protocol.Message) []protocol.ContentPart {
+	images := make([]protocol.ContentPart, 0, len(message.ContentParts))
 	for _, part := range message.ContentParts {
-		if part.Type != agentcore.ContentPartImage || part.Data == "" {
+		if part.Type != protocol.ContentPartImage || part.Data == "" {
 			continue
 		}
 		switch part.MIMEType {
@@ -37,8 +37,8 @@ func messageImages(message agentcore.Message) []agentcore.ContentPart {
 	return images
 }
 
-func imageInputAllowed(caps agentcore.ModelCapabilities) bool {
-	return caps.ImageInput != agentcore.CapabilityUnsupported
+func imageInputAllowed(caps protocol.ModelCapabilities) bool {
+	return caps.ImageInput != protocol.CapabilityUnsupported
 }
 
 func textWithImageNotice(text string, count int, attached bool) string {
@@ -55,7 +55,7 @@ func textWithImageNotice(text string, count int, attached bool) string {
 	return text + "\n" + note
 }
 
-func imageDataURL(part agentcore.ContentPart) string {
+func imageDataURL(part protocol.ContentPart) string {
 	return "data:" + part.MIMEType + ";base64," + part.Data
 }
 

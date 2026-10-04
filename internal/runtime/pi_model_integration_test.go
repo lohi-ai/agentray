@@ -1,6 +1,7 @@
 package agentruntime
 
 import (
+"github.com/lohi-ai/agentray/ai"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 )
 
 func TestPiModelBindingDrivesNativeProviderAndRotatesKeys(t *testing.T) {
@@ -61,9 +61,9 @@ func TestPiModelBindingDrivesNativeProviderAndRotatesKeys(t *testing.T) {
 	var options map[string]any
 	_ = json.Unmarshal(piSessionOptions(), &options)
 	options["streamOptions"] = map[string]any{"temperature": 0.25}
-	worker, known, err := tier.BindPi(agentcore.PiConfig{Options: piSessionJSON(options), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker, known, err := tier.BindPi(NativeAgentConfig{Options: piSessionJSON(options), Callback: func(_ context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		return nil, fmt.Errorf("native request escaped to %s callback", method)
-	}}, PiModelOptions{MaxTokens: 500, Pricing: observe.Pricing{"bound-model": {InputPerM: 1, OutputPerM: 2}}, RefreshKey: func(context.Context, string) (string, error) {
+	}}, PiModelOptions{MaxTokens: 500, Pricing: ai.Pricing{"bound-model": {InputPerM: 1, OutputPerM: 2}}, RefreshKey: func(context.Context, string) (string, error) {
 		return fmt.Sprintf("fresh-key-%d", refreshes.Add(1)), nil
 	}})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestPiModelBindingCancellationStopsCredentialRefresh(t *testing.T) {
 	defer cancel()
 	started, stopped := make(chan struct{}), make(chan struct{})
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", BaseURL: "http://127.0.0.1:1/v1"}}
-	worker, _, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(ctx context.Context, _ string) (string, error) {
+	worker, _, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(ctx context.Context, _ string) (string, error) {
 		close(started)
 		<-ctx.Done()
 		close(stopped)
@@ -143,7 +143,7 @@ func TestPiModelPayloadHookCancellationStopsBeforeHTTP(t *testing.T) {
 	}))
 	defer server.Close()
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", BaseURL: server.URL + "/v1", APIKey: "test"}}
-	worker, _, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["onPayload"]}`), Callback: func(ctx context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker, _, err := tier.BindPi(NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["onPayload"]}`), Callback: func(ctx context.Context, method string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "onPayload" {
 			return nil, fmt.Errorf("unexpected callback: %s", method)
 		}
@@ -199,7 +199,7 @@ func TestPiModelBindingResumeRejectsPreviousEndpointBeforeResolvingKey(t *testin
 	}))
 	defer newServer.Close()
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "same-model", BaseURL: oldServer.URL + "/v1", APIKey: "old-key"}}
-	worker, _, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{})
+	worker, _, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestPiModelBindingResumeRejectsPreviousEndpointBeforeResolvingKey(t *testin
 		t.Fatal(err)
 	}
 	tier.BaseURL = newServer.URL + "/v1"
-	worker, _, err = tier.BindPi(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) {
+	worker, _, err = tier.BindPi(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) {
 		refreshes.Add(1)
 		return "new-key", nil
 	}})

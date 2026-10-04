@@ -454,7 +454,7 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 		Limits:   &limits,
 		Tools:    agentcore.NewToolSet(todo.NewTool(plan), step),
 		Policy:   agentcore.NewAllowList(todo.ToolName, "do_step"),
-		Hooks:    agentcore.Hooks{Context: []agentcore.ContextHook{todo.ContextHook(plan)}},
+		Hooks:    agentcore.Hooks{PiContext: []agentcore.PiContextHook{todo.PiContextHook(plan)}},
 		Definition: agentcore.AgentDefinition{
 			Agents: "Work methodically and ALWAYS use the tools. Your VERY FIRST action MUST be a single " +
 				"update_plan call recording a four-step plan (steps: gather, analyze, draft, review) with " +
@@ -493,7 +493,7 @@ func TestReal_TodoPlanSurvivesLongSession(t *testing.T) {
 	}
 	// The property the user cares about — "keep todo and plan during a long
 	// session": the live plan the model wrote is still pinned into the LAST
-	// request it saw (todo.ContextHook re-injects it every turn, so it survives any
+	// request it saw (todo.PiContextHook re-injects it every turn, so it survives any
 	// compaction), and the original goal is still present too. Read the plan's own
 	// first step from the store rather than guessing wording, so the check tracks
 	// whatever the model actually named its steps.

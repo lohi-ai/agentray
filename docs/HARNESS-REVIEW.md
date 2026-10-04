@@ -148,7 +148,7 @@ a plain task. Real tests are gated on `AGENTRAY_TEST_OPENAI_BASE_URL` /
 | Steer message mid-run | `loop_test::TestSteeringInjectedBeforeNextTurn`, `TestFollowUpRestartsLoop` | `agentcore_test::TestReal_SteeringMidRun` |
 | Todo/plan + keep across long session | `plugins/todo::TestTodoSurvivesCompaction`, `plugins/todo::TestPlanUpdatesDoNotStarveTurnBudget`, `compaction_test::TestGoalSurvivesRepeatedCompaction` | `agentcore_test::TestReal_TodoPlanSurvivesLongSession` |
 | Permission (default-deny gate) | `loop_test::TestPermissionGateBlocks`, `sandbox::TestComputerUseAgent_BlockedWithoutGrant_Faux` | proven inside every real test (default-deny allow-lists) |
-| Trace & monitoring | `plugins/observe::TestTracingProviderChat`/`EndToEnd`/`Stream`, `TestPluginTracesEveryRung`, `TestPricingCost` | trace records emitted on every real run |
+| Trace & monitoring | `TestNativeTelemetryIncludesFailedFallbackAndPreservesCheckpoint`, native runtime trace tests, `ai` pricing tests | trace records emitted on every real run |
 | Skill use (progressive disclosure) | `prompt_test.go` (skill-loading tests) | `agentcore_test::TestReal_SkillUse` |
 | Auto-improvement (reflection) | reflect parse/dispatch path (mechanical) | `agentruntime::TestReal_Reflection_ProposesImprovementFromRun` |
 

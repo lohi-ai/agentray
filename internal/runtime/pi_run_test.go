@@ -5,11 +5,12 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 func TestPiRunProjectionDoesNotExposeThinkingAsAnswer(t *testing.T) {
 	raw := json.RawMessage(`{"role":"assistant","content":[{"type":"thinking","thinking":"private reasoning","thinkingSignature":"opaque"},{"type":"text","text":"answer"},{"type":"toolCall","id":"call","name":"read","arguments":{"x":1}}],"usage":{"input":3,"output":4,"cacheRead":5,"cacheWrite":6,"cost":{"total":0.125}},"extension":{"keep":"original"}}`)
-	m, err := projectPiMessage(raw)
+	m, err := nativehost.ProjectMessage(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +20,7 @@ func TestPiRunProjectionDoesNotExposeThinkingAsAnswer(t *testing.T) {
 	if m.Usage == nil || m.Usage.InputTokens != 3 || m.Usage.CacheReadTokens != 5 || m.Usage.CacheWriteTokens != 6 || m.Usage.CostUSD != 0.125 {
 		t.Fatalf("usage projection: %+v", m.Usage)
 	}
-	custom, err := projectPiMessage(json.RawMessage(`{"role":"custom","content":{"not":"a legacy message"}}`))
+	custom, err := nativehost.ProjectMessage(json.RawMessage(`{"role":"custom","content":{"not":"a legacy message"}}`))
 	if err != nil || custom.Role != "custom" || custom.Content != "" {
 		t.Fatalf("imposed legacy schema on custom message: %+v %v", custom, err)
 	}

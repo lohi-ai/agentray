@@ -1094,23 +1094,15 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			agentID = conv.AgentID
 		}
 		svc := agentruntime.NewChatService(store, runnerOpts...)
-		var history []agentcore.Message
 		var piHistory *agentruntime.PiConversationHistory
 		if !agentruntime.IsHandledCommand(message) {
-			if svc.UsesPiRuntime() {
-				value, err := agentruntime.BuildPiHistory(c.Request().Context(), store, conv.ID)
-				if err != nil {
-					return echo.NewHTTPError(http.StatusConflict, err.Error())
-				}
-				piHistory = &value
-			} else {
-				var err error
-				history, err = agentruntime.BuildHistory(c.Request().Context(), store, conv.ID)
-				if err != nil {
-					return err
-				}
+			value, err := agentruntime.BuildPiHistory(c.Request().Context(), store, conv.ID)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusConflict, err.Error())
 			}
+			piHistory = &value
 		}
+
 		// A handled command is control plane, not conversation: it goes in the
 		// transcript so the user can see it happened, and stays out of the history
 		// every later turn replays.
@@ -1138,7 +1130,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		}
 		opts := agentruntime.ChatOptions{
 			ProjectID: project.ID, AgentID: agentID,
-			Message: message, History: history,
+			Message:   message,
 			PiHistory: piHistory, InputID: inputID,
 			SessionID: conv.ID, ConversationID: conv.ID,
 			ReadOnly: !sessionAllowsWrite(project),
@@ -1168,7 +1160,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 	// thread three machines share. A conversation is a stable server row; its
 	// append-only entry log is the source of truth for both the human view (message
 	// entries listed by GET) and the model context (folded server-side by
-	// BuildHistory). This replaces the client's localStorage-held history: machine 1
+	// BuildPiHistory). This replaces the client's localStorage-held history: machine 1
 	// opens a conversation, machine 2 GETs its entries and continues, and the LLM
 	// context is rebuilt on the server, not the client. ---
 

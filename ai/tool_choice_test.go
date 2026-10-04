@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
-func toolChoiceRequest(choice agentcore.ToolChoice, parallel *bool) agentcore.ChatRequest {
-	return agentcore.ChatRequest{
+func toolChoiceRequest(choice protocol.ToolChoice, parallel *bool) protocol.ChatRequest {
+	return protocol.ChatRequest{
 		Model: "m", ToolChoice: choice, ParallelToolCalls: parallel,
-		Tools: []agentcore.ToolSchema{{
+		Tools: []protocol.ToolSchema{{
 			Name: "query", Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
 		}},
 	}
@@ -18,7 +18,7 @@ func toolChoiceRequest(choice agentcore.ToolChoice, parallel *bool) agentcore.Ch
 
 func TestOpenAIToolChoiceWireDialects(t *testing.T) {
 	parallel := false
-	named := agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "query"}
+	named := protocol.ToolChoice{Mode: protocol.ToolChoiceNamed, Name: "query"}
 
 	chat := NewOpenAIProvider("key", "", DefaultCompat()).encode(toolChoiceRequest(named, &parallel))
 	choice, ok := chat.ToolChoice.(map[string]any)
@@ -47,7 +47,7 @@ func TestOpenAIToolChoiceWireDialects(t *testing.T) {
 
 func TestAnthropicToolChoiceAndParallelWire(t *testing.T) {
 	parallel := false
-	req := toolChoiceRequest(agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}, &parallel)
+	req := toolChoiceRequest(protocol.ToolChoice{Mode: protocol.ToolChoiceRequired}, &parallel)
 	body := NewAnthropicProvider("key", "").encode(req)
 	if body.ToolChoice == nil || body.ToolChoice.Type != "any" ||
 		body.ToolChoice.DisableParallelToolUse == nil || !*body.ToolChoice.DisableParallelToolUse {
@@ -55,7 +55,7 @@ func TestAnthropicToolChoiceAndParallelWire(t *testing.T) {
 	}
 
 	parallel = true
-	req.ToolChoice = agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "query"}
+	req.ToolChoice = protocol.ToolChoice{Mode: protocol.ToolChoiceNamed, Name: "query"}
 	body = NewAnthropicProvider("key", "").encode(req)
 	if body.ToolChoice == nil || body.ToolChoice.Type != "tool" || body.ToolChoice.Name != "query" ||
 		body.ToolChoice.DisableParallelToolUse == nil || *body.ToolChoice.DisableParallelToolUse {
@@ -66,13 +66,13 @@ func TestAnthropicToolChoiceAndParallelWire(t *testing.T) {
 func TestAntigravityToolChoiceWire(t *testing.T) {
 	p := NewAntigravityProvider()
 	p.tok = OAuthToken{ProjectID: "p"}
-	named := p.encode(toolChoiceRequest(agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "query"}, nil))
+	named := p.encode(toolChoiceRequest(protocol.ToolChoice{Mode: protocol.ToolChoiceNamed, Name: "query"}, nil))
 	config := named.Request.ToolConfig.FunctionCallingConfig
 	if config.Mode != "ANY" || len(config.AllowedFunctionNames) != 1 || config.AllowedFunctionNames[0] != "query" {
 		t.Fatalf("named function calling config = %+v", config)
 	}
 
-	none := p.encode(toolChoiceRequest(agentcore.ToolChoice{Mode: agentcore.ToolChoiceNone}, nil))
+	none := p.encode(toolChoiceRequest(protocol.ToolChoice{Mode: protocol.ToolChoiceNone}, nil))
 	if got := none.Request.ToolConfig.FunctionCallingConfig.Mode; got != "NONE" {
 		t.Fatalf("none mode = %q", got)
 	}
@@ -80,8 +80,8 @@ func TestAntigravityToolChoiceWire(t *testing.T) {
 
 func TestToolControlsOmittedByDefaultAndWithoutTools(t *testing.T) {
 	parallel := true
-	req := agentcore.ChatRequest{
-		Model: "m", ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceRequired}, ParallelToolCalls: &parallel,
+	req := protocol.ChatRequest{
+		Model: "m", ToolChoice: protocol.ToolChoice{Mode: protocol.ToolChoiceRequired}, ParallelToolCalls: &parallel,
 	}
 	for name, body := range map[string]any{
 		"chat":      NewOpenAIProvider("key", "", DefaultCompat()).encode(req),

@@ -42,10 +42,10 @@ parent receives the validated JSON; if the retry also fails it receives the
 raw answer suffixed with `[validation failed: …]`, so a bad shape is visible
 rather than silent.
 
-The retry is a second run, not a resume: a durable child whose log completed
-would reattach to its recorded (invalid) answer, so the retry forks a fresh
-child at `<childSession>/retry` seeded with the prior transcript plus the
-error. The deterministic id keeps the spawn replay-safe — a re-issued spawn
+An ephemeral correction resumes the child's native checkpoint with a new
+validation-error message. For durable execution, the host runs the correction
+at `<childSession>/retry`, seeded from the original native checkpoint. A
+completed original child remains immutable. The deterministic id keeps the spawn replay-safe — a re-issued spawn
 reattaches to whichever child log completed. A delegate has no transcript to
 re-open (`Delegate.Run` is an opaque closure), so its retry is a single
 re-invocation carrying the error and the rejected answer in the task.
@@ -97,8 +97,9 @@ and work around.
   the same `MaxDepth` as a straight chain, even when the two agents are composed
   with different plugin sets.
 - A durable parent gives the child a durable session at
-  `parentSession + "/" + toolCallID`. That determinism is what makes
-  `spawn_subagent` safe to declare retry-safe: a replayed spawn **reattaches** —
+  `parentSession + "/" + invocationKey`. The key identifies the recorded
+  physical invocation, even when the provider repeats a tool-call ID. With a
+  native session host installed, self-delegation is retry-safe: a replayed spawn **reattaches** —
   a completed child returns its recorded answer without re-running (no duplicate
   spend or side effects), an interrupted one resumes from its own log.
 - A **delegate**-routed spawn is not retry-safe. `Delegate.Run` is an opaque
@@ -122,34 +123,17 @@ and work around.
 
 ## When a fan-out is interrupted
 
-The recovery story only holds if the log tells the truth about what was
-finished, and two things in the loop used to record cancellation damage as fact.
-Both are fixed in the kernel, and both were found by cancelling a run mid-batch
-(`agentcore/integration/fanout_test.go`):
+The native session host owns child journals and recovery. Completed children
+reattach without new model calls or usage; interrupted children resume only
+from recorded native state and settled tool receipts. Missing or ambiguous
+completion receipts fail closed instead of repeating effects or treating a
+partial answer as completion. Cancellation reaches all in-flight children.
 
-- **A cancellation-caused tool result is no longer persisted.** A call answered
-  with `stopped: run aborted` — or with a tool error that is really the
-  cancellation arriving mid-call — used to be written to the log like any other
-  result, and a call with a recorded result is answered *forever*. Nothing
-  retried it. Whether a cancelled fan-out was recoverable came down to timing:
-  the children still in flight left dangling calls and were replayed, while the
-  ones the cancellation reached first were closed permanently. Same crash, same
-  batch, opposite outcomes. Those results now stay out of the log, so recovery
-  sees dangling calls and does what it already knows how to do — reattach and
-  finish the RetrySafe ones, close the rest with an interrupted note.
-- **A cancellation no longer trips the circuit breaker.** Every child still
-  running fails when the parent is cancelled, and a wide batch clears
-  `maxToolFailures` in a single turn. The breaker wrote `EntryToolDisabled`, so
-  the verdict outlived the process: the resumed run came back with
-  `spawn_subagent` **disabled**, answering every interrupted call with
-  `blocked: spawn_subagent was disabled for this run`, structurally unable to
-  redo the work. A cancelled call now says nothing about the tool.
-
-Measured on eight children with the parent killed after four finished: before,
-four shards were abandoned and the run reported `STATUS: DONE` on half a batch;
-after, the completed children reattach with no second provider call, the
-interrupted ones resume from their own logs, and all eight findings reach the
-answer.
+`internal/runtime/pi_children_integration_test.go` exercises native isolation,
+reattachment, interrupted-child recovery, corrective retry reattachment,
+cancellation, parallel sessions and parked questions. Plugin tests separately
+verify the fork callback receives the inherited agent, invocation identity and
+original native checkpoint.
 
 ## Known limitations and deferred work
 
@@ -165,13 +149,13 @@ answer.
 - **Depth is the only recursion bound.** There is no detection of a semantic
   cycle below `MaxDepth` (A asks B the same question A was asked).
 
-## Runtime selection
+## Native execution
 
 `Plugin.RunFork` is an optional consumer hook for self-delegation. The plugin
 still creates the child with `Agent.Fork`, applies its depth and spawn limits,
-validates output, and folds usage into the parent. Without the hook it uses the
-Go driver. The Pi-selected runner installs a hook that runs the original Pi
-Agent with the fork's governed tools and inherited hooks.
+validates output, and folds usage into the parent. Without the hook, ephemeral
+children use `RunNative` directly. Durable children require the hook and a
+recorded invocation key; there is no legacy driver or provider-call-ID fallback.
 
 The hook receives `ForkRequest` with the durable child session ID, prompt,
 recall task, and (for a corrective attempt) the previous `RunResult`. Native

@@ -245,11 +245,7 @@ func BuildOpenAICompletionsParams(rawModel json.RawMessage, context TranscriptCo
 			set("providerOptions", map[string]any{"gateway": gateway})
 		}
 	}
-	for key, value := range model.SamplingParams {
-		params[key] = value
-	}
-	overrides, _ := samplingObject(options["samplingParams"])
-	for key, value := range overrides {
+	for key, value := range resolveSamplingParams(model, samplingString(options["reasoningEffort"]), options["samplingParams"]) {
 		params[key] = value
 	}
 	return json.Marshal(params)

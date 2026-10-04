@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 var ErrPiQuestionPending = errors.New("Pi session is waiting for a human answer")
@@ -137,7 +138,7 @@ func piAnswerMessages(entries []agentcore.SessionEntry, state json.RawMessage) (
 			if json.Unmarshal(message, &header) != nil || header != identity {
 				continue
 			}
-			if seen || !samePiJSON(message, expected) {
+			if seen || !nativehost.SameJSON(message, expected) {
 				return nil, errors.New("native delegation delivery is repeated or differs from its receipt")
 			}
 			seen = true
@@ -290,7 +291,7 @@ func piDelegations(entries []agentcore.SessionEntry) ([]*piDelegation, error) {
 			Content []json.RawMessage
 			IsError *bool
 		}
-		if json.Unmarshal(receipt.Result, &result) != nil || result.Details.Trace.CallID != delegation.Original.Trace.CallID || result.Details.Trace.Tool != delegation.Original.Trace.Tool || !samePiJSON(json.RawMessage(result.Details.Trace.Args), json.RawMessage(delegation.Original.Trace.Args)) || entry.CallID != delegation.Original.Trace.CallID {
+		if json.Unmarshal(receipt.Result, &result) != nil || result.Details.Trace.CallID != delegation.Original.Trace.CallID || result.Details.Trace.Tool != delegation.Original.Trace.Tool || !nativehost.SameJSON(json.RawMessage(result.Details.Trace.Args), json.RawMessage(delegation.Original.Trace.Args)) || entry.CallID != delegation.Original.Trace.CallID {
 			return nil, errors.New("native delegation continuation changed its original call")
 		}
 		if result.Content == nil || result.IsError == nil || *result.IsError != (result.Details.Trace.Error != "" || !result.Details.Trace.Allowed) || (result.Details.Executed && result.Details.Trace.IdempotencyKey != delegation.Original.Trace.IdempotencyKey) {
@@ -312,7 +313,7 @@ func piDelegations(entries []agentcore.SessionEntry) ([]*piDelegation, error) {
 				return nil, errors.New("invalid delegation completion message")
 			}
 			expected, err := piDelegationMessage(receipt.ID, receipt.Result, message.Timestamp)
-			if err != nil || !samePiJSON(receipt.Message, expected) {
+			if err != nil || !nativehost.SameJSON(receipt.Message, expected) {
 				return nil, errors.New("delegation completion differs from its tool result")
 			}
 			contexts, err := piDelegationContexts(receipt.ID, result.Details, message.Timestamp)
@@ -320,7 +321,7 @@ func piDelegations(entries []agentcore.SessionEntry) ([]*piDelegation, error) {
 				return nil, errors.New("delegation context differs from its tool result")
 			}
 			for i := range contexts {
-				if !samePiJSON(contexts[i], receipt.Contexts[i]) {
+				if !nativehost.SameJSON(contexts[i], receipt.Contexts[i]) {
 					return nil, errors.New("delegation context differs from its tool result")
 				}
 			}
@@ -354,7 +355,7 @@ func piDelegationContexts(id string, outcome agentcore.PiToolOutcome, timestamp 
 	if outcome.Terminate {
 		return nil, nil
 	}
-	messages, err := piHostMessages(outcome.AdditionalContexts)
+	messages, err := nativehost.InputMessages(outcome.AdditionalContexts)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +425,7 @@ func (s *PiSession) finishTerminalDelegations(ctx context.Context, input json.Ra
 	if err != nil {
 		return false, err
 	}
-	if _, err := s.agent.Call(ctx, "setState", update); err != nil {
+	if err := s.agent.setState(ctx, update); err != nil {
 		return false, err
 	}
 	if err := s.checkpoint(s.ctx); err != nil {
@@ -473,12 +474,7 @@ func (s *PiSession) resumeDelegations(ctx context.Context, host *agentcore.PiToo
 				})
 				return raw, err
 			}
-			var result json.RawMessage
-			if s.agent.ObserveDelegation != nil {
-				result, err = s.agent.ObserveDelegation(resumeCtx, delegation.Original.Trace.Tool, run)
-			} else {
-				result, err = run(resumeCtx)
-			}
+			result, err := s.agent.observeDelegation(resumeCtx, delegation.Original.Trace.Tool, run)
 			if err != nil {
 				return err
 			}

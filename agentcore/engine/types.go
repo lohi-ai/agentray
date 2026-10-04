@@ -231,7 +231,7 @@ type Request struct {
 // StreamFn must encode provider failures as error/aborted stream messages.
 // A returned Go error is a contract failure and interrupts the low-level loop.
 // Models and option fields remain raw to retain provider-specific metadata.
-type StreamFn func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error)
+type StreamFn = ai.StreamFn
 
 // RequestAdmission is a Go host extension for orchestration which can select a
 // different prepared request before releasing provider events. Context contains
@@ -342,10 +342,3 @@ func (e Event) MarshalJSON() ([]byte, error) {
 // EventSink is awaited. Parallel tools may enter it concurrently; a sink that
 // keeps mutable state must synchronize its own writes.
 type EventSink func(Event) error
-
-func nonnil[T any](values []T) []T {
-	if values == nil {
-		return []T{}
-	}
-	return values
-}

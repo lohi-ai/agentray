@@ -88,23 +88,11 @@ func validateOutput(answer string, schema *jsonschema.Schema) error {
 	return nil
 }
 
-// retrySeed builds the history for the one re-opened attempt: the child's own
-// transcript minus the synthesized system message (the retry run prepends a
-// fresh one), plus the validation error as a new user instruction. The child
-// sees exactly what it produced and why it was rejected — a correction, not a
-// restart.
-func retrySeed(messages []agentcore.Message, validationErr error) []agentcore.Message {
-	seed := make([]agentcore.Message, 0, len(messages)+1)
-	for i, m := range messages {
-		if i == 0 && m.Role == agentcore.RoleSystem {
-			continue
-		}
-		seed = append(seed, m)
-	}
-	seed = append(seed, agentcore.Message{
-		Role: agentcore.RoleUser,
+// correctionMessage adds host-authored input to the child's native checkpoint.
+// Provider history is never rebuilt from display messages.
+func correctionMessage(validationErr error) agentcore.Message {
+	return agentcore.Message{Role: agentcore.RoleUser,
 		Content: "Your previous final answer failed output_schema validation: " + validationErr.Error() +
 			"\nReply with ONLY a corrected JSON value matching the schema — no prose, no markdown fence.",
-	})
-	return seed
+	}
 }

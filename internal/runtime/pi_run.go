@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // PiRunConfig executes a native run. Seed history belongs in the native
 // initialState.messages option; Input is a native prompt, or nil to Continue.
 type PiRunConfig struct {
-	Compaction *PiContextCompaction
+	Compaction *nativehost.CompactionPolicy
 	Session    PiSessionConfig
 	Input      json.RawMessage
 	Sink       agentcore.StreamSink
@@ -56,6 +58,22 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 		if err != nil {
 			return result, err
 		}
+		originalRequest := cfg.Session.Pi.OnRequest
+		cfg.Session.Pi.OnRequest = func(ctx context.Context, transcript ai.TranscriptContext) error {
+			if originalRequest != nil {
+				if err := originalRequest(ctx, transcript); err != nil {
+					return err
+				}
+			}
+			raw, err := json.Marshal(transcript.Messages())
+			if err != nil {
+				return err
+			}
+			projection.mu.Lock()
+			turn := projection.result.Turns
+			projection.mu.Unlock()
+			return cfg.Host.ObservePiMessages(ctx, agentcore.PhaseRequest, turn, raw)
+		}
 	}
 	prepareCompaction, err := bindPiRequestCompaction(&cfg, &projection)
 	if err != nil {
@@ -65,6 +83,27 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 	cfg.Session.Pi.OnEvent = func(eventCtx context.Context, event json.RawMessage) error {
 		if err := projection.event(event); err != nil {
 			return err
+		}
+		if cfg.Host != nil {
+			var appended struct {
+				Type    string
+				Message json.RawMessage
+			}
+			if err := json.Unmarshal(event, &appended); err != nil {
+				return err
+			}
+			if appended.Type == "message_end" {
+				projection.mu.Lock()
+				turn := projection.result.Turns
+				projection.mu.Unlock()
+				raw, err := json.Marshal([]json.RawMessage{appended.Message})
+				if err != nil {
+					return err
+				}
+				if err := cfg.Host.ObservePiMessages(eventCtx, agentcore.PhaseAppend, turn, raw); err != nil {
+					return err
+				}
+			}
 		}
 		if original != nil {
 			return original(eventCtx, event)
@@ -132,11 +171,11 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 	}
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer finishCancel()
-	if _, idleErr := session.agent.Call(finishCtx, "waitForIdle", nil); idleErr != nil {
+	if idleErr := session.agent.wait(finishCtx); idleErr != nil {
 		err = errors.Join(err, idleErr)
 	}
 	state, stateErr := session.State(finishCtx)
-	telemetry, telemetryErr := session.agent.Call(finishCtx, "telemetry", nil)
+	telemetry, telemetryErr := session.agent.spans(finishCtx)
 	err = errors.Join(err, stateErr, telemetryErr)
 	projection.mu.Lock()
 	defer projection.mu.Unlock()
@@ -159,7 +198,7 @@ func RunPi(ctx context.Context, cfg PiRunConfig) (result PiRunResult, err error)
 		}
 		result.Projection.Messages = make([]agentcore.Message, 0, len(native.Messages))
 		for _, raw := range native.Messages {
-			message, decodeErr := projectPiMessage(raw)
+			message, decodeErr := nativehost.ProjectMessage(raw)
 			if decodeErr != nil {
 				return result, errors.Join(err, decodeErr)
 			}
@@ -203,7 +242,7 @@ func (p *piRunProjection) delegationUpdate(trace agentcore.ToolTrace, raw json.R
 	if err := json.Unmarshal(raw, &update); err != nil {
 		return err
 	}
-	text, _, _, err := projectPiContent(update.Content)
+	text, _, _, err := nativehost.ProjectContent(update.Content)
 	if err != nil {
 		return err
 	}
@@ -258,7 +297,7 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 	case "turn_end":
 		p.emit(agentcore.StreamEvent{Type: agentcore.StreamTurnEnd})
 	case "message_start", "message_end":
-		message, err := projectPiMessage(event.Message)
+		message, err := nativehost.ProjectMessage(event.Message)
 		if err != nil {
 			return err
 		}
@@ -277,7 +316,7 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 			if err != nil {
 				return err
 			}
-			if !samePiJSON(p.nativeTerminal, terminal) {
+			if !nativehost.SameJSON(p.nativeTerminal, terminal) {
 				return errors.New("native terminal differs from accounted attempt")
 			}
 			p.nativeTerminal = nil
@@ -302,7 +341,7 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 		if err := json.Unmarshal(event.PartialResult, &partial); err != nil {
 			return err
 		}
-		text, _, _, err := projectPiContent(partial.Content)
+		text, _, _, err := nativehost.ProjectContent(partial.Content)
 		if err != nil {
 			return err
 		}
@@ -331,7 +370,7 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 		} else {
 			trace.Allowed = !event.IsError
 			if event.IsError {
-				trace.Error, _, _, _ = projectPiContent(result.Content)
+				trace.Error, _, _, _ = nativehost.ProjectContent(result.Content)
 			}
 		}
 		p.result.Tools = append(p.result.Tools, trace)
@@ -345,69 +384,4 @@ func (p *piRunProjection) event(raw json.RawMessage) error {
 		delete(p.calls, event.ToolCallID)
 	}
 	return nil
-}
-
-func projectPiMessage(raw json.RawMessage) (agentcore.Message, error) {
-	var native struct {
-		Role, ToolCallID, ToolName string
-		Content                    json.RawMessage
-		Usage                      *struct {
-			Input, Output, CacheRead, CacheWrite int
-			Cost                                 *struct{ Total float64 }
-		}
-	}
-	if err := json.Unmarshal(raw, &native); err != nil {
-		return agentcore.Message{}, err
-	}
-	m := agentcore.Message{Role: agentcore.Role(native.Role), ToolCallID: native.ToolCallID, Name: native.ToolName}
-	if native.Role == "toolResult" {
-		m.Role = agentcore.RoleTool
-	}
-	// Custom messages are retained in native state without imposing a legacy
-	// content schema or making their extension payload model-visible text.
-	if native.Role == "system" || native.Role == "user" || native.Role == "assistant" || native.Role == "toolResult" {
-		var err error
-		m.Content, m.ContentParts, m.ToolCalls, err = projectPiContent(native.Content)
-		if err != nil {
-			return m, err
-		}
-	}
-	if native.Usage != nil {
-		u := native.Usage
-		m.Usage = &agentcore.Usage{InputTokens: u.Input, OutputTokens: u.Output, CacheReadTokens: u.CacheRead, CacheWriteTokens: u.CacheWrite, CostUnpriced: u.Cost == nil}
-		if u.Cost != nil {
-			m.Usage.CostUSD = u.Cost.Total
-		}
-	}
-	return m, nil
-}
-
-func projectPiContent(raw json.RawMessage) (string, []agentcore.ContentPart, []agentcore.ToolCall, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", nil, nil, nil
-	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text, nil, nil, nil
-	}
-	var blocks []struct {
-		Type, Text, Data, MimeType, ID, Name string
-		Arguments                            json.RawMessage
-	}
-	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", nil, nil, err
-	}
-	var parts []agentcore.ContentPart
-	var calls []agentcore.ToolCall
-	for _, block := range blocks {
-		switch block.Type {
-		case "text":
-			text += block.Text
-		case "image":
-			parts = append(parts, agentcore.ContentPart{Type: agentcore.ContentPartImage, MIMEType: block.MimeType, Data: block.Data})
-		case "toolCall":
-			calls = append(calls, agentcore.ToolCall{ID: block.ID, Name: block.Name, Arguments: string(block.Arguments)})
-		}
-	}
-	return text, parts, calls, nil
 }

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -53,7 +53,7 @@ func doJSON(ctx context.Context, client HTTPDoer, req *http.Request) ([]byte, in
 type listedModel struct {
 	ID            string
 	ContextWindow int
-	Capabilities  agentcore.ModelCapabilities
+	Capabilities  protocol.ModelCapabilities
 }
 
 // listOpenAIModels calls GET {base}/models (OpenAI and OpenAI-compatible).
@@ -158,7 +158,7 @@ func listModelsV1(ctx context.Context, client HTTPDoer, baseURL string, auth fun
 		return nil, err
 	}
 	if status >= 400 {
-		return nil, &agentcore.ProviderError{Provider: "anthropic", Status: status, Message: strings.TrimSpace(string(data))}
+		return nil, &protocol.ProviderError{Provider: "anthropic", Status: status, Message: strings.TrimSpace(string(data))}
 	}
 	var decoded struct {
 		Data []struct {
@@ -174,7 +174,7 @@ func listModelsV1(ctx context.Context, client HTTPDoer, baseURL string, auth fun
 	for _, m := range decoded.Data {
 		if id := strings.TrimSpace(m.ID); id != "" {
 			out = append(out, listedModel{ID: id, ContextWindow: m.ContextWindow,
-				Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: m.MaxOutputTokens}})
+				Capabilities: protocol.ModelCapabilities{MaxOutputTokens: m.MaxOutputTokens}})
 		}
 	}
 	return out, nil
@@ -244,7 +244,7 @@ func listGoogleModels(ctx context.Context, client HTTPDoer, baseURL, apiKey stri
 		id = strings.TrimPrefix(id, "models/")
 		if id != "" {
 			out = append(out, listedModel{ID: id, ContextWindow: m.InputTokenLimit,
-				Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: m.OutputTokenLimit}})
+				Capabilities: protocol.ModelCapabilities{MaxOutputTokens: m.OutputTokenLimit}})
 		}
 	}
 	return out, nil

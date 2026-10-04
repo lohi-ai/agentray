@@ -92,3 +92,28 @@ state). Retraction is always soft; there is no hard delete on the seam.
   grows (more slowly now that repeats fold).
 - **The budget is byte-denominated, not token-denominated,** and is a fixed
   constant rather than a share of `MaxContextTokens`.
+
+## Explicit recall
+
+The run extension contributes `memory_recall` alongside `learn` and optional
+`memory_edit`. The host must permit it. It calls the supplied store with the
+run's scope, a query of at most 2000 bytes, and 1–20 results (default 8).
+Entries include IDs for curation and content capped at 2000 bytes; results from
+a different scope are discarded. The store owns indexed relevance ranking.
+Recall is read-only and does not receive the bookkeeping-turn refund.
+
+## Rollout consolidation
+
+Optionally supply `Consolidator` or `NativeProvider` and a store implementing
+`ConsolidationStore`. Successful root runs stage bounded completed evidence,
+read at most four pending rollouts and 32 memories, then propose at most 16
+add/merge/retract changes. The store must atomically validate the supplied
+snapshot, apply changes and consume rollouts. Source IDs and scope are validated
+before commit. The native binding uses no tools and accounts every AI attempt.
+
+Errors leave pending evidence for the next successful run; they do not fail the
+primary answer. `OnConsolidationError` reports secondary failures to hosts.
+Children, parked, failed and aborted runs do not consolidate. This is independent
+of `learn`/`memory_edit`; omitting consolidation leaves existing behavior intact.
+Soot's Bolt adapter supplies scoped durable pending evidence, snapshot checks,
+idempotent commits and retained revision history.

@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 )
 
@@ -74,8 +75,8 @@ type RunInfo struct {
 }
 
 // ExtensionFactory is what a plugin registers. The loop calls BeginRun exactly
-// once per run, so an extension may hold per-run mutable state without any
-// locking or reset logic — a fresh run gets a fresh instance.
+// once per run, so a fresh run gets a fresh instance without resetting shared
+// state. State accessed by parallel tools still needs synchronization.
 //
 // Returning a nil Extension is how a plugin declines to participate in a
 // particular run (delegation already at max depth, no session to query, a
@@ -98,6 +99,23 @@ type ExtensionFactory interface {
 type Extension interface {
 	// Name identifies this extension instance.
 	Name() string
+}
+
+// NativeContextContributor transforms the outgoing native request view using
+// this run's extension state. It must not reconstruct provider messages from
+// display projections. Like Pi's transformContext, failures retain the prior
+// valid view; returned additions are not written into authoritative history.
+type NativeContextContributor interface {
+	Extension
+	TransformNativeContext(context.Context, []json.RawMessage) ([]json.RawMessage, error)
+}
+
+// NativeStateContributor persists a plugin's bounded state in the opaque native
+// checkpoint. Restore runs before lifecycle hooks; the consumer commits the
+// resulting checkpoint together with its successful run transaction.
+type NativeStateContributor interface {
+	NativeState() (json.RawMessage, error)
+	RestoreNativeState(json.RawMessage) error
 }
 
 // --- contribution points -------------------------------------------------
@@ -182,14 +200,6 @@ type RunCloser interface {
 	CloseRun()
 }
 
-// LogObserver watches what enters the durable log. Implement it to check a
-// property of the recorded conversation — the loop reports every persisted
-// entry, so an observer can compare what was logged against what the model was
-// shown.
-type LogObserver interface {
-	ObserveLogged(entry SessionEntry)
-}
-
 // --- interception points -------------------------------------------------
 
 // ToolResultDecision is a ToolInterceptor's answer.
@@ -259,6 +269,9 @@ type BatchInterceptor interface {
 // StepInfo describes the step about to run.
 type StepInfo struct {
 	Turn int
+	// BookkeepingTurns is the number of completed administrative turns refunded
+	// against MaxTurns. Turn itself remains monotonic for hooks and observers.
+	BookkeepingTurns int
 	// Model is the rung in use for this step.
 	Model string
 	// Usage is the run-to-date total.
@@ -416,6 +429,8 @@ type RunObserver interface {
 type ObservePhase string
 
 const (
+	// PhaseRestore supplies the original checkpoint history before new input.
+	PhaseRestore ObservePhase = "restore"
 	// PhaseAppend reports messages newly added to the history.
 	PhaseAppend ObservePhase = "append"
 	// PhaseRebase reports that the history was deliberately REPLACED
@@ -437,6 +452,7 @@ const (
 // interfaces, pre-sorted so the hot path does no type assertions per turn.
 type extensionSet struct {
 	all       []Extension
+	contexts  []NativeContextContributor
 	tools     []ToolContributor
 	prompts   []PromptContributor
 	toolIntcp []ToolInterceptor
@@ -446,7 +462,6 @@ type extensionSet struct {
 	stops     []StopInterceptor
 	revisers  []GoalReviser
 	observers []RunObserver
-	logs      []LogObserver
 	closers   []RunCloser
 	// stopAttempts counts re-opens per extension so a StopInterceptor can bound
 	// itself without holding the count.
@@ -473,6 +488,9 @@ func beginExtensions(ctx context.Context, factories []ExtensionFactory, info Run
 
 // add classifies one extension by the optional interfaces it implements.
 func (s *extensionSet) add(ext Extension) {
+	if contributor, ok := ext.(NativeContextContributor); ok {
+		s.contexts = append(s.contexts, contributor)
+	}
 	s.all = append(s.all, ext)
 	if v, ok := ext.(ToolContributor); ok {
 		s.tools = append(s.tools, v)
@@ -501,9 +519,6 @@ func (s *extensionSet) add(ext Extension) {
 	if v, ok := ext.(RunObserver); ok {
 		s.observers = append(s.observers, v)
 	}
-	if v, ok := ext.(LogObserver); ok {
-		s.logs = append(s.logs, v)
-	}
 	if v, ok := ext.(RunCloser); ok {
 		s.closers = append(s.closers, v)
 	}
@@ -526,14 +541,6 @@ func (s *extensionSet) closeRun() {
 	for _, c := range s.closers {
 		closer := c
 		_ = safe(func() { closer.CloseRun() })
-	}
-}
-
-// observeLogged reports one persisted entry to the log observers.
-func (s *extensionSet) observeLogged(entry SessionEntry) {
-	for _, o := range s.logs {
-		obs := o
-		_ = safe(func() { obs.ObserveLogged(entry) })
 	}
 }
 

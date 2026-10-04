@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // ConfigPlugin adapts a flat Config into a Plugin that writes every configured
@@ -12,6 +13,7 @@ func ConfigPlugin(cfg Config) Plugin {
 
 // ModelPlugin installs the model spine into a Registry.
 type ModelPlugin struct {
+	NativeProvider    *ai.FallbackProvider
 	Provider          LLMProvider
 	Model             string
 	Capabilities      ModelCapabilities
@@ -33,6 +35,11 @@ func (ModelPlugin) Name() string { return "model" }
 
 // Register claims the model seam and decoding knobs.
 func (p ModelPlugin) Register(r *Registry) error {
+	if p.NativeProvider != nil {
+		if err := r.SetNativeProvider(p.NativeProvider); err != nil {
+			return err
+		}
+	}
 	if err := r.SetModel(p.Provider, p.Model); err != nil {
 		return err
 	}

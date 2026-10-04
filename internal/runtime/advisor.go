@@ -69,11 +69,7 @@ type advisorNotes struct {
 // switched off.
 func (r *Runner) advisorReviewer(in advisorInput) advisor.Reviewer {
 	return func(ctx context.Context, rev advisor.Review) ([]advisor.Note, error) {
-		provider, err := in.Tier.TracedProvider(r.Tracer)
-		if err != nil {
-			return nil, err
-		}
-		resp, err := provider.Chat(ctx, agentcore.ChatRequest{
+		resp, err := in.Tier.complete(ctx, r.Tracer, agentcore.ChatRequest{
 			Model:     in.Tier.Model,
 			MaxTokens: advisorMaxTokens,
 			Messages: []agentcore.Message{

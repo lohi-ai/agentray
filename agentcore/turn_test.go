@@ -2,13 +2,16 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/lohi-ai/agentray/ai"
 )
 
 type cancelCloseProvider struct{}
@@ -218,7 +221,7 @@ func TestIsRetryable_ClassifiesThroughWrappedErrors(t *testing.T) {
 //
 // This file keeps the LOOP's half: that cache token counts accumulate across
 // turns and that retry/escalation layer correctly. Pricing moved to
-// agentcore/plugins/observe (Monitor), and the per-vendor usage normalization
+// ai/model_pricing.go, and the per-vendor usage normalization
 // that feeds both moved to ai/ with the wire code.
 
 // TestRunSumsCacheTokens verifies the loop accumulates cache tokens across turns
@@ -226,7 +229,7 @@ func TestIsRetryable_ClassifiesThroughWrappedErrors(t *testing.T) {
 func TestRunSumsCacheTokens(t *testing.T) {
 	r1 := AssistantText("done")
 	r1.Usage = Usage{InputTokens: 5, OutputTokens: 3, CacheReadTokens: 100, CacheWriteTokens: 20}
-	agent, err := New(Config{Provider: NewFauxProvider(r1), Model: "test"})
+	agent, err := New(Config{NativeProvider: scriptedNativeProvider(r1), Model: "test"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -242,26 +245,17 @@ func TestRunSumsCacheTokens(t *testing.T) {
 
 // --- #2: same-rung retry with backoff ---
 
-// flakyProvider fails with a retryable ProviderError for the first failN calls,
-// then succeeds. It counts every Chat attempt so a test can assert the retry took
-// place on the same rung.
-type flakyProvider struct {
-	failN  int32
-	calls  int32
-	status int
-}
-
-func (f *flakyProvider) Name() string        { return "flaky" }
-func (f *flakyProvider) SupportsTools() bool { return true }
-func (f *flakyProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
-	n := atomic.AddInt32(&f.calls, 1)
-	if n <= atomic.LoadInt32(&f.failN) {
-		return ChatResponse{}, &ProviderError{Provider: "flaky", Status: f.status}
+// flakyNativeStream fails with a retryable ProviderError for the first failN
+// attempts, then serves the script. It counts every attempt so a test can
+// assert the retry took place on the same candidate.
+func flakyNativeStream(failN int, status int, calls *int32, script ...ChatResponse) ai.StreamFn {
+	return func(ctx context.Context, m json.RawMessage, v ai.TranscriptContext, o map[string]any) (*ai.AssistantMessageEventStream, error) {
+		n := atomic.AddInt32(calls, 1)
+		if n <= int32(failN) {
+			return nil, &ProviderError{Provider: "flaky", Status: status}
+		}
+		return scriptedNativeStream(script...)(ctx, m, v, o)
 	}
-	return AssistantText("recovered"), nil
-}
-func (f *flakyProvider) Stream(context.Context, ChatRequest) (<-chan ChatDelta, error) {
-	return nil, errors.New("unused")
 }
 
 // fastRetry is a tiny backoff so retry tests don't sleep for real.
@@ -272,8 +266,8 @@ func fastRetry() *RetryPolicy {
 // TestSameRungRetrySucceedsAfterTransientError verifies a 503 on the same model
 // is retried with backoff and recovers, without escalating or aborting.
 func TestSameRungRetrySucceedsAfterTransientError(t *testing.T) {
-	prov := &flakyProvider{failN: 2, status: http.StatusServiceUnavailable}
-	agent, err := New(Config{Provider: prov, Model: "test", Retry: fastRetry()})
+	var calls int32
+	agent, err := New(Config{NativeProvider: nativeCandidate("test", flakyNativeStream(2, http.StatusServiceUnavailable, &calls, AssistantText("recovered"))), Model: "test", Retry: fastRetry()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -284,7 +278,7 @@ func TestSameRungRetrySucceedsAfterTransientError(t *testing.T) {
 	if res.Final != "recovered" {
 		t.Fatalf("final = %q, want recovered", res.Final)
 	}
-	if got := atomic.LoadInt32(&prov.calls); got != 3 {
+	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Fatalf("provider called %d times, want 3 (2 failures + 1 success)", got)
 	}
 }
@@ -293,15 +287,15 @@ func TestSameRungRetrySucceedsAfterTransientError(t *testing.T) {
 // is spent on a persistently failing model (and there is no ladder to escalate
 // to), the error surfaces — the loop doesn't retry forever.
 func TestRetryExhaustionSurfacesError(t *testing.T) {
-	prov := &flakyProvider{failN: 99, status: http.StatusTooManyRequests}
-	agent, err := New(Config{Provider: prov, Model: "test", Retry: fastRetry()})
+	var calls int32
+	agent, err := New(Config{NativeProvider: nativeCandidate("test", flakyNativeStream(99, http.StatusTooManyRequests, &calls)), Model: "test", Retry: fastRetry()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if _, err := agent.Prompt(context.Background(), "go"); err == nil {
 		t.Fatalf("a persistently failing provider must surface an error")
 	}
-	if got := atomic.LoadInt32(&prov.calls); got != 3 {
+	if got := atomic.LoadInt32(&calls); got != 3 {
 		t.Fatalf("provider called %d times, want 3 (MaxAttempts)", got)
 	}
 }
@@ -310,15 +304,15 @@ func TestRetryExhaustionSurfacesError(t *testing.T) {
 // it can't be fixed by trying the same model again, so it surfaces on the first
 // attempt.
 func TestNonRetryableErrorSkipsRetry(t *testing.T) {
-	prov := &flakyProvider{failN: 99, status: http.StatusBadRequest}
-	agent, err := New(Config{Provider: prov, Model: "test", Retry: fastRetry()})
+	var calls int32
+	agent, err := New(Config{NativeProvider: nativeCandidate("test", flakyNativeStream(99, http.StatusBadRequest, &calls)), Model: "test", Retry: fastRetry()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	if _, err := agent.Prompt(context.Background(), "go"); err == nil {
 		t.Fatalf("a 400 must surface as an error")
 	}
-	if got := atomic.LoadInt32(&prov.calls); got != 1 {
+	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("provider called %d times, want 1 (no retry on non-retryable)", got)
 	}
 }
@@ -326,13 +320,16 @@ func TestNonRetryableErrorSkipsRetry(t *testing.T) {
 // TestRetryThenEscalate verifies the layering: a rung's retries are spent first,
 // and only then does the loop escalate to the next rung, which succeeds.
 func TestRetryThenEscalate(t *testing.T) {
-	bad := &flakyProvider{failN: 99, status: http.StatusServiceUnavailable}
-	good := NewFauxProvider(AssistantText("from rung 2"))
+	var badCalls int32
+	bad := flakyNativeStream(99, http.StatusServiceUnavailable, &badCalls)
+	ladder := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{
+		{Model: json.RawMessage(`{"id":"rung1"}`), Stream: bad},
+		{Model: json.RawMessage(`{"id":"rung2"}`), Stream: scriptedNativeStream(AssistantText("from rung 2"))},
+	}}
 	agent, err := New(Config{
-		Provider:   bad,
-		Model:      "rung1",
-		Retry:      fastRetry(),
-		Escalation: []ModelRung{{Provider: good, Model: "rung2"}},
+		NativeProvider: ladder,
+		Model:          "rung1",
+		Retry:          fastRetry(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -344,53 +341,36 @@ func TestRetryThenEscalate(t *testing.T) {
 	if res.Final != "from rung 2" {
 		t.Fatalf("final = %q, want 'from rung 2'", res.Final)
 	}
-	if got := atomic.LoadInt32(&bad.calls); got != 3 {
+	if got := atomic.LoadInt32(&badCalls); got != 3 {
 		t.Fatalf("rung 1 retried %d times, want 3 before escalating", got)
 	}
 }
 
-// retryStreamProvider returns one scripted stream per call. It lets the tests
-// put a transport error on either side of the first visible token — the exact
-// boundary that decides whether replay is safe.
-type retryStreamProvider struct {
-	name    string
-	scripts [][]ChatDelta
-	calls   int32
-}
-
-func (p *retryStreamProvider) Name() string        { return p.name }
-func (p *retryStreamProvider) SupportsTools() bool { return true }
-func (p *retryStreamProvider) Chat(context.Context, ChatRequest) (ChatResponse, error) {
-	return ChatResponse{}, errors.New("unused")
-}
-func (p *retryStreamProvider) Stream(context.Context, ChatRequest) (<-chan ChatDelta, error) {
-	i := int(atomic.AddInt32(&p.calls, 1)) - 1
-	if i >= len(p.scripts) {
-		return nil, errors.New("unexpected stream attempt")
-	}
-	ch := make(chan ChatDelta, len(p.scripts[i]))
-	for _, d := range p.scripts[i] {
-		ch <- d
-	}
-	close(ch)
-	return ch, nil
+// nativeErrorMessage builds an assistant error event carrying the failure text.
+func nativeErrorMessage(text string, usage ai.Usage) *ai.Message {
+	return &ai.Message{Role: "assistant", StopReason: "error", Content: ai.BlockContent(), ErrorMessage: &text, Usage: &usage}
 }
 
 // Once a token reaches the sink, retrying would concatenate a second answer to
 // the first. The failed attempt also remains billable, so its partial usage must
 // survive on the errored RunResult.
 func TestStreamFailureAfterVisibleOutputIsNotRetriedOrEscalated(t *testing.T) {
-	cause := &ProviderError{Provider: "primary", Status: http.StatusServiceUnavailable}
-	primary := &retryStreamProvider{name: "primary", scripts: [][]ChatDelta{{
-		{ContentDelta: "partial", Usage: Usage{InputTokens: 11}},
-		{Err: cause, Usage: Usage{OutputTokens: 1}},
-	}}}
-	fallback := &retryStreamProvider{name: "fallback", scripts: [][]ChatDelta{{
-		{ContentDelta: "fallback should not run"}, {Done: true},
-	}}}
+	var primaryCalls, fallbackCalls int32
+	failed := &ai.Message{Role: "assistant", StopReason: "error", Usage: &ai.Usage{Input: 11, Output: 1},
+		Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "partial"}),
+	}
+	errText := "provider overloaded"
+	failed.ErrorMessage = &errText
+	// The attempt commits visible output, then dies: retrying would concatenate
+	// a second answer, so the run must surface the error on the spot.
+	primary := nativeAttempts(&primaryCalls, nativeEmit(failed))
+	fallback := nativeAttempts(&fallbackCalls, nativeEmit(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "fallback should not run"})}))
+	ladder := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{
+		{Model: json.RawMessage(`{"id":"primary-model"}`), Stream: primary},
+		{Model: json.RawMessage(`{"id":"fallback-model"}`), Stream: fallback},
+	}}
 	agent, err := New(Config{
-		Provider: primary, Model: "primary-model", Retry: fastRetry(),
-		Escalation: []ModelRung{{Provider: fallback, Model: "fallback-model"}},
+		NativeProvider: ladder, Model: "primary-model", Retry: fastRetry(),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -402,16 +382,16 @@ func TestStreamFailureAfterVisibleOutputIsNotRetriedOrEscalated(t *testing.T) {
 			visible += ev.Token
 		}
 	})
-	if err == nil || !errors.Is(err, cause) {
-		t.Fatalf("err = %v, want wrapped original provider error", err)
+	if err == nil || !strings.Contains(err.Error(), "overloaded") {
+		t.Fatalf("err = %v, want the provider failure", err)
 	}
 	if visible != "partial" {
 		t.Fatalf("visible output = %q, want one copy of the committed prefix", visible)
 	}
-	if got := atomic.LoadInt32(&primary.calls); got != 1 {
+	if got := atomic.LoadInt32(&primaryCalls); got != 1 {
 		t.Fatalf("primary attempts = %d, want 1 after output committed", got)
 	}
-	if got := atomic.LoadInt32(&fallback.calls); got != 0 {
+	if got := atomic.LoadInt32(&fallbackCalls); got != 0 {
 		t.Fatalf("fallback attempts = %d, want 0 after output committed", got)
 	}
 	if res.Usage.InputTokens != 11 || res.Usage.OutputTokens != 1 {
@@ -422,11 +402,12 @@ func TestStreamFailureAfterVisibleOutputIsNotRetriedOrEscalated(t *testing.T) {
 // A failure before the first token is still replay-safe and should retain the
 // existing same-rung retry behavior.
 func TestStreamFailureBeforeVisibleOutputStillRetries(t *testing.T) {
-	primary := &retryStreamProvider{name: "primary", scripts: [][]ChatDelta{
-		{{Err: &ProviderError{Provider: "primary", Status: http.StatusServiceUnavailable}}},
-		{{ContentDelta: "recovered"}, {Done: true, StopReason: "stop"}},
-	}}
-	agent, err := New(Config{Provider: primary, Model: "test", Retry: fastRetry()})
+	var primaryCalls int32
+	recovered := &ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "recovered"})}
+	primary := nativeAttempts(&primaryCalls,
+		failingNativeStream(&ProviderError{Provider: "primary", Status: http.StatusServiceUnavailable}),
+		nativeEmit(recovered))
+	agent, err := New(Config{NativeProvider: nativeCandidate("test", primary), Model: "test", Retry: fastRetry()})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -442,7 +423,7 @@ func TestStreamFailureBeforeVisibleOutputStillRetries(t *testing.T) {
 	if res.Final != "recovered" || visible != "recovered" {
 		t.Fatalf("final=%q visible=%q, want recovered", res.Final, visible)
 	}
-	if got := atomic.LoadInt32(&primary.calls); got != 2 {
+	if got := atomic.LoadInt32(&primaryCalls); got != 2 {
 		t.Fatalf("primary attempts = %d, want 2", got)
 	}
 }
@@ -472,38 +453,6 @@ func TestRetryClassification(t *testing.T) {
 
 // TestParseRetryAfter verifies the Retry-After parser handles the delay-seconds
 // form (the common case) and ignores garbage.
-func TestParseRetryAfter(t *testing.T) {
-	now := time.Unix(2_000_000_000, 0)
-	if got := parseRetryAfterAt("5", now); got != 5*time.Second {
-		t.Fatalf("parseRetryAfter(5) = %v, want 5s", got)
-	}
-	if got := parseRetryAfterAt("", now); got != 0 {
-		t.Fatalf("parseRetryAfter(empty) = %v, want 0", got)
-	}
-	if got := parseRetryAfterAt("garbage", now); got != 0 {
-		t.Fatalf("parseRetryAfter(garbage) = %v, want 0", got)
-	}
-}
-
-func TestNewProviderErrorUsesLongestRetryHint(t *testing.T) {
-	now := time.Unix(2_000_000_000, 0)
-	h := http.Header{
-		"Retry-After":          []string{"1"},
-		"Retry-After-Ms":       []string{"2500"},
-		"X-RateLimit-Reset-Ms": []string{"4200"},
-		"X-RateLimit-Reset":    []string{"3"},
-	}
-	if got := parseRetryHeaders(h, now); got != 4200*time.Millisecond {
-		t.Fatalf("parseRetryHeaders = %v, want 4.2s", got)
-	}
-
-	epoch := now.Add(7 * time.Second).Unix()
-	h = http.Header{"X-RateLimit-Reset": []string{strconv.FormatInt(epoch, 10)}}
-	if got := parseRetryHeaders(h, now); got != 7*time.Second {
-		t.Fatalf("epoch reset = %v, want 7s", got)
-	}
-}
-
 // Usage on a streamed turn, when the provider does not hand it over all at once.
 //
 // Both providers in this module happen to accumulate internally and report

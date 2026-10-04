@@ -44,7 +44,9 @@ package goal
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -78,6 +80,11 @@ const maxIdleNudges = 3
 // composition can wire the plugin unconditionally and let configuration decide.
 type Plugin struct {
 	Goal string
+	// Lifecycle enables checkpointed pause/resume, accounting and host controls.
+	Lifecycle      bool
+	NewTaskOnInput bool
+	TokenBudget    int
+	TimeBudget     time.Duration
 	// Revisable offers the model the update_goal tool, letting it restate what
 	// finishing means when the work shows the condition to be wrong.
 	//
@@ -142,6 +149,9 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 	// to the condition currently in force, and a run that came back holding the
 	// ORIGINAL condition would re-arm an objective it had explicitly moved past.
 	store := p.Store
+	if info.Depth > 0 {
+		store = nil
+	}
 	switch {
 	case store == nil:
 		store = NewStore(info.Goal)
@@ -153,7 +163,22 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 		// turn drain it and announce a goal change that never happened.
 		store.adopt(info.Goal, "recovered from the durable log")
 	}
-	return &gateRun{store: store, revisable: p.Revisable}, nil
+	g := &gateRun{store: store, revisable: p.Revisable, lifecycle: p.Lifecycle, newTaskOnInput: p.NewTaskOnInput}
+	if p.Lifecycle {
+		if p.TokenBudget < 0 || p.TimeBudget < 0 {
+			return nil, fmt.Errorf("goal: negative budget")
+		}
+		store.mu.Lock()
+		if store.state == nil {
+			duration := p.TimeBudget.Milliseconds()
+			if p.TimeBudget > 0 {
+				duration = max(int64(1), duration)
+			}
+			store.state = &State{Status: Active, TokenBudget: p.TokenBudget, TimeBudgetMS: duration}
+		}
+		store.mu.Unlock()
+	}
+	return g, nil
 }
 
 // gateRun is one run's gate state. It is why this is a factory rather than a
@@ -164,10 +189,14 @@ type gateRun struct {
 	// BeginRun, because the condition can change mid-run (update_goal) and a gate
 	// enforcing a stale copy is worse than no gate: it holds the model to a
 	// contract nothing else in the run still states.
-	store     *Store
-	revisable bool
-	nudges    int
-	lastFinal string
+	store          *Store
+	newTaskOnInput bool
+	lifecycle      bool
+	accounted      int
+	lastTick       time.Time
+	revisable      bool
+	nudges         int
+	lastFinal      string
 	// lastTools is the size of the run's tool trace at the previous nudge, and
 	// idle counts how many nudges in a row have failed to move it. Tool calls are
 	// the only progress the gate can see from here: a finish is by definition a
@@ -275,4 +304,24 @@ func satisfied(final string) bool {
 		return strings.Contains(up, Done) || strings.Contains(up, Blocked)
 	}
 	return false
+}
+
+// PublicText removes a standalone closing protocol line from customer prose.
+// A status mentioned within an explanation is retained verbatim.
+func PublicText(text string) string { return strings.TrimSpace(StripStatusLine(text)) }
+
+// StripStatusLine also works on a buffered stream tail: it preserves every
+// preceding byte, so hosts can hide the completion protocol without joining
+// words or dropping whitespace between preview chunks.
+func StripStatusLine(text string) string {
+	trimmed := strings.TrimRight(text, " \t\r\n")
+	index := strings.LastIndex(trimmed, "\n")
+	normalized := strings.Trim(strings.ToUpper(strings.TrimSpace(trimmed[index+1:])), "*_` ")
+	if normalized == Done || normalized == Blocked {
+		if index < 0 {
+			return ""
+		}
+		return trimmed[:index]
+	}
+	return text
 }

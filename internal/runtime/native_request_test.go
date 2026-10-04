@@ -11,6 +11,7 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -24,7 +25,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 			}
 			var sourceRaw json.RawMessage
 			order := []string{}
-			base := agentcore.PiConfig{Options: piRequestJSON(map[string]any{"callbacks": names, "initialState": map[string]any{"thinkingLevel": "high"}})}
+			base := NativeAgentConfig{Options: piRequestJSON(map[string]any{"callbacks": names, "initialState": map[string]any{"thinkingLevel": "high"}})}
 			base.Callback = func(_ context.Context, method string, raw json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				order = append(order, method)
 				var messages []json.RawMessage
@@ -66,7 +67,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantContext, wantOptions, wantOrder := piRequestJSON(observed), piRequestJSON(observedOptions), append([]string(nil), order...)
-			input, err := session.native.bindUpdate(sourceRaw)
+			input, err := session.agent.bindUpdate(sourceRaw)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -92,7 +93,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 			if _, err = response.SnapshotResult(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if !samePiJSON(piRequestJSON(observed), wantContext) || !samePiJSON(piRequestJSON(observedOptions), wantOptions) || !reflect.DeepEqual(order, wantOrder) {
+			if !nativehost.SameJSON(piRequestJSON(observed), wantContext) || !nativehost.SameJSON(piRequestJSON(observedOptions), wantOptions) || !reflect.DeepEqual(order, wantOrder) {
 				t.Fatalf("candidate pipeline differs from engine: order=%v want=%v\ncontext=%s want=%s", order, wantOrder, piRequestJSON(observed), wantContext)
 			}
 			if strings.Contains(string(piRequestJSON(nativeContext(request.request.Context))), "transformContext") || !strings.Contains(string(piRequestJSON(nativeContext(request.request.Context))), "9007199254740993") {
@@ -100,7 +101,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 			}
 			request.request.Context.Messages.Get(0).Content = ai.TextContent("mutated")
 			stateAfter, err := session.State(ctx)
-			if err != nil || !samePiJSON(stateBefore, stateAfter) || !samePiJSON(before, piRequestJSON(nativeContext(source.Context))) {
+			if err != nil || !nativehost.SameJSON(stateBefore, stateAfter) || !nativehost.SameJSON(before, piRequestJSON(nativeContext(source.Context))) {
 				t.Fatal("candidate preparation mutated source or persistent agent state", err)
 			}
 		})

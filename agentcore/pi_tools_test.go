@@ -28,7 +28,7 @@ func (t piHostTool) Run(ctx context.Context, args string) (string, error) { retu
 
 func piHostAgent(t *testing.T, cfg Config) *Agent {
 	t.Helper()
-	cfg.Provider, cfg.Model = NewFauxProvider(AssistantText("unused")), "test"
+	cfg.NativeProvider, cfg.Model = scriptedNativeProvider(AssistantText("unused")), "test"
 	a, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)

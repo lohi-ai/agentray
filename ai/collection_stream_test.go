@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // sseChatServer serves one streamed assistant message saying label, so two
@@ -45,9 +45,9 @@ func TestStreamOn_RoutesToTheNamedProviderNotTheModelOwner(t *testing.T) {
 	col.Register(a)
 	col.Register(b)
 
-	ch, err := col.StreamOn(context.Background(), "pb", agentcore.ChatRequest{
+	ch, err := col.StreamOn(context.Background(), "pb", protocol.ChatRequest{
 		Model:    "same-id",
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "x"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "x"}},
 	})
 	if err != nil {
 		t.Fatalf("StreamOn: %v", err)
@@ -73,7 +73,7 @@ func TestStreamOn_RoutesToTheNamedProviderNotTheModelOwner(t *testing.T) {
 // would silently defeat the point of naming a provider.
 func TestStreamOn_UnknownProviderIsAnError(t *testing.T) {
 	col := NewCollection()
-	_, err := col.StreamOn(context.Background(), "nope", agentcore.ChatRequest{Model: "m"})
+	_, err := col.StreamOn(context.Background(), "nope", protocol.ChatRequest{Model: "m"})
 	if err == nil {
 		t.Fatal("StreamOn on an unregistered provider returned no error")
 	}
@@ -82,11 +82,11 @@ func TestStreamOn_UnknownProviderIsAnError(t *testing.T) {
 	}
 }
 
-// Collection satisfies agentcore.LLMProvider so it can be handed to the loop
+// Collection satisfies protocol.LLMProvider so it can be handed to the loop
 // directly. Both identity methods are part of that contract: the loop uses
 // SupportsTools to decide whether to advertise a toolset at all.
 func TestCollection_SatisfiesTheProviderIdentityContract(t *testing.T) {
-	var _ agentcore.LLMProvider = NewCollection()
+	var _ protocol.LLMProvider = NewCollection()
 	col := NewCollection()
 	if col.Name() != "collection" {
 		t.Fatalf("Name() = %q, want collection", col.Name())
@@ -97,10 +97,10 @@ func TestCollection_SatisfiesTheProviderIdentityContract(t *testing.T) {
 }
 
 // A rotated BYO token must reach the Anthropic wire, same as the OpenAI one —
-// this is the agentcore.KeyUpdater contract the loop calls between turns.
+// this is the protocol.KeyUpdater contract the loop calls between turns.
 func TestAnthropicProvider_UpdateAPIKey(t *testing.T) {
 	p := NewAnthropicProvider("old", "")
-	var _ agentcore.KeyUpdater = p
+	var _ protocol.KeyUpdater = p
 
 	p.UpdateAPIKey("new")
 	if p.APIKey != "new" {

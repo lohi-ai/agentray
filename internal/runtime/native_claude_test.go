@@ -32,7 +32,7 @@ func TestNativeClaudePoolBinding(t *testing.T) {
 	var acquired atomic.Int32
 	pool := &nativeClaudeAccountSource{acquired: &acquired}
 	tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorClaudeCode, Model: "claude-test", TokenSource: pool, APIKey: ai.OAuthPoolKey}}
-	cfg, _, stream, err := tier.bindNativeTier(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { t.Error("static refresh invoked"); return "stale", nil }}, nil)
+	cfg, _, stream, err := tier.bindNativeTier(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { t.Error("static refresh invoked"); return "stale", nil }}, nil)
 	if err != nil || stream == nil {
 		t.Fatal("native Claude pool not bound", err)
 	}
@@ -57,7 +57,7 @@ func TestNativeClaudePoolBinding(t *testing.T) {
 	if _, err = cfg.Callback(context.Background(), "prepareRequest", json.RawMessage(`{"model":{"id":"claude-test","api":"anthropic-messages","provider":"claude-code","baseUrl":"https://other.test"}}`), nil); err == nil {
 		t.Fatal("changed endpoint admitted")
 	}
-	if _, _, err = tier.BindPi(agentcore.PiConfig{}, PiModelOptions{}); err == nil {
+	if _, _, err = tier.BindPi(NativeAgentConfig{}, PiModelOptions{}); err == nil {
 		t.Fatal("worker binding accepted native pool")
 	}
 	if acquired.Load() != 0 {

@@ -113,7 +113,7 @@ func TestNativePiMessagesDispatcherCallbacks(t *testing.T) {
 				}
 				return nil
 			}}
-			stream, err := NativeProviderStream(ctx, model, ai.NormalizeContext(ai.Context{}), options)
+			stream, err := (ai.NativeProvider{}).Stream(ctx, model, ai.NormalizeContext(ai.Context{}), options)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -151,7 +151,7 @@ func TestNativePiMessagesDispatcherCallbacks(t *testing.T) {
 
 func TestPiMessagesModelBindingAndControls(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "radius", ProviderID: "gateway-row", Model: "test", BaseURL: "https://gateway.example/v1", APIKey: "stale"}}
-	cfg, _, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "write"}, RefreshKey: func(context.Context, string) (string, error) { return "fresh", nil }})
+	cfg, _, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNamed, Name: "write"}, RefreshKey: func(context.Context, string) (string, error) { return "fresh", nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,19 +202,19 @@ func TestPiMessagesModelBindingAndControls(t *testing.T) {
 	}
 	parallel := false
 	for _, options := range []PiModelOptions{{ParallelToolCalls: &parallel}, {OutputSchema: &agentcore.OutputSchema{Schema: map[string]any{"type": "object"}}}} {
-		if _, _, err := tier.BindPi(agentcore.PiConfig{}, options); err == nil {
+		if _, _, err := tier.BindPi(NativeAgentConfig{}, options); err == nil {
 			t.Fatal("unsupported control silently admitted")
 		}
 	}
 	for _, endpoint := range []string{"", "file:///tmp/gateway", "https://user:pass@gateway.example"} {
 		bad := tier
 		bad.BaseURL = endpoint
-		if _, _, err := bad.BindPi(agentcore.PiConfig{}, PiModelOptions{}); err == nil {
+		if _, _, err := bad.BindPi(NativeAgentConfig{}, PiModelOptions{}); err == nil {
 			t.Fatal("invalid route admitted")
 		}
 	}
 	failure := errors.New("refresh failed")
-	cfg, _, err = tier.BindPi(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { return "", failure }})
+	cfg, _, err = tier.BindPi(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { return "", failure }})
 	if err != nil {
 		t.Fatal(err)
 	}

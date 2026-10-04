@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -58,7 +58,7 @@ func NewCodexProvider() *CodexProvider {
 // applyOAuthToken returns a per-call clone carrying the account credential
 // (pooledProvider's oauthTokenApplier seam) so concurrent calls never share
 // the token field.
-func (p *CodexProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+func (p *CodexProvider) applyOAuthToken(tok OAuthToken) protocol.LLMProvider {
 	c := *p
 	c.tok = tok
 	return &c
@@ -67,7 +67,7 @@ func (p *CodexProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
 func (p *CodexProvider) Name() string        { return VendorOpenAICodex }
 func (p *CodexProvider) SupportsTools() bool { return true }
 
-func (p *CodexProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (p *CodexProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
 	return CapabilitiesFor(p.Name(), model)
 }
 
@@ -162,7 +162,7 @@ type codexReasoning struct {
 // encode maps the neutral request onto the Codex Responses body. System
 // messages collapse into the top-level `instructions` field (never input
 // items); tool exchanges become function_call / function_call_output pairs.
-func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
+func (p *CodexProvider) encode(req protocol.ChatRequest) codexRequest {
 	out := codexRequest{
 		Model: req.Model, Stream: true, Store: false,
 		ToolChoice:        openAIResponsesToolChoice(req.ToolChoice, len(req.Tools) > 0),
@@ -173,11 +173,11 @@ func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 	var systemParts []string
 	for _, m := range req.Messages {
 		switch m.Role {
-		case agentcore.RoleSystem:
+		case protocol.RoleSystem:
 			if m.Content != "" {
 				systemParts = append(systemParts, m.Content)
 			}
-		case agentcore.RoleTool:
+		case protocol.RoleTool:
 			text := messageText(m)
 			images := messageImages(m)
 			var output any = text
@@ -201,7 +201,7 @@ func (p *CodexProvider) encode(req agentcore.ChatRequest) codexRequest {
 				CallID: m.ToolCallID,
 				Output: output,
 			})
-		case agentcore.RoleAssistant:
+		case protocol.RoleAssistant:
 			if m.Content != "" {
 				out.Input = append(out.Input, codexInputItem{
 					Type:    "message",
@@ -296,7 +296,7 @@ type codexStreamEvent struct {
 // request. Text arrives as response.output_text.delta events; tool calls land
 // whole on response.output_item.done; usage and the stop reason ride the
 // terminal response.completed/done/incomplete event.
-func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *CodexProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	strictState, active := prepareStrictTools(req, p.Name(), p.responsesURL(), toolSchemaOpenAIResponses)
 	retriedWithoutStrict := false
 	var resp *http.Response
@@ -322,7 +322,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 		}
 		data := readProviderErrorBody(resp.Body)
 		resp.Body.Close()
-		providerErr := agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+		providerErr := protocol.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 		if !retriedWithoutStrict && shouldRetryWithoutStrictTools(active, toolSchemaOpenAIResponses, providerErr) {
 			rememberStrictToolsRejected(strictState, active.Model)
 			active = withoutStrictTools(active)
@@ -332,13 +332,13 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 		return nil, providerErr
 	}
 
-	ch := make(chan agentcore.ChatDelta, 16)
+	ch := make(chan protocol.ChatDelta, 16)
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
 		var stopReason string
-		var usage agentcore.Usage
+		var usage protocol.Usage
 		terminal := false
 
 		sc := bufio.NewScanner(resp.Body)
@@ -359,12 +359,12 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 			switch ev.Type {
 			case "response.output_text.delta":
 				if ev.Delta != "" {
-					ch <- agentcore.ChatDelta{ContentDelta: ev.Delta}
+					ch <- protocol.ChatDelta{ContentDelta: ev.Delta}
 				}
 			case "response.output_item.done":
 				if ev.Item != nil && ev.Item.Type == "function_call" {
 					args := string(ParseStreamingJSON(ev.Item.Arguments))
-					ch <- agentcore.ChatDelta{ToolCall: &agentcore.ToolCall{
+					ch <- protocol.ChatDelta{ToolCall: &protocol.ToolCall{
 						ID: ev.Item.CallID, Name: ev.Item.Name, Arguments: args,
 					}}
 				}
@@ -379,7 +379,7 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 						}
 						// input_tokens includes the cached prefix; the neutral
 						// contract keeps InputTokens full-price-only.
-						usage = agentcore.Usage{
+						usage = protocol.Usage{
 							InputTokens:     u.InputTokens - cached,
 							OutputTokens:    u.OutputTokens,
 							CacheReadTokens: cached,
@@ -387,20 +387,20 @@ func (p *CodexProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (
 					}
 				}
 			case "response.failed", "error":
-				ch <- agentcore.ChatDelta{Done: true, Err: p.eventError(resp, &ev)}
+				ch <- protocol.ChatDelta{Done: true, Err: p.eventError(resp, &ev)}
 				return
 			}
 		}
 		if err := sc.Err(); err != nil {
-			ch <- agentcore.ChatDelta{Done: true, Err: err}
+			ch <- protocol.ChatDelta{Done: true, Err: err}
 			return
 		}
 		if !terminal {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil,
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil,
 				"codex stream ended before terminal completion event")}
 			return
 		}
-		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
+		ch <- protocol.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
 	ready, preflightErr, retryStrict := preflightStrictStream(ctx, active, toolSchemaOpenAIResponses, ch)
 	if retryStrict {
@@ -455,7 +455,7 @@ func (p *CodexProvider) eventError(resp *http.Response, ev *codexStreamEvent) er
 // Chat consumes the SSE stream to completion and returns the assembled
 // response — the backend has no non-streaming mode, so this is the simplest
 // correct implementation rather than a second wire path.
-func (p *CodexProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *CodexProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	return chatViaStream(ctx, p, req)
 }
 
@@ -493,10 +493,10 @@ func (p *CodexProvider) listCodexModels(ctx context.Context, client HTTPDoer, to
 			continue
 		}
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return nil, &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
+			return nil, &protocol.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 		}
 		if status >= 400 {
-			lastErr = &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
+			lastErr = &protocol.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 			continue
 		}
 		models, err := parseCodexModels(data)

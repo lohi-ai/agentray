@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/telemetry"
 	"os"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/telemetry"
 )
 
 func TestNativeAgentMigrationOracle(t *testing.T) {
@@ -146,8 +147,13 @@ func TestNativeAgentMigrationOracle(t *testing.T) {
 				initError = &message
 			} else {
 				defer agent.Close()
+				bound, err := agent.bindOptions(config.Options)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixtureAgent := &nativeAgentFixture{NativeAgent: agent, options: bound.AgentConfig}
 				for _, action := range tc.Input.Actions {
-					value, err := agent.Call(ctx, action.Method, action.Params)
+					value, err := fixtureAgent.Call(ctx, action.Method, action.Params)
 					var failure *string
 					if err != nil {
 						message := err.Error()
@@ -163,7 +169,7 @@ func TestNativeAgentMigrationOracle(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				spans, err = agent.Call(ctx, "telemetry", nil)
+				spans, err = agent.spans(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -256,9 +262,16 @@ func TestNativeAgentRemainsBusyThroughEndSubscriber(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	for _, method := range []string{"prompt", "continue", "reset"} {
-		if _, err := agent.Call(ctx, method, json.RawMessage(`{"input":"busy"}`)); err == nil {
-			t.Errorf("%s admitted during end listener", method)
+	for _, action := range []struct {
+		name string
+		run  func() error
+	}{
+		{"prompt", func() error { return agent.Prompt(ctx, json.RawMessage(`"busy"`)) }},
+		{"continue", func() error { return agent.Continue(ctx) }},
+		{"reset", agent.agent.Reset},
+	} {
+		if err := action.run(); err == nil {
+			t.Errorf("%s admitted during end listener", action.name)
 		}
 	}
 	snapshot, err := agent.State(ctx)
@@ -315,9 +328,7 @@ func TestNativeAgentAbortKeepsFinalEventCallbacksLive(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	if _, err := agent.Call(ctx, "abort", nil); err != nil {
-		t.Fatal(err)
-	}
+	agent.agent.Abort()
 	select {
 	case err := <-completed:
 		if err != nil {

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func TestToolParametersNormalizesEmptyRootWithoutMutatingCanonical(t *testing.T) {
@@ -117,14 +117,14 @@ func TestCloudCodeToolSchemaFallsBackForResidualCombinerOrReference(t *testing.T
 }
 
 func TestProviderEncodersUseTheirToolSchemaDialect(t *testing.T) {
-	schema := agentcore.ToolSchema{Name: "run", Parameters: map[string]any{
+	schema := protocol.ToolSchema{Name: "run", Parameters: map[string]any{
 		"type": "object", "properties": map[string]any{
 			"choice": map[string]any{"oneOf": []any{
 				map[string]any{"type": "string"}, map[string]any{"type": "number"},
 			}},
 		},
 	}}
-	req := agentcore.ChatRequest{Model: "m", Tools: []agentcore.ToolSchema{schema}}
+	req := protocol.ChatRequest{Model: "m", Tools: []protocol.ToolSchema{schema}}
 
 	responses := NewOpenAIResponsesProvider("key", "").encode(req)
 	choice := responses.Tools[0].Parameters["properties"].(map[string]any)["choice"].(map[string]any)
@@ -144,23 +144,23 @@ func TestProviderEncodersUseTheirToolSchemaDialect(t *testing.T) {
 
 func TestAntigravityMapsReasoningEffortToNativeControls(t *testing.T) {
 	p := NewAntigravityProvider()
-	low := p.encode(agentcore.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 2048, ReasoningEffort: "low"})
+	low := p.encode(protocol.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 2048, ReasoningEffort: "low"})
 	lowConfig := low.Request.GenerationConfig
 	if lowConfig.ThinkingConfig == nil || lowConfig.ThinkingConfig.ThinkingBudget != 4096 ||
 		lowConfig.MaxOutputTokens != 6144 {
 		t.Fatalf("low budget config = %+v", lowConfig)
 	}
-	high := p.encode(agentcore.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 2048, ReasoningEffort: "high"})
+	high := p.encode(protocol.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 2048, ReasoningEffort: "high"})
 	if high.Request.GenerationConfig.ThinkingConfig.ThinkingBudget != 16384 ||
 		high.Request.GenerationConfig.MaxOutputTokens != 18432 {
 		t.Fatalf("high budget config = %+v", high.Request.GenerationConfig)
 	}
-	level := p.encode(agentcore.ChatRequest{Model: "gemini-3-pro", MaxTokens: 2048, ReasoningEffort: "xhigh"})
+	level := p.encode(protocol.ChatRequest{Model: "gemini-3-pro", MaxTokens: 2048, ReasoningEffort: "xhigh"})
 	if level.Request.GenerationConfig.ThinkingConfig.ThinkingLevel != "HIGH" ||
 		level.Request.GenerationConfig.MaxOutputTokens != 2048 {
 		t.Fatalf("Gemini 3 level config = %+v", level.Request.GenerationConfig)
 	}
-	off := p.encode(agentcore.ChatRequest{Model: "gemini-3-pro", ReasoningEffort: "off"})
+	off := p.encode(protocol.ChatRequest{Model: "gemini-3-pro", ReasoningEffort: "off"})
 	if off.Request.GenerationConfig.ThinkingConfig != nil {
 		t.Fatalf("off reasoning emitted thinking config: %+v", off.Request.GenerationConfig.ThinkingConfig)
 	}
@@ -168,11 +168,11 @@ func TestAntigravityMapsReasoningEffortToNativeControls(t *testing.T) {
 
 func TestAntigravityReasoningBudgetHonorsProviderCeiling(t *testing.T) {
 	p := NewAntigravityProvider()
-	gemini := p.encode(agentcore.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 60_000, ReasoningEffort: "high"})
+	gemini := p.encode(protocol.ChatRequest{Model: "gemini-2.5-pro", MaxTokens: 60_000, ReasoningEffort: "high"})
 	if got := gemini.Request.GenerationConfig.MaxOutputTokens; got != 65_536 {
 		t.Fatalf("Gemini max output = %d, want 65536", got)
 	}
-	claude := p.encode(agentcore.ChatRequest{Model: "claude-sonnet", MaxTokens: 60_000, ReasoningEffort: "high"})
+	claude := p.encode(protocol.ChatRequest{Model: "claude-sonnet", MaxTokens: 60_000, ReasoningEffort: "high"})
 	if got := claude.Request.GenerationConfig.MaxOutputTokens; got != 64_000 {
 		t.Fatalf("Claude max output = %d, want 64000", got)
 	}

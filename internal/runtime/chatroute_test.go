@@ -7,99 +7,20 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	goalplugin "github.com/lohi-ai/agentray/agentcore/plugins/goal"
 )
 
-// These tests exercise ChatService's routing logic by driving its injectable
-// classify/handle seams directly — no Runner, provider, or database required.
-
-func TestDecodeDecision(t *testing.T) {
-	cases := []struct {
-		name      string
-		raw       string
-		wantRoute string
-		wantReply string
-	}{
-		{"clean smalltalk", `{"route":"smalltalk","reply":"Hey there!"}`, "smalltalk", "Hey there!"},
-		{"fenced", "```json\n{\"route\":\"smalltalk\",\"reply\":\"Hi!\"}\n```", "smalltalk", "Hi!"},
-		{"prose around json", `Sure: {"route":"smalltalk","reply":"Hello {friend}"} done`, "smalltalk", "Hello {friend}"},
-		{"data route", `{"route":"data"}`, "data", ""},
-		{"garbage", `not json at all`, "", ""},
-		{"empty", ``, "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			route, reply := decodeDecision(tc.raw)
-			if route != tc.wantRoute || reply != tc.wantReply {
-				t.Fatalf("decodeDecision(%q) = (%q,%q), want (%q,%q)", tc.raw, route, reply, tc.wantRoute, tc.wantReply)
-			}
-		})
-	}
-}
-
-func TestRecentHistory(t *testing.T) {
-	hist := []agentcore.Message{
-		{Role: agentcore.RoleSystem, Content: "sys"}, // dropped
-		{Role: agentcore.RoleUser, Content: "1"},
-		{Role: agentcore.RoleTool, Name: "x", Content: "tool"}, // dropped
-		{Role: agentcore.RoleAssistant, Content: "2"},
-		{Role: agentcore.RoleUser, Content: "3"},
-	}
-	got := recentHistory(hist, 2)
-	if len(got) != 2 || got[0].Content != "2" || got[1].Content != "3" {
-		t.Fatalf("recentHistory tail/filter wrong: %+v", got)
-	}
-}
+// These tests exercise native turn admission and command handling without a database.
 
 func collect(sink *[]agentcore.StreamEvent) agentcore.StreamSink {
 	return func(ev agentcore.StreamEvent) { *sink = append(*sink, ev) }
-}
-
-func TestChatDirectReply(t *testing.T) {
-	handled := false
-	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: routeSmallTalk, Reply: "Hi there", Usage: agentcore.Usage{InputTokens: 3}}, nil
-		},
-		handle: func(context.Context, chatWork, agentcore.StreamSink) (ChatResult, error) {
-			handled = true
-			return ChatResult{}, nil
-		},
-	}
-	var evs []agentcore.StreamEvent
-	res, err := svc.Chat(context.Background(), ChatOptions{ProjectID: "p", Message: "hi"}, collect(&evs))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if handled {
-		t.Fatal("data handler must not run for a direct reply")
-	}
-	if res.Route != routeSmallTalk || res.Final != "Hi there" || res.RunID != "" {
-		t.Fatalf("unexpected result: %+v", res)
-	}
-	if res.Usage.InputTokens != 3 {
-		t.Fatalf("classify usage not reported: %+v", res.Usage)
-	}
-	// Opening progress beat + word-by-word tokens.
-	var text strings.Builder
-	tokens := 0
-	for _, e := range evs {
-		if e.Type == agentcore.StreamToken {
-			text.WriteString(e.Token)
-			tokens++
-		}
-	}
-	if tokens != 2 || strings.TrimSpace(text.String()) != "Hi there" {
-		t.Fatalf("streamed tokens wrong: %d %q", tokens, text.String())
-	}
 }
 
 func TestChatRoutesToData(t *testing.T) {
 	card := &agentcore.ResultCard{Title: "Signups", Kind: "stat"}
 	handled := false
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: routeData, Usage: agentcore.Usage{InputTokens: 10, OutputTokens: 5}}, nil
-		},
+
 		handle: func(_ context.Context, _ chatWork, sink agentcore.StreamSink) (ChatResult, error) {
 			handled = true
 			if sink != nil {
@@ -122,8 +43,8 @@ func TestChatRoutesToData(t *testing.T) {
 	if res.RunID != "run1" || res.Route != routeData || res.Final != "42 signups" || res.Card != card {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	// Classify usage folds into the handler's usage.
-	if res.Usage.InputTokens != 110 || res.Usage.OutputTokens != 55 {
+	// Native run usage is forwarded unchanged.
+	if res.Usage.InputTokens != 100 || res.Usage.OutputTokens != 50 {
 		t.Fatalf("usage not folded: %+v", res.Usage)
 	}
 	sawCard := false
@@ -173,17 +94,14 @@ func TestParseGoalDirective(t *testing.T) {
 	}
 }
 
-// A handled command must never reach the classifier or the agent: the whole
+// A handled command must never reach the agent: the whole
 // reason it exists is to answer without a run, and a model call here would be
 // both a bill and a chance for the agent to do something else instead.
 func TestChatHandledCommandsNeverRun(t *testing.T) {
 	for _, msg := range []string{"/help", "/plan", "/compact", "/clear", "/agents"} {
 		t.Run(msg, func(t *testing.T) {
 			svc := &ChatService{
-				classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-					t.Fatalf("classifier ran for %q", msg)
-					return chatDecision{}, nil
-				},
+
 				handle: func(context.Context, chatWork, agentcore.StreamSink) (ChatResult, error) {
 					t.Fatalf("agent ran for %q", msg)
 					return ChatResult{}, nil
@@ -221,13 +139,10 @@ func TestChatCommandCatalogRoundTrips(t *testing.T) {
 	}
 }
 
-func TestChatGoalDirectiveBypassesClassifier(t *testing.T) {
+func TestChatGoalDirectiveConfiguresNativeRun(t *testing.T) {
 	var got chatWork
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			t.Fatal("classifier must not run for a /goal directive")
-			return chatDecision{}, nil
-		},
+
 		handle: func(_ context.Context, req chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 			got = req
 			return ChatResult{RunID: "run1", Final: "done.\nSTATUS: DONE"}, nil
@@ -248,42 +163,9 @@ func TestChatGoalDirectiveBypassesClassifier(t *testing.T) {
 	}
 }
 
-func TestChatUnknownRoute(t *testing.T) {
-	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: "mystery"}, nil
-		},
-		handle: func(context.Context, chatWork, agentcore.StreamSink) (ChatResult, error) {
-			t.Fatal("handler must not run for an unknown route")
-			return ChatResult{}, nil
-		},
-	}
-	_, err := svc.Chat(context.Background(), ChatOptions{ProjectID: "p", Message: "x"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "no handler") {
-		t.Fatalf("expected no-handler error, got %v", err)
-	}
-}
-
-func TestChatClassifierError(t *testing.T) {
-	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{}, errors.New("no key")
-		},
-		handle: func(context.Context, chatWork, agentcore.StreamSink) (ChatResult, error) {
-			return ChatResult{}, nil
-		},
-	}
-	_, err := svc.Chat(context.Background(), ChatOptions{ProjectID: "p", Message: "x"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "no key") {
-		t.Fatalf("expected classifier error to propagate, got %v", err)
-	}
-}
-
 func TestChatDataErrorReturnsPartial(t *testing.T) {
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: routeData}, nil
-		},
+
 		handle: func(context.Context, chatWork, agentcore.StreamSink) (ChatResult, error) {
 			return ChatResult{RunID: "run9", Turns: 1}, errors.New("boom")
 		},
@@ -351,9 +233,35 @@ func TestStripGoalSentinel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := stripGoalSentinel(tc.in); got != tc.want {
+			if got := goalplugin.PublicText(tc.in); got != tc.want {
 				t.Fatalf("stripGoalSentinel(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGreetingUsesTheSameNativeRunAsOtherQuestions(t *testing.T) {
+	calls := 0
+	svc := &ChatService{handle: func(_ context.Context, work chatWork, sink agentcore.StreamSink) (ChatResult, error) {
+		calls++
+		if work.Message != "hi" {
+			t.Fatal(work.Message)
+		}
+		streamText("Hi there", sink)
+		return ChatResult{RunID: "native-greeting", Final: "Hi there", Usage: agentcore.Usage{InputTokens: 3}}, nil
+	}}
+	var events []agentcore.StreamEvent
+	result, err := svc.Chat(context.Background(), ChatOptions{Message: "hi"}, collect(&events))
+	if err != nil || calls != 1 || result.RunID != "native-greeting" || result.Route != routeData || result.Usage.InputTokens != 3 {
+		t.Fatalf("greeting escaped native execution: %+v %v", result, err)
+	}
+	var text strings.Builder
+	for _, event := range events {
+		if event.Type == agentcore.StreamToken {
+			text.WriteString(event.Token)
+		}
+	}
+	if strings.TrimSpace(text.String()) != "Hi there" {
+		t.Fatalf("stream: %q", text.String())
 	}
 }

@@ -1,7 +1,6 @@
 package agentruntime
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
@@ -111,16 +111,8 @@ func TestPiConversationNativeProviderRoundTripAndBranches(t *testing.T) {
 		if err := json.Unmarshal(result.NativeState, &native); err != nil {
 			t.Fatal(err)
 		}
-		if !samePiJSON(history.Messages, native.Messages) {
+		if !nativehost.SameJSON(history.Messages, native.Messages) {
 			t.Fatalf("SQL round trip changed native messages:\n%s\n%s", history.Messages, native.Messages)
-		}
-		if _, err := BuildHistory(ctx, st, conv.ID); err == nil {
-			t.Fatal("legacy reducer accepted native conversation")
-		}
-		summarized := false
-		_, err = CompactConversationNow(ctx, st, conv.ID, 1, func(context.Context, string, string) (string, error) { summarized = true; return "lossy", nil })
-		if err == nil || summarized {
-			t.Fatal("legacy compaction reached native conversation")
 		}
 		return history, display
 	}
@@ -221,7 +213,7 @@ func TestPiConversationNativeProviderRoundTripAndBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 		resumed, err := buildPiResumeHistory(ctx, st, pendingConv.ID)
-		if err != nil || resumed.LeafID != checkpoint.LeafID || !samePiJSON(resumed.Messages, checkpoint.Messages) {
+		if err != nil || resumed.LeafID != checkpoint.LeafID || !nativehost.SameJSON(resumed.Messages, checkpoint.Messages) {
 			t.Fatalf("answer display polluted resume prefix: %+v %v", resumed, err)
 		}
 		answer := json.RawMessage(`{"role":"user","content":"native human answer","agentrayAnswerId":"receipt","timestamp":456}`)

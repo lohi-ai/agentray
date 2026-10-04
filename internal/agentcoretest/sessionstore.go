@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/engine"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // SessionStoreHarness supplies one backend and a factory for fresh, valid
@@ -300,82 +303,99 @@ func RunSessionStoreConformance(t *testing.T, harness SessionStoreHarness) {
 		}
 	})
 
-	t.Run("reverse_completion_recovers_once_in_source_order", func(t *testing.T) {
+	t.Run("native_reverse_completion_recovers_once_in_source_order", func(t *testing.T) {
 		id := harness.NewSessionID(t)
 		ctx := context.Background()
-		user := agentcore.Message{Role: agentcore.RoleUser, Content: "run both"}
-		assistant := agentcore.Message{Role: agentcore.RoleAssistant, ToolCalls: []agentcore.ToolCall{
-			{ID: "slow-call", Name: "slow", Arguments: `{}`},
-			{ID: "fast-call", Name: "fast", Arguments: `{}`},
-		}}
-		// Persist one intent, then physical completions in the opposite order.
-		// They are deliberately separate appends: this is the crash-recovery shape,
-		// not a settled transcript batch.
+		initial := `{"model":{"id":"test"},"messages":[{"role":"user","content":"run both","timestamp":1},{"role":"assistant","content":[{"type":"toolCall","id":"slow-call","name":"slow","arguments":{}},{"type":"toolCall","id":"fast-call","name":"fast","arguments":{}}],"stopReason":"toolUse","timestamp":2}]}`
 		entries := []agentcore.SessionEntry{
-			{Kind: agentcore.EntryMessage, ID: "parallel-root", Message: &user},
-			{Kind: agentcore.EntryMessage, ID: "parallel-intent", ParentID: "parallel-root", Message: &assistant},
-			{Kind: agentcore.EntryToolOutcome, ParentID: "parallel-intent", CallID: "fast-call", Outcome: &agentcore.ToolOutcomeRecord{
-				Message: agentcore.Message{Role: agentcore.RoleTool, ToolCallID: "fast-call", Name: "fast", Content: "fast-result"},
-				Trace:   agentcore.ToolTrace{CallID: "fast-call", Tool: "fast", Args: `{}`, Allowed: true}, Executed: true,
-			}},
-			{Kind: agentcore.EntryToolOutcome, ParentID: "parallel-intent", CallID: "slow-call", Outcome: &agentcore.ToolOutcomeRecord{
-				Message: agentcore.Message{Role: agentcore.RoleTool, ToolCallID: "slow-call", Name: "slow", Content: "slow-result"},
-				Trace:   agentcore.ToolTrace{CallID: "slow-call", Tool: "slow", Args: `{}`, Allowed: true}, Executed: true,
-			}},
+			{Kind: agentcore.EntryPiState, Content: initial},
+			{Kind: agentcore.EntryPiEffectStart, CallID: "slow-call", Content: `{"effectId":"slow-effect"}`},
+			{Kind: agentcore.EntryPiEffectStart, CallID: "fast-call", Content: `{"effectId":"fast-effect"}`},
+			// Physical completion order is independent of native message order.
+			{Kind: agentcore.EntryPiEffectDone, CallID: "fast-call", Content: `{"effectId":"fast-effect"}`},
+			{Kind: agentcore.EntryPiEffectDone, CallID: "slow-call", Content: `{"effectId":"slow-effect"}`},
+		}
+		results := []string{
+			`{"role":"toolResult","toolCallId":"slow-call","toolName":"slow","content":[{"type":"text","text":"slow-result"}],"timestamp":3,"details":{"opaque":"9007199254740993","signature":"keep-slow"},"isError":false}`,
+			`{"role":"toolResult","toolCallId":"fast-call","toolName":"fast","content":[{"type":"text","text":"fast-result"}],"timestamp":4,"details":{"signature":"keep-fast"},"isError":false}`,
+		}
+		for i, result := range results {
+			entries = append(entries, agentcore.SessionEntry{Kind: agentcore.EntryPiEvent, Content: `{"type":"message_start","message":` + result + `}`})
+			// Crash after the final immutable message_start, before message_end.
+			if i == 0 {
+				entries = append(entries, agentcore.SessionEntry{Kind: agentcore.EntryPiEvent, Content: `{"type":"message_end","message":` + result + `}`})
+			}
 		}
 		for _, entry := range entries {
 			if err := harness.Store.Append(ctx, id, entry); err != nil {
-				t.Fatalf("Append(%s/%s): %v", entry.Kind, entry.CallID, err)
+				t.Fatal(err)
 			}
 		}
-		plan := agentcore.RecoverSession(mustLog(t, harness.Store, id), nil, agentcore.RecoveryMarkInterrupted)
-		if len(plan.ToolOutcomes) != 2 || len(plan.RetryCalls) != 0 || len(plan.DroppedCalls) != 0 {
-			t.Fatalf("reverse completions produced wrong recovery plan: %+v", plan)
-		}
-
-		provider := agentcore.NewFauxProvider(agentcore.AssistantText("continued"))
-		agent, err := agentcore.New(agentcore.Config{
-			Provider: provider, Model: "test", Session: harness.Store, SessionID: id, ResumeSession: true,
-		})
+		state, err := agentcore.RecoverNativeTranscript(mustLog(t, harness.Store, id))
 		if err != nil {
-			t.Fatalf("New(resumer): %v", err)
+			t.Fatal(err)
 		}
-		if _, err := agent.Prompt(ctx, "resume"); err != nil {
-			t.Fatalf("first resume: %v", err)
+		var restored struct {
+			Model    json.RawMessage
+			Messages []*ai.Message
 		}
-		if len(provider.Recorded) != 1 {
-			t.Fatalf("provider calls = %d, want 1", len(provider.Recorded))
+		if err := json.Unmarshal(state, &restored); err != nil {
+			t.Fatal(err)
 		}
-		var ordered []string
-		for _, message := range provider.Recorded[0].Messages {
-			if message.Role == agentcore.RoleTool {
-				ordered = append(ordered, message.ToolCallID+":"+message.Content)
+		requests := 0
+		stream := func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, opts map[string]any) (*ai.AssistantMessageEventStream, error) {
+			requests++
+			messages := view.Messages()
+			if len(messages) != 4 {
+				t.Errorf("native replay has %d messages, want 4", len(messages))
+				return nil, fmt.Errorf("unexpected native transcript length")
+			}
+			for i, expected := range results {
+				raw, err := json.Marshal(messages[i+2])
+				if err != nil || !nativehost.SameJSON(raw, json.RawMessage(expected)) {
+					t.Errorf("native result %d changed: %s, %v", i, raw, err)
+					return nil, fmt.Errorf("native transcript changed")
+				}
+			}
+			return ai.ScriptedStream(ai.Message{Role: "assistant", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "continued"}), StopReason: "stop"})(ctx, model, view, opts)
+		}
+		agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: restored.Model, Messages: restored.Messages}, AgentConfig: engine.AgentConfig{StreamFn: stream}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := agent.Continue(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if requests != 1 {
+			t.Fatalf("continuation requests = %d, want 1", requests)
+		}
+		checkpoint, err := json.Marshal(agent.State())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := harness.Store.Append(ctx, id, agentcore.SessionEntry{Kind: agentcore.EntryPiState, Content: string(checkpoint)}); err != nil {
+			t.Fatal(err)
+		}
+		// Recovery is read-only and repeatable. A new checkpoint absorbs earlier
+		// events without appending or replaying either settled physical effect.
+		for range 2 {
+			raw, err := agentcore.RecoverNativeTranscript(mustLog(t, harness.Store, id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var after struct{ Messages []json.RawMessage }
+			if err := json.Unmarshal(raw, &after); err != nil || len(after.Messages) != 5 {
+				t.Fatalf("checkpoint duplicated or lost a message: %s, %v", raw, err)
+			}
+			for i, expected := range results {
+				if !nativehost.SameJSON(after.Messages[i+2], json.RawMessage(expected)) {
+					t.Fatalf("checkpoint result %d changed: %s", i, after.Messages[i+2])
+				}
 			}
 		}
-		want := []string{"slow-call:slow-result", "fast-call:fast-result"}
-		if !reflect.DeepEqual(ordered, want) {
-			t.Fatalf("recovered provider order = %v, want %v", ordered, want)
+		if got := len(mustLog(t, harness.Store, id)); got != len(entries)+1 {
+			t.Fatalf("recovery mutated journal: %d entries, want %d", got, len(entries)+1)
 		}
-		assertCanonicalToolResultsOnce(t, mustLog(t, harness.Store, id), "slow-call", "fast-call")
-
-		// The first resume materialized both canonical messages and completed the
-		// log. A second recovery must reattach without calling a provider or
-		// appending another result for either physical execution.
-		secondProvider := agentcore.NewFauxProvider(agentcore.AssistantText("must not run"))
-		second, err := agentcore.New(agentcore.Config{
-			Provider: secondProvider, Model: "test", Session: harness.Store, SessionID: id, ResumeSession: true,
-		})
-		if err != nil {
-			t.Fatalf("New(second resumer): %v", err)
-		}
-		result, err := second.Prompt(ctx, "resume again")
-		if err != nil {
-			t.Fatalf("second resume: %v", err)
-		}
-		if result.StopReason != "reattached" || len(secondProvider.Recorded) != 0 {
-			t.Fatalf("second resume replayed work: stop=%q provider_calls=%d", result.StopReason, len(secondProvider.Recorded))
-		}
-		assertCanonicalToolResultsOnce(t, mustLog(t, harness.Store, id), "slow-call", "fast-call")
 	})
 
 	t.Run("checkpoint_window_matches_full_fold", func(t *testing.T) {
@@ -529,20 +549,5 @@ func assertTypedEntries(t *testing.T, got []agentcore.SessionEntry, created time
 	}
 	if second.Outcome.Message.Content != "contents" || second.Outcome.Trace.SpillLocator != "spill://one" || len(second.Outcome.Extra) != 1 || second.Outcome.Extra[0].Content != "extra" || !second.Outcome.Terminate || !second.Outcome.Executed {
 		t.Fatalf("tool outcome did not round-trip: %+v", second.Outcome)
-	}
-}
-
-func assertCanonicalToolResultsOnce(t *testing.T, log []agentcore.SessionEntry, callIDs ...string) {
-	t.Helper()
-	counts := make(map[string]int, len(callIDs))
-	for _, entry := range log {
-		if entry.Kind == agentcore.EntryMessage && entry.Message != nil && entry.Message.Role == agentcore.RoleTool {
-			counts[entry.Message.ToolCallID]++
-		}
-	}
-	for _, callID := range callIDs {
-		if counts[callID] != 1 {
-			t.Errorf("canonical result count for %q = %d, want 1 (all counts: %v)", callID, counts[callID], counts)
-		}
 	}
 }

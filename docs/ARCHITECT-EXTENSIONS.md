@@ -115,7 +115,6 @@ grow into one: it has no discovery, no loading, and no registration by name.
 | `TurnStart` | top of every turn, before compaction/steering/the provider call | observe |
 | `Context` | before every provider request, on the message view | **mutate** the outgoing view (not persisted history) |
 | `BeforeProviderRequest` | on the assembled `ChatRequest` | **mutate** the request |
-| `AfterProviderResponse` | on each successful provider response, before usage accumulation | observe |
 | `MessageEnd` | when an assistant message is final | observe |
 | `Before` (tool call) | after args validate, before execution | **block** (`Decision`) |
 | `After` (tool call) | after execution | **rewrite** the result, **terminate** the run |

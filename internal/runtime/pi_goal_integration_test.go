@@ -91,7 +91,7 @@ func checkPiGoalResume(t *testing.T, store agentcore.SessionStore, sessionID str
 		}
 		host, trail := piGoalHost(t, ctx, store, sessionID, condition, piNestedGoalTool{})
 		result, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("original requirement"), Session: PiSessionConfig{
-			Store: store, SessionID: sessionID, Resume: attempt == 1, ReviseGoal: attempt == 0, Policy: agentcore.NewAllowList(goal.ToolName, "revise_nested"), Pi: agentcore.PiConfig{Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			Store: store, SessionID: sessionID, Resume: attempt == 1, ReviseGoal: attempt == 0, Policy: agentcore.NewAllowList(goal.ToolName, "revise_nested"), Pi: NativeAgentConfig{Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected %s", method)
 				}
@@ -189,7 +189,7 @@ func TestPiGoalRevisionFailureCannotChangeContractOrContinue(t *testing.T) {
 			if kind == "denied" {
 				policy = agentcore.DenyAll{}
 			}
-			_, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("work"), Session: PiSessionConfig{Store: store, SessionID: "failure", ReviseGoal: kind != "disabled", Policy: policy, Pi: agentcore.PiConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+			_, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("work"), Session: PiSessionConfig{Store: store, SessionID: "failure", ReviseGoal: kind != "disabled", Policy: policy, Pi: NativeAgentConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 				if calls.Add(1) == 1 {
 					return piGoalReply(goal.ToolName, "revised condition"), nil
 				}
@@ -298,7 +298,7 @@ func TestPiGoalCommitCannotRecoverMissingCompletionReceipt(t *testing.T) {
 	store := &piFailStore{MemorySessionStore: agentcore.NewMemorySessionStore(), kind: agentcore.EntryPiEffectDone}
 	host, trail := piGoalHost(t, ctx, store, "missing-receipt", "original condition")
 	var calls atomic.Int32
-	_, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("work"), Session: PiSessionConfig{Store: store, SessionID: "missing-receipt", ReviseGoal: true, Policy: agentcore.NewAllowList(goal.ToolName), Pi: agentcore.PiConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	_, err := RunPi(ctx, PiRunConfig{Host: host, Input: piSessionJSON("work"), Session: PiSessionConfig{Store: store, SessionID: "missing-receipt", ReviseGoal: true, Policy: agentcore.NewAllowList(goal.ToolName), Pi: NativeAgentConfig{Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		calls.Add(1)
 		return piGoalReply(goal.ToolName, "revised condition"), nil
 	}}}})

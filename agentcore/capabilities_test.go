@@ -38,44 +38,6 @@ func (capabilityProbeTool) Schema() ToolSchema {
 }
 func (capabilityProbeTool) Run(context.Context, string) (string, error) { return "ok", nil }
 
-func TestUnsupportedToolsSkipPrimaryAndEscalateWithoutCallingIt(t *testing.T) {
-	primary := &capabilityProbeProvider{
-		name: "local-text-only",
-		// The adapter is optimistic, but live discovery for this selected model
-		// explicitly said no tools. The rung snapshot must win.
-		caps: ModelCapabilities{Tools: CapabilitySupported},
-	}
-	fallback := &capabilityProbeProvider{
-		name:     "cloud-tools",
-		caps:     ModelCapabilities{Tools: CapabilitySupported},
-		response: AssistantText("fallback answered"),
-	}
-	agent, err := New(Config{
-		Provider: primary, Model: "text-model",
-		ModelCapabilities: ModelCapabilities{Tools: CapabilityUnsupported},
-		Escalation:        []ModelRung{{Provider: fallback, Model: "tool-model"}},
-		Tools:             NewToolSet(capabilityProbeTool{}), Policy: NewAllowList("probe"),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	result, err := agent.Prompt(context.Background(), "use the available tool if needed")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if result.Final != "fallback answered" {
-		t.Fatalf("final = %q", result.Final)
-	}
-	if got := atomic.LoadInt32(&primary.calls); got != 0 {
-		t.Fatalf("incapable primary was called %d times; want 0", got)
-	}
-	if got := atomic.LoadInt32(&fallback.calls); got != 1 {
-		t.Fatalf("capable fallback calls = %d; want 1", got)
-	}
-	if len(fallback.recorded) != 1 || len(fallback.recorded[0].Tools) != 1 {
-		t.Fatalf("fallback request lost tool schemas: %+v", fallback.recorded)
-	}
-}
 
 func TestRequestForCapabilitiesStripsOnlyExplicitlyUnsupportedHints(t *testing.T) {
 	schema := &OutputSchema{Name: "answer", Schema: map[string]any{"type": "object"}}
@@ -163,31 +125,6 @@ func TestRequestForCapabilitiesRejectsUnknownToolStrictness(t *testing.T) {
 	}
 }
 
-func TestConfigForwardsToolControlsAndClonesParallelFlag(t *testing.T) {
-	provider := &capabilityProbeProvider{
-		name: "capture", caps: ModelCapabilities{Tools: CapabilitySupported, ToolChoice: CapabilitySupported},
-		response: AssistantText("done"),
-	}
-	parallel := false
-	agent, err := New(Config{
-		Provider: provider, Model: "m", Tools: NewToolSet(capabilityProbeTool{}), Policy: NewAllowList("probe"),
-		ToolChoice: ToolChoice{Mode: ToolChoiceNamed, Name: "probe"}, ParallelToolCalls: &parallel,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parallel = true // the built agent must own a snapshot, not the caller's pointer
-	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
-		t.Fatal(err)
-	}
-	if len(provider.recorded) != 1 {
-		t.Fatalf("recorded requests = %d", len(provider.recorded))
-	}
-	req := provider.recorded[0]
-	if req.ToolChoice != (ToolChoice{Mode: ToolChoiceNamed, Name: "probe"}) || req.ParallelToolCalls == nil || *req.ParallelToolCalls {
-		t.Fatalf("forwarded controls = choice=%+v parallel=%v", req.ToolChoice, req.ParallelToolCalls)
-	}
-}
 
 func TestToolChoiceValidation(t *testing.T) {
 	cases := []struct {

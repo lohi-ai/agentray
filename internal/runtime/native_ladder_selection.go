@@ -5,26 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"sync"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/ai"
 )
 
-// Only this projection may enter a session journal. Credentials and pool handles
-// remain in the bound rung, and provider-row identity disambiguates equal models.
-type nativeLadderSelection struct {
-	Version    int             `json:"version"`
-	Generation uint64          `json:"generation"`
-	Rung       int             `json:"rung"`
-	ProviderID string          `json:"providerId"`
-	Model      json.RawMessage `json:"model"`
-}
+type nativeLadderSelection = ai.FallbackSelection
+
 type nativeBoundRung struct {
-	config        agentcore.PiConfig
+	config        NativeAgentConfig
 	model         json.RawMessage
 	providerID    string
 	pricingKnown  bool
@@ -54,7 +47,7 @@ func (l *nativeModelLadder) fork() *nativeModelLadder {
 
 // Options are resolved per concrete tier, so two rows sharing a vendor cannot
 // accidentally share a vendor-only refresh callback. Construction performs no IO.
-func newNativeModelLadder(tier ModelTier, base agentcore.PiConfig, options func(ModelTier) (PiModelOptions, error)) (*nativeModelLadder, error) {
+func newNativeModelLadder(tier ModelTier, base NativeAgentConfig, options func(ModelTier) (PiModelOptions, error)) (*nativeModelLadder, error) {
 	if options == nil {
 		return nil, errors.New("native ladder requires rung-scoped binding options")
 	}
@@ -83,7 +76,7 @@ func newNativeModelLadder(tier ModelTier, base agentcore.PiConfig, options func(
 			return nil, err
 		}
 		if stream == nil {
-			stream = NativeProviderStream
+			stream = (ai.NativeProvider{}).Stream
 		}
 		disabled := resolved.tier.Capabilities.Tools == agentcore.CapabilityUnsupported || (opts.ToolChoice.Mode == agentcore.ToolChoiceNone && resolved.tier.Capabilities.ToolChoice == agentcore.CapabilityUnsupported)
 		ladder.rungs = append(ladder.rungs, nativeBoundRung{config: cfg, model: append(json.RawMessage(nil), wire.InitialState.Model...), providerID: resolved.tier.ProviderID, pricingKnown: known, stream: stream, toolsDisabled: disabled})
@@ -95,7 +88,7 @@ func newNativeModelLadder(tier ModelTier, base agentcore.PiConfig, options func(
 // capabilities. Each attempt filters only its provider view; a tool-free
 // primary must not erase tools which a later candidate can use. Explicit host
 // restrictions (including an empty catalogue) still apply to every rung.
-func (l *nativeModelLadder) admissionBinding() (agentcore.PiConfig, bool, engine.StreamFn) {
+func (l *nativeModelLadder) admissionBinding() (NativeAgentConfig, bool, engine.StreamFn) {
 	cfg, known, stream := l.sessionBinding()
 	var options map[string]json.RawMessage
 	_ = json.Unmarshal(cfg.Options, &options)
@@ -119,7 +112,7 @@ func (l *nativeModelLadder) selection() nativeLadderSelection {
 	defer l.mu.Unlock()
 	return l.selectionLocked()
 }
-func (l *nativeModelLadder) binding() (agentcore.PiConfig, bool, engine.StreamFn) {
+func (l *nativeModelLadder) binding() (NativeAgentConfig, bool, engine.StreamFn) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	rung := l.rungs[l.active]
@@ -131,7 +124,7 @@ func (l *nativeModelLadder) binding() (agentcore.PiConfig, bool, engine.StreamFn
 // sessionBinding installs routing before host wrappers are composed, so resume
 // can restore the provider row without discarding policy, tools or tracing.
 // A ladder belongs to one session; selections occur between provider attempts.
-func (l *nativeModelLadder) sessionBinding() (agentcore.PiConfig, bool, engine.StreamFn) {
+func (l *nativeModelLadder) sessionBinding() (NativeAgentConfig, bool, engine.StreamFn) {
 	cfg, known, _ := l.binding()
 	// Register hooks needed by any rung. An inactive rung's optional hook is
 	// a no-op in bindPi; omitting it here would bypass fallback capabilities.
@@ -176,8 +169,7 @@ func (l *nativeModelLadder) sessionBinding() (agentcore.PiConfig, bool, engine.S
 	return cfg, known, stream
 }
 func nativeModelIdentityEqual(a, b json.RawMessage) bool {
-	var left, right any
-	return json.Unmarshal(a, &left) == nil && json.Unmarshal(b, &right) == nil && reflect.DeepEqual(left, right)
+	return nativehost.SameJSON(a, b)
 }
 func (l *nativeModelLadder) validateLocked(selection nativeLadderSelection) error {
 	if selection.Version != 1 || selection.Rung < 0 || selection.Rung >= len(l.rungs) {

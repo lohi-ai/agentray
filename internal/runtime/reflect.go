@@ -60,12 +60,7 @@ func (r *Runner) reflect(ctx context.Context, in reflectInput) error {
 	if in.Memory == nil {
 		return nil
 	}
-	provider, err := in.Tier.TracedProvider(r.Tracer)
-	if err != nil {
-		return err
-	}
-
-	resp, err := provider.Chat(ctx, agentcore.ChatRequest{
+	resp, err := in.Tier.complete(ctx, r.Tracer, agentcore.ChatRequest{
 		Model:     in.Tier.Model,
 		MaxTokens: reflectMaxTokens,
 		Messages: []agentcore.Message{

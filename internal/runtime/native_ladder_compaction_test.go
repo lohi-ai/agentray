@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 func TestNativeLadderCompactionUsesRequestWindow(t *testing.T) {
@@ -15,7 +16,7 @@ func TestNativeLadderCompactionUsesRequestWindow(t *testing.T) {
 	ladder := &nativeModelLadder{}
 	for i, window := range []int{100000, 2000} {
 		tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: []string{"large", "small"}[i], APIKey: "test", ContextWindow: window}}
-		bound, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
+		bound, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(ModelTier) (PiModelOptions, error) { return PiModelOptions{}, nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -23,9 +24,9 @@ func TestNativeLadderCompactionUsesRequestWindow(t *testing.T) {
 	}
 	binding, _, stream := ladder.sessionBinding()
 	summaries := 0
-	policy := PiContextCompaction{Budget: 90000, KeepRecent: 500, Summarize: func(_ context.Context, raw json.RawMessage, _ string) (string, agentcore.Usage, error) {
+	policy := nativehost.CompactionPolicy{Budget: 90000, KeepRecent: 500, Summarize: func(_ context.Context, raw json.RawMessage, _ string) (string, agentcore.Usage, error) {
 		summaries++
-		if err := validatePiConversationMessages(raw); err != nil {
+		if err := nativehost.ValidateMessages(raw); err != nil {
 			t.Fatal("summary split native tool history", err)
 		}
 		return "saved evidence", agentcore.Usage{InputTokens: 7}, nil
@@ -51,7 +52,7 @@ func TestNativeLadderCompactionUsesRequestWindow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if samePiJSON(view, input) == compact || strings.Contains(string(view), "Earlier work summary") != compact {
+		if nativehost.SameJSON(view, input) == compact || strings.Contains(string(view), "Earlier work summary") != compact {
 			t.Fatalf("wrong request view for compact=%v", compact)
 		}
 	}

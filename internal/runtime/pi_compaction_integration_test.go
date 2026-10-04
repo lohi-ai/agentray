@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
@@ -181,7 +182,7 @@ func TestPiCompactionSQLBranchesRacesAndNextNativeTurn(t *testing.T) {
 	}
 	var native struct{ Messages json.RawMessage }
 	_ = json.Unmarshal(result.NativeState, &native)
-	if !samePiJSON(native.Messages, continued.Messages) {
+	if !nativehost.SameJSON(native.Messages, continued.Messages) {
 		t.Fatal("post-compaction native delta did not round trip")
 	}
 	// A new input during summarization wins. The summary cannot consume it or
@@ -202,7 +203,7 @@ func TestPiCompactionSQLBranchesRacesAndNextNativeTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored, err := BuildPiHistory(ctx, st, conv.ID)
-	if err != nil || !samePiJSON(restored.Messages, base.Messages) {
+	if err != nil || !nativehost.SameJSON(restored.Messages, base.Messages) {
 		t.Fatal("compaction destroyed old branch")
 	}
 	for _, failure := range []error{context.Canceled, errors.New("provider failure"), nil} {
@@ -268,10 +269,7 @@ func TestPiCompactCommandResolvesWorkspaceTierAndPersistsNativeCheckpoint(t *tes
 		t.Fatal(err)
 	}
 	svc := NewChatService(st, WithPiRuntime(PiRuntimeConfig{}))
-	svc.classify = func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-		t.Fatal("compact invoked legacy classifier")
-		return chatDecision{}, nil
-	}
+
 	result, err := svc.Chat(ctx, ChatOptions{ProjectID: boot.Project.ID, ConversationID: conv.ID, Message: "/compact"}, nil)
 	if err != nil || !strings.HasPrefix(result.Final, "Compacted.") || calls.Load() != 1 {
 		t.Fatalf("command did not compact: %+v %v calls=%d", result, err, calls.Load())

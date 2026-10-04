@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -47,7 +48,7 @@ func TestPiConversationPreservesNativeBlocksAndPendingInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := piConvMessages(t, history)
-	if len(messages) != 4 || !samePiJSON(messages[0], []byte(user)) || !samePiJSON(messages[1], []byte(assistant)) || !samePiJSON(messages[2], []byte(result)) {
+	if len(messages) != 4 || !nativehost.SameJSON(messages[0], []byte(user)) || !nativehost.SameJSON(messages[1], []byte(assistant)) || !nativehost.SameJSON(messages[2], []byte(result)) {
 		t.Fatalf("lost original native transcript: %s", history.Messages)
 	}
 	if !strings.Contains(string(messages[3]), `"agentrayInputId":"late"`) || history.LeafID != "display" || history.Revision != "revision" {
@@ -104,12 +105,7 @@ func TestPiConversationRejectsInvalidNativePaths(t *testing.T) {
 			}
 		})
 	}
-	if err := requireLegacyConversation([]storage.AgentConversationEntry{valid}); err == nil {
-		t.Fatal("legacy reducer accepted native history")
-	}
-	if err := requireLegacyConversation([]storage.AgentConversationEntry{valid, {Kind: ConvKindClear}}); err != nil {
-		t.Fatal(err)
-	}
+
 }
 
 func TestPiConversationSuffixChecksSeedAndToolBoundaries(t *testing.T) {
@@ -129,10 +125,7 @@ func TestPiConversationSuffixChecksSeedAndToolBoundaries(t *testing.T) {
 func TestPiChatUsesNativeHandlerWithoutGoClassifier(t *testing.T) {
 	history := &PiConversationHistory{Messages: json.RawMessage(`[]`), LeafID: "anchor"}
 	svc := NewChatService(nil, WithPiRuntime(PiRuntimeConfig{}))
-	svc.classify = func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-		t.Fatal("native chat invoked legacy classifier")
-		return chatDecision{}, nil
-	}
+
 	calls := 0
 	svc.handle = func(_ context.Context, work chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 		calls++
@@ -165,7 +158,7 @@ func TestPiLiveInputPersistsBeforeQueueAndKeepsIdentity(t *testing.T) {
 	if err != nil || !ok || !persisted {
 		t.Fatalf("queue failed: %v %v", ok, err)
 	}
-	native, err := piHostMessages(drainMessages(live.steer))
+	native, err := nativehost.InputMessages(drainMessages(live.steer))
 	if err != nil || len(native) != 1 || !strings.Contains(string(native[0]), `"agentrayInputId":"entry"`) {
 		t.Fatalf("lost correlation: %s %v", native, err)
 	}
@@ -179,36 +172,26 @@ func TestPiLiveInputPersistsBeforeQueueAndKeepsIdentity(t *testing.T) {
 	}
 }
 
-func TestPiJSONIdentityPreservesNumbersAcrossJSONBSpelling(t *testing.T) {
-	for _, pair := range [][2]string{
-		{`1e3`, `1000`}, {`1.000`, `1`}, {`4e-8`, `0.00000004`},
-		{`1e21`, `1000000000000000000000`}, {`-0.000`, `0`},
-		{`9.007199254740993e15`, `9007199254740993`},
-		{`1e00000000000000000000000000000003`, `1000`},
-		{`1e1000000000000000000000000`, `10e999999999999999999999999`},
-	} {
-		if !samePiJSON([]byte(pair[0]), []byte(pair[1])) {
-			t.Errorf("same number has different identity: %s / %s", pair[0], pair[1])
-		}
+func TestNativeHistoryIgnoresHostDisplayAndControlEntries(t *testing.T) {
+	entries := []storage.AgentConversationEntry{
+		piConvDelta("native", "", "r", `{"role":"user","content":"question"}`, `{"role":"assistant","content":[{"type":"text","text":"answer"}],"opaque":9007199254740993}`),
+		piConvMessage("display", "assistant", "public rendering", true),
+		{ID: "plan", Kind: ConvKindPlan, PayloadJSON: `{"items":[{"content":"do work","status":"pending"}]}`},
+		{ID: "keyword", Kind: ConvKindKeyword, PayloadJSON: `{"keywords":["ultrathink"]}`},
+		{ID: "trace", Kind: ConvKindToolTrace, PayloadJSON: `{"tool":"query"}`},
+		{ID: "command", Kind: ConvKindMessage, Role: "user", PayloadJSON: `{"text":"/plan","command":true}`},
 	}
-	for _, pair := range [][2]string{
-		{`9007199254740992`, `9007199254740993`},
-		{`0.123456789012345678901234567890`, `0.123456789012345678901234567891`},
-		{`1e309`, `2e309`}, {`null`, `0`}, {`"1000"`, `1000`},
-		{`{"extension":[9007199254740992]}`, `{"extension":[9007199254740993]}`},
-		{`1 2`, `1`},
-	} {
-		if samePiJSON([]byte(pair[0]), []byte(pair[1])) {
-			t.Errorf("different values share an identity: %s / %s", pair[0], pair[1])
-		}
+	history, err := foldPiHistory(entries)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Native number spellings emitted by JSON.stringify / encoding/json keep
-	// their previous digest representation, including very small cost fields.
-	for _, number := range []float64{0, 1, -123, 0.1, 0.000001, 0.0000001, 4e-8, 1e20, 1e21, 1.25e30, 1.2345678901234567, 5e-324} {
-		raw, _ := json.Marshal(number)
-		canonical, err := canonicalPiJSON(raw)
-		if err != nil || string(canonical) != string(raw) {
-			t.Errorf("ordinary native digest spelling changed: %s -> %s (%v)", raw, canonical, err)
+	messages := piConvMessages(t, history)
+	if len(messages) != 2 || !strings.Contains(string(messages[1]), "9007199254740993") {
+		t.Fatalf("host metadata changed native history: %s", history.Messages)
+	}
+	for _, hidden := range []string{"public rendering", "ultrathink", "do work", "/plan"} {
+		if strings.Contains(string(history.Messages), hidden) {
+			t.Fatalf("host control leaked: %s", hidden)
 		}
 	}
 }

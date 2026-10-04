@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -60,7 +60,7 @@ func NewAntigravityProvider() *AntigravityProvider {
 // applyOAuthToken returns a per-call clone carrying the account credential
 // (pooledProvider's oauthTokenApplier seam) so concurrent calls never share
 // the token field.
-func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) protocol.LLMProvider {
 	c := *p
 	c.tok = tok
 	return &c
@@ -69,7 +69,7 @@ func (p *AntigravityProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvi
 func (p *AntigravityProvider) Name() string        { return VendorGoogleAntigravity }
 func (p *AntigravityProvider) SupportsTools() bool { return true }
 
-func (p *AntigravityProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (p *AntigravityProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
 	return CapabilitiesFor(p.Name(), model)
 }
 
@@ -172,7 +172,7 @@ type agRequest struct {
 // fields (requestId, labels) mirror the real antigravity/hub client: requestId
 // is agent/<agent>/<unixms>/<trajectory>/<step> and last_step_index trails the
 // step by one.
-func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
+func (p *AntigravityProvider) encode(req protocol.ChatRequest) agRequest {
 	isClaude := strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Model)), "claude-")
 	trajectory := uuid.NewString()
 	const step = 2
@@ -189,7 +189,7 @@ func (p *AntigravityProvider) encode(req agentcore.ChatRequest) agRequest {
 
 	var systemParts []string
 	for _, m := range req.Messages {
-		if m.Role == agentcore.RoleSystem && m.Content != "" {
+		if m.Role == protocol.RoleSystem && m.Content != "" {
 			systemParts = append(systemParts, m.Content)
 		}
 	}
@@ -301,7 +301,7 @@ func antigravityThinking(model, effort string) (*agThinkingConfig, int) {
 // convertMessages maps the neutral transcript onto Cloud Code Assist contents.
 // Consecutive tool results merge into one user content's parts — the API
 // requires all function responses for a turn in a single user turn.
-func (p *AntigravityProvider) convertMessages(req agentcore.ChatRequest) []agContent {
+func (p *AntigravityProvider) convertMessages(req protocol.ChatRequest) []agContent {
 	var contents []agContent
 	// tool result messages carry only ToolCallID; the functionResponse needs
 	// the tool NAME, so remember the name each emitted call id maps to.
@@ -309,9 +309,9 @@ func (p *AntigravityProvider) convertMessages(req agentcore.ChatRequest) []agCon
 
 	for _, m := range req.Messages {
 		switch m.Role {
-		case agentcore.RoleSystem:
+		case protocol.RoleSystem:
 			// hoisted into systemInstruction by encode
-		case agentcore.RoleTool:
+		case protocol.RoleTool:
 			name := m.Name
 			if name == "" {
 				name = callNames[m.ToolCallID]
@@ -330,7 +330,7 @@ func (p *AntigravityProvider) convertMessages(req agentcore.ChatRequest) []agCon
 			} else {
 				contents = append(contents, agContent{Role: "user", Parts: []agPart{part}})
 			}
-		case agentcore.RoleAssistant:
+		case protocol.RoleAssistant:
 			var parts []agPart
 			if m.Content != "" {
 				parts = append(parts, agPart{Text: m.Content})
@@ -411,7 +411,7 @@ type agStreamChunk struct {
 // level or with a 5xx before the first event. Text parts (thought != true)
 // stream as content deltas; functionCall parts arrive whole; usageMetadata
 // carries the token accounting.
-func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *AntigravityProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	raw, err := json.Marshal(p.encode(req))
 	if err != nil {
 		return nil, err
@@ -442,14 +442,14 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 			// 5xx before the first event: the next endpoint may be healthy.
 			data := readProviderErrorBody(resp.Body)
 			resp.Body.Close()
-			lastErr = agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+			lastErr = protocol.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 			resp = nil
 			continue
 		}
 		if resp.StatusCode >= 400 {
 			data := readProviderErrorBody(resp.Body)
 			resp.Body.Close()
-			return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+			return nil, protocol.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 		}
 		lastErr = nil
 		break
@@ -461,13 +461,13 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 		return nil, lastErr
 	}
 
-	ch := make(chan agentcore.ChatDelta, 16)
+	ch := make(chan protocol.ChatDelta, 16)
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
 		var stopReason string
-		var usage agentcore.Usage
+		var usage protocol.Usage
 		callSeq := 0
 		terminal := false
 
@@ -487,7 +487,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 				continue
 			}
 			if chunk.Error != nil {
-				ch <- agentcore.ChatDelta{Done: true, Err: p.streamError(resp, chunk.Error.Code, chunk.Error.Status, chunk.Error.Message)}
+				ch <- protocol.ChatDelta{Done: true, Err: p.streamError(resp, chunk.Error.Code, chunk.Error.Status, chunk.Error.Message)}
 				return
 			}
 			r := chunk.Response
@@ -504,14 +504,14 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 							id = fmt.Sprintf("ag-call-%d", callSeq)
 						}
 						args, _ := json.Marshal(fc.Args)
-						tc := agentcore.ToolCall{ID: id, Name: fc.Name, Arguments: string(args)}
-						ch <- agentcore.ChatDelta{ToolCall: &tc}
+						tc := protocol.ToolCall{ID: id, Name: fc.Name, Arguments: string(args)}
+						ch <- protocol.ChatDelta{ToolCall: &tc}
 						continue
 					}
 					// thought parts are the model's reasoning, not user-visible
 					// text; only plain text streams as content.
 					if part.Text != "" && !part.Thought {
-						ch <- agentcore.ChatDelta{ContentDelta: part.Text}
+						ch <- protocol.ChatDelta{ContentDelta: part.Text}
 					}
 				}
 				if cand.FinishReason != "" {
@@ -522,7 +522,7 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 			if u := r.UsageMetadata; u != nil {
 				// promptTokenCount includes the cached prefix; the neutral
 				// contract keeps InputTokens full-price-only.
-				usage = agentcore.Usage{
+				usage = protocol.Usage{
 					InputTokens:     u.PromptTokenCount - u.CachedContentTokenCount,
 					OutputTokens:    u.CandidatesTokenCount + u.ThoughtsTokenCount,
 					CacheReadTokens: u.CachedContentTokenCount,
@@ -530,15 +530,15 @@ func (p *AntigravityProvider) Stream(ctx context.Context, req agentcore.ChatRequ
 			}
 		}
 		if err := sc.Err(); err != nil {
-			ch <- agentcore.ChatDelta{Done: true, Err: err}
+			ch <- protocol.ChatDelta{Done: true, Err: err}
 			return
 		}
 		if !terminal {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil,
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil,
 				"antigravity stream ended before a terminal finish reason")}
 			return
 		}
-		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
+		ch <- protocol.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
 	return ch, nil
 }
@@ -578,7 +578,7 @@ func mapAntigravityStopReason(reason string) string {
 
 // Chat consumes the SSE stream to completion and returns the assembled
 // response — the backend only streams, so there is no second wire path.
-func (p *AntigravityProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *AntigravityProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	return chatViaStream(ctx, p, req)
 }
 
@@ -612,7 +612,7 @@ func (p *AntigravityProvider) listAntigravityModels(ctx context.Context, client 
 			continue
 		}
 		if status >= 400 {
-			lastErr = &agentcore.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
+			lastErr = &protocol.ProviderError{Provider: p.Name(), Status: status, Message: strings.TrimSpace(string(data))}
 			continue
 		}
 		models, err := parseAntigravityModels(data)

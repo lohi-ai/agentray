@@ -3,12 +3,12 @@ package ai
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Some OpenAI-compatible gateways return text/event-stream for a non-streaming
 // Chat() request (observed with 9router routing summarizer calls to a cheap
-// streamed model). Chat() must fold those SSE frames into one agentcore.ChatResponse
+// streamed model). Chat() must fold those SSE frames into one protocol.ChatResponse
 // rather than failing the JSON decode and degrading the caller to elide.
 func TestDecodeSSEResponse_FoldsContentAndUsage(t *testing.T) {
 	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n" +
@@ -67,7 +67,7 @@ func TestDecodeSSEResponse_TruncatedStreamIsRetryableError(t *testing.T) {
 	}
 	// It must be retryable: the stream broke in transit, so the next attempt may
 	// well succeed. A non-retryable error here silently drops the turn.
-	if !agentcore.IsRetryable(err) {
+	if !protocol.IsRetryable(err) {
 		t.Fatalf("truncated stream error is not retryable: %v", err)
 	}
 }

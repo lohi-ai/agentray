@@ -2,12 +2,14 @@ package goal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 func TestRevisionCommitPrecedesStoreMutation(t *testing.T) {
@@ -48,7 +50,7 @@ func TestNativeGoalHostRejectsMissingRecorderAndUncommittedDrain(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore("original")
 	a, err := agentcore.New(agentcore.Config{
-		Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Goal: "original",
+		NativeProvider: &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: ai.ScriptedStream()}}}, Model: "test", Goal: "original",
 		Policy: agentcore.NewAllowList(ToolName), Extensions: []agentcore.ExtensionFactory{Plugin{Goal: "original", Revisable: true, Store: store}},
 	})
 	if err != nil {

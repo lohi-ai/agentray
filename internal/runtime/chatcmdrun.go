@@ -72,15 +72,8 @@ func (s *ChatService) cmdCompact(ctx context.Context, opts ChatOptions) string {
 		return "This chat isn't saved on the server yet, so there's nothing to compact. Send a message first."
 	}
 	wctx := context.WithoutCancel(ctx)
-	var done bool
-	var err error
-	if s.UsesPiRuntime() {
-		done, err = compactPiConversation(wctx, s.runner.Store, opts.ConversationID,
-			s.runner.RunTierWindow(wctx, opts.ProjectID), true, s.piSummarizer(opts.ProjectID))
-	} else {
-		done, err = CompactConversationNow(wctx, s.runner.Store, opts.ConversationID,
-			s.runner.RunTierWindow(wctx, opts.ProjectID), s.summarizer(opts.ProjectID))
-	}
+	done, err := compactPiConversation(wctx, s.runner.Store, opts.ConversationID,
+		s.runner.RunTierWindow(wctx, opts.ProjectID), true, s.piSummarizer(opts.ProjectID))
 	switch {
 	case errors.Is(err, ErrPiQuestionPending):
 		return "Answer the pending question before compacting this chat."

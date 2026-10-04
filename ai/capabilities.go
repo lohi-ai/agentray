@@ -4,19 +4,19 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // CapabilitiesFor returns adapter-level knowledge and conservative wire-policy
 // limits for a provider/model pair. It intentionally stays sparse: this is not
 // a model catalog, and unknown support preserves the optimistic request path.
 // Live discovery may overlay these defaults with explicit model-level facts.
-func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
-	supported := agentcore.CapabilitySupported
-	unsupported := agentcore.CapabilityUnsupported
+func CapabilitiesFor(vendor, model string) protocol.ModelCapabilities {
+	supported := protocol.CapabilitySupported
+	unsupported := protocol.CapabilityUnsupported
 	switch NormalizeVendor(vendor) {
 	case "openai":
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			ImageInput: supported, MaxInputImages: 200,
 			StructuredOutput: supported, PromptCaching: supported,
@@ -25,14 +25,14 @@ func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
 			StatefulResponses: unsupported,
 		}
 	case VendorOpenAIResponses:
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			ImageInput: supported, MaxInputImages: 200,
 			StructuredOutput: supported, PromptCaching: supported,
 			StatefulResponses: supported,
 		}
 	case "anthropic":
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ImageInput: supported, MaxInputImages: 90,
 			StructuredOutput: supported, PromptCaching: supported,
 			// The neutral request has no Anthropic thinking/tool-choice mapper yet.
@@ -40,7 +40,7 @@ func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
 			StatefulResponses: unsupported,
 		}
 	case VendorOpenAICodex:
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			ImageInput: supported, MaxInputImages: 200,
 		}
@@ -49,7 +49,7 @@ func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "claude-") {
 			maxOutput = 64000
 		}
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			MaxOutputTokens: maxOutput,
 			// The current Cloud Code function-response adapter has no native
@@ -58,33 +58,33 @@ func CapabilitiesFor(vendor, model string) agentcore.ModelCapabilities {
 			ImageInput: unsupported,
 		}
 	case VendorClaudeCode:
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ImageInput: supported, MaxInputImages: 90,
 			StructuredOutput: supported, PromptCaching: supported,
 			ReasoningEffort:   unsupported,
 			StatefulResponses: unsupported,
 		}
 	case "google":
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
 			ImageInput: supported, MaxInputImages: 200,
 			StructuredOutput: supported, PromptCaching: supported,
 			StatefulResponses: unsupported,
 		}
 	case "openrouter":
-		return agentcore.ModelCapabilities{
+		return protocol.ModelCapabilities{
 			ImageInput: supported, MaxInputImages: 90,
 		}
 	default:
-		return agentcore.ModelCapabilities{}
+		return protocol.ModelCapabilities{}
 	}
 }
 
-func support(value bool) agentcore.CapabilitySupport {
+func support(value bool) protocol.CapabilitySupport {
 	if value {
-		return agentcore.CapabilitySupported
+		return protocol.CapabilitySupported
 	}
-	return agentcore.CapabilityUnsupported
+	return protocol.CapabilityUnsupported
 }
 
 // discoveredCapabilities is the intentionally permissive subset of model-list
@@ -111,8 +111,8 @@ type discoveredCapabilities struct {
 	} `json:"architecture"`
 }
 
-func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities {
-	var out agentcore.ModelCapabilities
+func (d discoveredCapabilities) modelCapabilities() protocol.ModelCapabilities {
+	var out protocol.ModelCapabilities
 	// Some routers place booleans in a free-form capabilities object. Accept
 	// common spellings, but never infer false from a missing key.
 	for key, raw := range d.Capabilities {
@@ -156,17 +156,17 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 	for _, parameter := range d.SupportedParameters {
 		switch normalizeCapabilityName(parameter) {
 		case "tools":
-			out.Tools = agentcore.CapabilitySupported
+			out.Tools = protocol.CapabilitySupported
 		case "toolchoice":
-			out.ToolChoice = agentcore.CapabilitySupported
+			out.ToolChoice = protocol.CapabilitySupported
 		case "reasoning", "reasoningeffort":
-			out.ReasoningEffort = agentcore.CapabilitySupported
+			out.ReasoningEffort = protocol.CapabilitySupported
 		case "responseformat", "structuredoutputs":
-			out.StructuredOutput = agentcore.CapabilitySupported
+			out.StructuredOutput = protocol.CapabilitySupported
 		case "promptcachekey", "cachecontrol":
-			out.PromptCaching = agentcore.CapabilitySupported
+			out.PromptCaching = protocol.CapabilitySupported
 		case "previousresponseid":
-			out.StatefulResponses = agentcore.CapabilitySupported
+			out.StatefulResponses = protocol.CapabilitySupported
 		}
 	}
 
@@ -175,10 +175,10 @@ func (d discoveredCapabilities) modelCapabilities() agentcore.ModelCapabilities 
 		modalities = d.Architecture.InputModalities
 	}
 	if len(modalities) > 0 {
-		out.ImageInput = agentcore.CapabilityUnsupported
+		out.ImageInput = protocol.CapabilityUnsupported
 		for _, modality := range modalities {
 			if strings.EqualFold(strings.TrimSpace(modality), "image") {
-				out.ImageInput = agentcore.CapabilitySupported
+				out.ImageInput = protocol.CapabilitySupported
 				break
 			}
 		}

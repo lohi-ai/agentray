@@ -3,7 +3,7 @@ package ai
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Per-vendor usage normalization: each wire adapter must report full-price
@@ -38,7 +38,7 @@ func TestAnthropicUsageMapsCacheCounters(t *testing.T) {
 		CacheReadInputTokens:     400,
 		CacheCreationInputTokens: 120,
 	}.usage()
-	want := agentcore.Usage{InputTokens: 50, OutputTokens: 10, CacheReadTokens: 400, CacheWriteTokens: 120}
+	want := protocol.Usage{InputTokens: 50, OutputTokens: 10, CacheReadTokens: 400, CacheWriteTokens: 120}
 	if got != want {
 		t.Fatalf("usage = %+v, want %+v", got, want)
 	}

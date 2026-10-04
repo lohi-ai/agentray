@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
 	"slices"
 	"sort"
 	"strings"
@@ -11,12 +12,11 @@ import (
 
 // agentcore composes an agent from plugins.
 //
-// Every capability — the driver that runs the loop, the tool registry, the
-// permission gate, durability, compaction, spill, jobs, retrieval, the guards,
-// the observability sinks — is contributed by a Plugin that registers into a
-// Registry. There is no privileged core to patch: agentcore's own behavior is
-// just the default plugin set, and any of it can be replaced by registering
-// something else in its place.
+// Host capabilities — the tool registry, the
+// permission gate, durability, compaction, spill, jobs, retrieval and guards —
+// is contributed by a Plugin that registers into a
+// Registry. Plugins configure capabilities around the engine; they do not
+// replace its turn loop.
 //
 // This is deepseek-harness's "everything is a plugin" idea (it runs on Cordis)
 // rebuilt for Go. What is deliberately NOT copied is the dependency-injection
@@ -29,7 +29,7 @@ import (
 // for:
 //
 //  1. Replaceability. A seam has exactly one provider and a plugin that
-//     registers it declares so. Swapping the driver, the spill store, or the
+//     registers it declares so. Swapping the model, the spill store, or the
 //     permission gate is a one-line change to a plugin list, not a fork of the
 //     loop.
 //  2. Reversibility. Registrations are effects owned by the plugin that made
@@ -84,8 +84,8 @@ type Registry struct {
 	// --- capability seams: exactly one provider each -----------------------
 	seams map[string]string // seam name -> plugin that claimed it
 
-	driver            Driver
 	provider          LLMProvider
+	nativeProvider    *ai.FallbackProvider
 	model             string
 	tools             *ToolSet
 	policy            Policy
@@ -97,15 +97,9 @@ type Registry struct {
 
 	// --- configuration contributed by plugins ------------------------------
 	limits Limits
-	// env is the host environment as a whole; sandbox and credentials are the
-	// two capabilities INSIDE it that a plugin may claim on their own. They are
-	// held separately and folded into env at build (see build()), because
-	// merging them into the struct at registration time would make the result
-	// depend on whether SetEnv ran before or after SetSandbox — the one thing a
-	// plugin system must never do.
+	// env configures the host's tool execution boundary. Its infrastructure
+	// capabilities are not independently registered agent plugins.
 	env               Env
-	sandbox           Sandbox
-	credentials       CredentialResolver
 	definition        AgentDefinition
 	compaction        CompactionSettings
 	compactionRung    ModelRung
@@ -134,20 +128,8 @@ type Registry struct {
 	refreshKey      func(ctx context.Context, provider string) (string, error)
 
 	// --- extension points: many listeners, explicitly ordered --------------
-	hooks            []prioritizedHooks
-	providerWrappers []ProviderWrapper
+	hooks []prioritizedHooks
 }
-
-// ProviderWrapper decorates an LLMProvider. It is the contribution point for
-// anything that needs to BRACKET a model call rather than observe one side of
-// it — timing, cost accounting, tracing, rate limiting, a response cache. A
-// hook cannot do this: hooks fire before the request or after the response, so
-// they see neither the duration nor a call that failed.
-//
-// Wrappers apply to every provider in the run — the primary rung, each
-// escalation rung, and the compaction rung — because "every model call" is the
-// only useful meaning for a decorator that exists to account for spend.
-type ProviderWrapper func(LLMProvider) LLMProvider
 
 // prioritizedHooks is one plugin's hook contribution with its ordering key.
 type prioritizedHooks struct {
@@ -174,7 +156,7 @@ func newRegistry() *Registry {
 }
 
 // claim records that the current plugin is the sole provider of a seam,
-// rejecting a second claim. Two plugins silently fighting over the driver or
+// rejecting a second claim. Two plugins silently fighting over the model or
 // the permission gate is precisely the failure a plugin system must not have.
 func (r *Registry) claim(seam string) error {
 	if owner, taken := r.seams[seam]; taken {
@@ -214,9 +196,6 @@ func setSeam[T any](r *Registry, seam string, field *T, val T) error {
 
 // --- spine ---
 
-// SetDriver installs the agent loop. Exactly one plugin may.
-func (r *Registry) SetDriver(d Driver) error { return setSeam(r, "driver", &r.driver, d) }
-
 // SetModel installs the primary provider and model.
 func (r *Registry) SetModel(p LLMProvider, model string) error {
 	if err := r.claim("model"); err != nil {
@@ -251,7 +230,7 @@ func (r *Registry) SetModelCapabilities(c ModelCapabilities) error {
 // SetRetry overrides the same-model backoff policy applied before escalation.
 // Zero fields are filled from DefaultRetryPolicy().
 func (r *Registry) SetRetry(p RetryPolicy) error {
-	return setSeam(r, "retry", &r.retry, p.normalized())
+	return setSeam(r, "retry", &r.retry, p.Normalized())
 }
 
 // SetRefreshKey installs the per-turn API-key resolver for rotating BYO
@@ -308,40 +287,10 @@ func (r *Registry) SetDefinition(d AgentDefinition) error {
 // SetLimits overrides the run's bounds (turns, tool calls, context, result size).
 func (r *Registry) SetLimits(l Limits) error { return setSeam(r, "limits", &r.limits, l) }
 
-// SetEnv installs the host environment (sandbox, clock, credential resolver) as
-// one value. A plugin that owns only ONE of those capabilities claims it through
-// SetSandbox / SetCredentials instead, so an environment can be assembled from
-// several plugins without any of them clobbering the others.
+// SetEnv installs the host's tool execution environment as one value.
+// Sandbox backends are bound to tools by the host; credential resolution runs
+// inside the executor after permission checks, not as an agent extension.
 func (r *Registry) SetEnv(e Env) error { return setSeam(r, "env", &r.env, e) }
-
-// SetSandbox installs the isolation substrate for tools that execute untrusted
-// code. It is a seam of its own rather than a field of the env seam because the
-// plugin that supplies the backend is also the one that installs the guard
-// around it — the pairing is the capability, and it must be able to claim the
-// backend without owning the whole environment.
-func (r *Registry) SetSandbox(s Sandbox) error { return setSeam(r, "sandbox", &r.sandbox, s) }
-
-// SetCredentials installs the secret vault consulted at the trust boundary, so
-// a {{cred:NAME}} the model emits becomes a real value only in the string handed
-// to the executing tool.
-func (r *Registry) SetCredentials(c CredentialResolver) error {
-	return setSeam(r, "credentials", &r.credentials, c)
-}
-
-// resolvedEnv folds the individually-claimed capabilities into the environment.
-// A capability claimed on its own wins over the same field of a whole-Env claim:
-// a plugin that exists to provide the sandbox is more specific than one that
-// happened to pass an Env through.
-func (r *Registry) resolvedEnv() Env {
-	env := r.env
-	if r.sandbox != nil {
-		env.Sandbox = r.sandbox
-	}
-	if r.credentials != nil {
-		env.Credentials = r.credentials
-	}
-	return env
-}
 
 // --- governance ---
 
@@ -474,20 +423,6 @@ func (r *Registry) AddTools(tools ...Tool) {
 	r.onUnload(func() { r.tools = prev })
 }
 
-// WrapProvider contributes a provider decorator. Contributions are additive and
-// unkeyed: several may stack, applied in registration order so the
-// first-registered wrapper ends up innermost (closest to the wire).
-func (r *Registry) WrapProvider(w ProviderWrapper) {
-	if w == nil {
-		return
-	}
-	idx := len(r.providerWrappers)
-	r.providerWrappers = append(r.providerWrappers, w)
-	r.onUnload(func() {
-		r.providerWrappers = append(r.providerWrappers[:idx:idx], r.providerWrappers[idx+1:]...)
-	})
-}
-
 // AddHooks contributes lifecycle listeners at the given priority. Listeners run
 // in priority order, ties broken by registration order, so behavior never
 // depends on how the plugin list happened to be sorted.
@@ -577,7 +512,6 @@ func (r *Registry) mergedHooks() Hooks {
 		out.PiContext = append(out.PiContext, h.PiContext...)
 		out.BeforeProviderRequest = append(out.BeforeProviderRequest, h.BeforeProviderRequest...)
 		out.MessageEnd = append(out.MessageEnd, h.MessageEnd...)
-		out.AfterProviderResponse = append(out.AfterProviderResponse, h.AfterProviderResponse...)
 		// The strictest policy any plugin asked for wins: a plugin that treats a
 		// hook failure as fatal must not be silently downgraded by one that does
 		// not care.
@@ -617,8 +551,12 @@ func (r *Registry) Describe() string {
 	fmt.Fprintf(&b, "extensions: %s\n", strings.Join(extensionNames(r.extensions), ", "))
 	h := r.mergedHooks()
 	fmt.Fprintf(&b, "tools: %s\n", strings.Join(r.tools.Names(), ", "))
-	fmt.Fprintf(&b, "provider_wrappers: %d\n", len(r.providerWrappers))
 	fmt.Fprintf(&b, "hooks: before=%d after=%d context=%d turn_start=%d turn_end=%d agent_end=%d\n",
 		len(h.Before), len(h.After), len(h.Context), len(h.TurnStart), len(h.TurnEnd), len(h.AgentEnd))
 	return b.String()
+}
+
+// SetNativeProvider installs the native provider composition.
+func (r *Registry) SetNativeProvider(p *ai.FallbackProvider) error {
+	return setSeam(r, "native_provider", &r.nativeProvider, p)
 }

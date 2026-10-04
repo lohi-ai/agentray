@@ -3,7 +3,7 @@ package ai
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // TestAnthropicEncode_CacheBreakpoints pins the two prompt-cache breakpoints the
@@ -12,14 +12,14 @@ import (
 // breakpoint that turns the whole transcript-so-far into a cached prefix).
 func TestAnthropicEncode_CacheBreakpoints(t *testing.T) {
 	p := NewAnthropicProvider("k", "")
-	req := agentcore.ChatRequest{
+	req := protocol.ChatRequest{
 		Model:    "claude-opus-4-8",
 		CacheKey: "run-1",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "you are a reviewer"},
-			{Role: agentcore.RoleUser, Content: "big diff payload"},
-			{Role: agentcore.RoleAssistant, Content: "", ToolCalls: []agentcore.ToolCall{{ID: "t1", Name: "read_file", Arguments: `{"path":"a.go"}`}}},
-			{Role: agentcore.RoleTool, ToolCallID: "t1", Content: "file body"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "you are a reviewer"},
+			{Role: protocol.RoleUser, Content: "big diff payload"},
+			{Role: protocol.RoleAssistant, Content: "", ToolCalls: []protocol.ToolCall{{ID: "t1", Name: "read_file", Arguments: `{"path":"a.go"}`}}},
+			{Role: protocol.RoleTool, ToolCallID: "t1", Content: "file body"},
 		},
 	}
 	out := p.encode(req)
@@ -50,11 +50,11 @@ func TestAnthropicEncode_CacheBreakpoints(t *testing.T) {
 // a bare-string system and no cache_control anywhere.
 func TestAnthropicEncode_NoCacheKeyNoBreakpoints(t *testing.T) {
 	p := NewAnthropicProvider("k", "")
-	out := p.encode(agentcore.ChatRequest{
+	out := p.encode(protocol.ChatRequest{
 		Model: "claude-opus-4-8",
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleSystem, Content: "sys"},
-			{Role: agentcore.RoleUser, Content: "hi"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleSystem, Content: "sys"},
+			{Role: protocol.RoleUser, Content: "hi"},
 		},
 	})
 	if _, ok := out.System.(string); !ok {

@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -90,7 +90,7 @@ func (p *OpenAIProvider) Name() string {
 }
 func (p *OpenAIProvider) SupportsTools() bool { return p.Compat.SupportsTools }
 
-func (p *OpenAIProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (p *OpenAIProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
 	caps := CapabilitiesFor(p.Name(), model)
 	// Compat is the authoritative wire-level tool flag for arbitrary
 	// OpenAI-compatible endpoints, including an explicit false.
@@ -113,7 +113,7 @@ func NewGeminiProvider(apiKey string) *OpenAIProvider {
 	return p
 }
 
-// UpdateAPIKey swaps the key used for subsequent requests (agentcore.KeyUpdater), letting
+// UpdateAPIKey swaps the key used for subsequent requests (protocol.KeyUpdater), letting
 // the loop refresh an expiring BYO token between turns.
 func (p *OpenAIProvider) UpdateAPIKey(key string) {
 	if key != "" {
@@ -185,7 +185,7 @@ type oaiRequest struct {
 	// ("low" | "medium" | "high"). Sent only when the neutral request sets it.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// ResponseFormat constrains the answer to a JSON Schema (structured
-	// outputs). Sent only when the neutral request carries an agentcore.OutputSchema, so
+	// outputs). Sent only when the neutral request carries an protocol.OutputSchema, so
 	// strict compat servers are otherwise unaffected.
 	ResponseFormat    *oaiResponseFormat `json:"response_format,omitempty"`
 	ToolChoice        any                `json:"tool_choice,omitempty"`
@@ -193,7 +193,7 @@ type oaiRequest struct {
 }
 
 // oaiResponseFormat is OpenAI's structured-output selector; the json_schema
-// form is emitted, strict only when the caller opted in (see agentcore.OutputSchema.Strict).
+// form is emitted, strict only when the caller opted in (see protocol.OutputSchema.Strict).
 type oaiResponseFormat struct {
 	Type       string        `json:"type"`
 	JSONSchema oaiJSONSchema `json:"json_schema"`
@@ -228,7 +228,7 @@ type oaiResponseMessage struct {
 
 // oaiUsage mirrors OpenAI's usage block, including the cached-token detail.
 // prompt_tokens is the *total* input (cached + fresh); cached_tokens is the
-// portion served from the prompt cache. usage maps these onto the neutral agentcore.Usage
+// portion served from the prompt cache. usage maps these onto the neutral protocol.Usage
 // so InputTokens stays full-price-only.
 type oaiUsage struct {
 	PromptTokens        int `json:"prompt_tokens"`
@@ -240,12 +240,12 @@ type oaiUsage struct {
 
 // usage normalizes an OpenAI usage block: cached tokens are pulled out of the
 // full prompt total so InputTokens counts only fresh, full-price input.
-func (u oaiUsage) usage() agentcore.Usage {
+func (u oaiUsage) usage() protocol.Usage {
 	cached := u.PromptTokensDetails.CachedTokens
 	if cached > u.PromptTokens {
 		cached = u.PromptTokens
 	}
-	return agentcore.Usage{
+	return protocol.Usage{
 		InputTokens:     u.PromptTokens - cached,
 		OutputTokens:    u.CompletionTokens,
 		CacheReadTokens: cached,
@@ -256,10 +256,10 @@ func (u oaiUsage) usage() agentcore.Usage {
 // inconsistent about optional request hints; when one explicitly rejects a
 // hint, the adapter removes only that hint and retains the endpoint lesson in
 // the logical provider session.
-func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *OpenAIProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	state, active, maxTokenField := p.adaptiveRequest(req)
 	strictState, active := prepareStrictTools(active, p.Name(), p.BaseURL, toolSchemaGeneric)
-	var learned agentcore.ModelCapabilities
+	var learned protocol.ModelCapabilities
 	switchedMaxTokenField := false
 	retriedWithoutStrict := false
 	for {
@@ -286,29 +286,29 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (a
 		}
 		next, demotion, ok := withoutRejectedOpenAIHint(active, err)
 		if !ok {
-			return agentcore.ChatResponse{}, err
+			return protocol.ChatResponse{}, err
 		}
 		active = next
 		learned = learned.Overlay(demotion)
 	}
 }
 
-func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest, maxTokenField string) (agentcore.ChatResponse, error) {
+func (p *OpenAIProvider) chatOnce(ctx context.Context, req protocol.ChatRequest, maxTokenField string) (protocol.ChatResponse, error) {
 	body := p.encodeWithMaxTokenField(req, maxTokenField)
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/chat/completions", bytes.NewReader(raw))
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	setOptionalBearerAuth(httpReq, p.apiKey())
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	defer resp.Body.Close()
 	var data []byte
@@ -327,7 +327,7 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 	// On a 4xx/5xx the status is the more useful signal, so fall through and let
 	// the classification below run on whatever body arrived.
 	if readErr != nil && resp.StatusCode < 400 {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), nil,
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), nil,
 			fmt.Sprintf("truncated response body (status %d): %s", resp.StatusCode, describeReadErr(ctx, p.HTTP, readErr)))
 	}
 
@@ -341,7 +341,7 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 
 	// Classify by HTTP status BEFORE decoding the body. A 5xx/429 from a gateway
 	// often carries a non-JSON body (an HTML/text error page); decoding that first
-	// returns a plain decode error that agentcore.IsRetryable can't see as an agentcore.ProviderError,
+	// returns a plain decode error that protocol.IsRetryable can't see as an protocol.ProviderError,
 	// which turns a transient, retryable outage into a permanent failure that
 	// drops the turn. The streaming path already checks status first — mirror it.
 	// When the error body happens to be JSON with a structured message, surface it;
@@ -352,32 +352,32 @@ func (p *OpenAIProvider) chatOnce(ctx context.Context, req agentcore.ChatRequest
 		if json.Unmarshal(data, &errBody) == nil && errBody.Error != nil && errBody.Error.Message != "" {
 			message = errBody.Error.Message
 		}
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), resp, message)
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), resp, message)
 	}
 	if providerErr, ok := inBandProviderError(p.Name(), resp, data); ok {
-		return agentcore.ChatResponse{}, providerErr
+		return protocol.ChatResponse{}, providerErr
 	}
 
 	var decoded oaiResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return agentcore.ChatResponse{}, fmt.Errorf("decode openai response (status %d): %w", resp.StatusCode, err)
+		return protocol.ChatResponse{}, fmt.Errorf("decode openai response (status %d): %w", resp.StatusCode, err)
 	}
 	// A 2xx body can still carry a structured error (some compat gateways do this).
 	if decoded.Error != nil {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), resp, decoded.Error.Message)
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), resp, decoded.Error.Message)
 	}
 	if len(decoded.Choices) == 0 {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), resp, "unexpected response")
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), resp, "unexpected response")
 	}
 
 	choice := decoded.Choices[0]
-	msg := agentcore.Message{Role: agentcore.RoleAssistant, Content: choice.Message.Content}
+	msg := protocol.Message{Role: protocol.RoleAssistant, Content: choice.Message.Content}
 	for _, tc := range choice.Message.ToolCalls {
-		msg.ToolCalls = append(msg.ToolCalls, agentcore.ToolCall{
+		msg.ToolCalls = append(msg.ToolCalls, protocol.ToolCall{
 			ID: tc.ID, Name: tc.Function.Name, Arguments: string(ParseStreamingJSON(tc.Function.Arguments)),
 		})
 	}
-	return agentcore.ChatResponse{
+	return protocol.ChatResponse{
 		Message:    msg,
 		StopReason: choice.FinishReason,
 		Usage:      decoded.Usage.usage(),
@@ -397,12 +397,12 @@ func isSSEResponse(contentType string, data []byte) bool {
 // decodeSSEResponse folds an SSE chat-completions stream (already buffered into
 // data) into a single ChatResponse: concatenating content deltas, reassembling
 // tool-call fragments keyed by index, and keeping the last finish_reason/usage.
-func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (agentcore.ChatResponse, error) {
-	toolAcc := map[int]*agentcore.ToolCall{}
+func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (protocol.ChatResponse, error) {
+	toolAcc := map[int]*protocol.ToolCall{}
 	var order []int
 	var content strings.Builder
 	var stopReason string
-	var usage agentcore.Usage
+	var usage protocol.Usage
 	var gotChunk bool
 
 	sc := bufio.NewScanner(bytes.NewReader(data))
@@ -417,7 +417,7 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 			continue
 		}
 		if providerErr, ok := inBandProviderError(p.Name(), resp, []byte(payload)); ok {
-			return agentcore.ChatResponse{}, providerErr
+			return protocol.ChatResponse{}, providerErr
 		}
 		var chunk oaiStreamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
@@ -435,7 +435,7 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 		for _, tc := range choice.Delta.ToolCalls {
 			acc, ok := toolAcc[tc.Index]
 			if !ok {
-				acc = &agentcore.ToolCall{}
+				acc = &protocol.ToolCall{}
 				toolAcc[tc.Index] = acc
 				order = append(order, tc.Index)
 			}
@@ -456,7 +456,7 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 	// the handshake, not the outcome; stamping 200 onto the error would make
 	// IsRetryable read a transport failure as a permanent one and drop the turn.
 	if !gotChunk {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), nil, "empty SSE response")
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), nil, "empty SSE response")
 	}
 
 	// A stream that delivered no finish_reason AND nothing usable never ended — it
@@ -466,17 +466,17 @@ func decodeSSEResponse(p *OpenAIProvider, resp *http.Response, data []byte) (age
 	// itself a valid chunk. Requiring all three to be absent keeps gateways that
 	// simply omit finish_reason working, since those still return real output.
 	if stopReason == "" && content.Len() == 0 && len(order) == 0 {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), nil,
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), nil,
 			"truncated SSE response: no content, tool calls, or finish_reason")
 	}
 
-	msg := agentcore.Message{Role: agentcore.RoleAssistant, Content: content.String()}
+	msg := protocol.Message{Role: protocol.RoleAssistant, Content: content.String()}
 	for _, idx := range order {
 		call := *toolAcc[idx]
 		call.Arguments = string(ParseStreamingJSON(call.Arguments))
 		msg.ToolCalls = append(msg.ToolCalls, call)
 	}
-	return agentcore.ChatResponse{Message: msg, StopReason: stopReason, Usage: usage}, nil
+	return protocol.ChatResponse{Message: msg, StopReason: stopReason, Usage: usage}, nil
 }
 
 // --- streaming wire types (OpenAI chat-completions, stream=true) ---
@@ -500,14 +500,14 @@ type oaiStreamChunk struct {
 }
 
 // Stream performs a real token-streaming completion: it sets stream=true and
-// emits one agentcore.ChatDelta per server-sent content chunk, accumulating fragmented
+// emits one protocol.ChatDelta per server-sent content chunk, accumulating fragmented
 // tool-call deltas (which arrive piecewise, keyed by index) into whole ToolCalls
 // flushed before the terminal Done delta. The loop forwards content deltas to a
 // live SSE sink; tool execution is unchanged.
-func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *OpenAIProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	state, active, maxTokenField := p.adaptiveRequest(req)
 	strictState, active := prepareStrictTools(active, p.Name(), p.BaseURL, toolSchemaGeneric)
-	var learned agentcore.ModelCapabilities
+	var learned protocol.ModelCapabilities
 	switchedMaxTokenField := false
 	retriedWithoutStrict := false
 	for {
@@ -552,7 +552,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req agentcore.ChatRequest) 
 	}
 }
 
-func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatRequest, maxTokenField string) (<-chan agentcore.ChatDelta, error) {
+func (p *OpenAIProvider) streamOnce(ctx context.Context, req protocol.ChatRequest, maxTokenField string) (<-chan protocol.ChatDelta, error) {
 	body := p.encodeWithMaxTokenField(req, maxTokenField)
 	body.Stream = true
 	body.StreamOptions = &oaiStreamOptions{IncludeUsage: true}
@@ -575,20 +575,20 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 	if resp.StatusCode >= 400 {
 		data := readProviderErrorBody(resp.Body)
 		resp.Body.Close()
-		return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+		return nil, protocol.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 	}
 
-	ch := make(chan agentcore.ChatDelta, 16)
+	ch := make(chan protocol.ChatDelta, 16)
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
 		// Tool-call fragments arrive across chunks keyed by index; accumulate
 		// them in order and flush whole calls once the stream completes.
-		toolAcc := map[int]*agentcore.ToolCall{}
+		toolAcc := map[int]*protocol.ToolCall{}
 		var order []int
 		var stopReason string
-		var usage agentcore.Usage
+		var usage protocol.Usage
 		terminal := false
 
 		sc := bufio.NewScanner(resp.Body)
@@ -607,7 +607,7 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 				break
 			}
 			if providerErr, ok := inBandProviderError(p.Name(), resp, []byte(payload)); ok {
-				ch <- agentcore.ChatDelta{Done: true, Err: providerErr, Usage: usage}
+				ch <- protocol.ChatDelta{Done: true, Err: providerErr, Usage: usage}
 				return
 			}
 			var chunk oaiStreamChunk
@@ -622,12 +622,12 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 			}
 			choice := chunk.Choices[0]
 			if choice.Delta.Content != "" {
-				ch <- agentcore.ChatDelta{ContentDelta: choice.Delta.Content}
+				ch <- protocol.ChatDelta{ContentDelta: choice.Delta.Content}
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				acc, ok := toolAcc[tc.Index]
 				if !ok {
-					acc = &agentcore.ToolCall{}
+					acc = &protocol.ToolCall{}
 					toolAcc[tc.Index] = acc
 					order = append(order, tc.Index)
 				}
@@ -645,19 +645,19 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 			}
 		}
 		if err := sc.Err(); err != nil {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream read failed: "+err.Error()), Usage: usage}
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil, "stream read failed: "+err.Error()), Usage: usage}
 			return
 		}
 		if !terminal {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream ended before a terminal event"), Usage: usage}
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil, "stream ended before a terminal event"), Usage: usage}
 			return
 		}
 		for _, idx := range order {
 			tc := *toolAcc[idx]
 			tc.Arguments = string(ParseStreamingJSON(tc.Arguments))
-			ch <- agentcore.ChatDelta{ToolCall: &tc}
+			ch <- protocol.ChatDelta{ToolCall: &tc}
 		}
-		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
+		ch <- protocol.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
 	return ch, nil
 }
@@ -665,7 +665,7 @@ func (p *OpenAIProvider) streamOnce(ctx context.Context, req agentcore.ChatReque
 // --- embeddings (semantic memory recall, §14.7) ---
 
 // OpenAIEmbedder calls the OpenAI /embeddings endpoint, reusing the project's
-// BYO key and base_url. It backs the agentcore.Embedder seam so semantic recall
+// BYO key and base_url. It backs the protocol.Embedder seam so semantic recall
 // works for the OpenAI-wire provider family (OpenAI + compatible vendors) with
 // no extra credentials.
 type OpenAIEmbedder struct {
@@ -739,7 +739,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	// plain JSON decode error, which IsRetryable can't see, turning a transient
 	// truncation into a permanent embeddings failure.
 	if readErr != nil && resp.StatusCode < 400 {
-		return nil, agentcore.NewProviderError("openai-embeddings", nil,
+		return nil, protocol.NewProviderError("openai-embeddings", nil,
 			fmt.Sprintf("truncated embeddings body (status %d): %s", resp.StatusCode, describeReadErr(ctx, e.HTTP, readErr)))
 	}
 
@@ -749,7 +749,7 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 		if json.Unmarshal(data, &errorBody) == nil && errorBody.Error != nil && errorBody.Error.Message != "" {
 			message = errorBody.Error.Message
 		}
-		return nil, agentcore.NewProviderError("openai-embeddings", resp, message)
+		return nil, protocol.NewProviderError("openai-embeddings", resp, message)
 	}
 	if providerErr, ok := inBandProviderError("openai-embeddings", resp, data); ok {
 		return nil, providerErr
@@ -768,9 +768,9 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, texts []string) ([][]float32
 	return out, nil
 }
 
-// encode maps the neutral agentcore.ChatRequest onto the OpenAI wire format, honoring the
+// encode maps the neutral protocol.ChatRequest onto the OpenAI wire format, honoring the
 // compat table.
-func (p *OpenAIProvider) encode(req agentcore.ChatRequest) oaiRequest {
+func (p *OpenAIProvider) encode(req protocol.ChatRequest) oaiRequest {
 	return p.encodeWithMaxTokenField(req, p.maxTokensField())
 }
 
@@ -781,7 +781,7 @@ func (p *OpenAIProvider) maxTokensField() string {
 	return "max_tokens"
 }
 
-func (p *OpenAIProvider) encodeWithMaxTokenField(req agentcore.ChatRequest, maxTokenField string) oaiRequest {
+func (p *OpenAIProvider) encodeWithMaxTokenField(req protocol.ChatRequest, maxTokenField string) oaiRequest {
 	out := oaiRequest{
 		Model: req.Model, PromptCacheKey: req.CacheKey, ReasoningEffort: req.ReasoningEffort,
 		ToolChoice:        openAIChatToolChoice(req.ToolChoice, len(req.Tools) > 0),
@@ -812,9 +812,9 @@ func (p *OpenAIProvider) encodeWithMaxTokenField(req agentcore.ChatRequest, maxT
 		// Chat Completions tool messages are text-only. Preserve tool-call/result
 		// adjacency by batching every consecutive result first, then hoist their
 		// images into one user message (the same shape OMP uses).
-		if m.Role == agentcore.RoleTool {
+		if m.Role == protocol.RoleTool {
 			var attached []oaiContentPart
-			for ; i < len(req.Messages) && req.Messages[i].Role == agentcore.RoleTool; i++ {
+			for ; i < len(req.Messages) && req.Messages[i].Role == protocol.RoleTool; i++ {
 				tm := req.Messages[i]
 				images := messageImages(tm)
 				text := messageText(tm)
@@ -841,7 +841,7 @@ func (p *OpenAIProvider) encodeWithMaxTokenField(req agentcore.ChatRequest, maxT
 		}
 		content := any(messageText(m))
 		if images := messageImages(m); len(images) > 0 {
-			if allowImages && (m.Role == agentcore.RoleUser) {
+			if allowImages && (m.Role == protocol.RoleUser) {
 				parts := []oaiContentPart{}
 				if text := messageText(m); text != "" {
 					parts = append(parts, oaiContentPart{Type: "text", Text: text})

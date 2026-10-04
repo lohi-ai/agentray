@@ -2,6 +2,10 @@ package preset_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"testing"
 
@@ -9,7 +13,6 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/jobs"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
 	"github.com/lohi-ai/agentray/agentcore/plugins/repeatguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/sessionquery"
@@ -82,7 +85,6 @@ func fullConfig() agentcore.Config {
 			jobs.Local(),
 			sessionquery.OwnSession(),
 			subagent.SelfOnly(),
-			observe.LogInvariant{Report: func(observe.LogInvariantViolation) {}},
 		},
 	}
 }
@@ -151,13 +153,12 @@ func TestPresetIsAllRealPlugins(t *testing.T) {
 		names[p.Name()] = true
 	}
 	for _, want := range []string{
-		// seams: exactly one provider each (the driver seam is defaulted by
-		// Build, so no "loop" plugin appears here)
+		// seams: exactly one provider each
 		"model", "definition", "tools", "policy", "hooks", "goal",
 		"budget", "session", "memory", "compaction", "steering",
 		// extensions: additive capabilities the loop never names
 		"finish_guard", "repeat_guard", "spill", "jobs", "session_query",
-		"subagent", "log_invariant",
+		"subagent",
 	} {
 		if !names[want] {
 			t.Fatalf("the default composition is missing the %q plugin", want)
@@ -175,8 +176,7 @@ func TestFullIsPluginsPlusTheEjectables(t *testing.T) {
 
 	base := preset.Plugins(cfg)
 	full := preset.Full(cfg, preset.Options{
-		Spill:              spill.NewMemorySpillStore(),
-		ReportLogInvariant: func(observe.LogInvariantViolation) {},
+		Spill: spill.NewMemorySpillStore(),
 	})
 
 	if len(full) <= len(base) {
@@ -196,7 +196,7 @@ func TestFullIsPluginsPlusTheEjectables(t *testing.T) {
 		}
 		names[p.Name()] = true
 	}
-	for _, want := range []string{"spill", "jobs", "repeat_guard", "session_query", "observe", "log_invariant"} {
+	for _, want := range []string{"spill", "jobs", "repeat_guard", "session_query"} {
 		if !names[want] {
 			t.Fatalf("Full is missing the %q plugin", want)
 		}
@@ -211,14 +211,13 @@ func TestFullComposesCleanly(t *testing.T) {
 	cfg.Extensions = nil
 
 	agent, err := agentcore.Build(preset.Full(cfg, preset.Options{
-		Spill:              spill.NewMemorySpillStore(),
-		ReportLogInvariant: func(observe.LogInvariantViolation) {},
+		Spill: spill.NewMemorySpillStore(),
 	})...)
 	if err != nil {
 		t.Fatalf("Build(preset.Full): %v", err)
 	}
 	exts := extensionsLine(agent.Describe())
-	for _, want := range []string{"spill", "jobs", "repeat_guard", "session_query", "log_invariant"} {
+	for _, want := range []string{"spill", "jobs", "repeat_guard", "session_query"} {
 		if !strings.Contains(exts, want) {
 			t.Fatalf("%q did not reach the composed agent: %s", want, exts)
 		}
@@ -240,9 +239,6 @@ func TestFullDegradesWithoutStorage(t *testing.T) {
 	dump := agent.Describe()
 	if strings.Contains(extensionsLine(dump), "spill") {
 		t.Fatalf("spill installed with no store:\n%s", dump)
-	}
-	if strings.Contains(extensionsLine(dump), "log_invariant") {
-		t.Fatalf("the log invariant installed with nowhere to report:\n%s", dump)
 	}
 	// The capabilities that need no configuration are still there.
 	if !strings.Contains(extensionsLine(dump), "jobs") {
@@ -276,60 +272,61 @@ func TestJobToolsAreBookkeeping(t *testing.T) {
 	}
 }
 
-// TestFullGatesAResumedRun drives the composition end to end on the case that
-// motivates having a durable goal at all: a run is gated, it crashes, and the
-// process that picks it up does NOT know what it was gated on.
-//
-// The condition comes back from the log, not from configuration — the resuming
-// caller passes no goal — and the gate still refuses an answer without the
-// sentinel. That is the whole "resumes gated" claim, and it only holds if the
-// durable half (the seam) and the enforcing half (the extension) are both in the
-// composition. Running it through preset.Full is what proves the composition a
-// deployment actually builds has both.
+// TestFullGatesAResumedRun checkpoints a failed native run and restores it
+// through the deployment preset. The new host has no configured goal; only
+// the opaque checkpoint can re-arm the completion gate.
 func TestFullGatesAResumedRun(t *testing.T) {
 	ctx := context.Background()
-	store := agentcore.NewMemorySessionStore()
-
-	// The crashed run's log: it was gated, it produced no leaf.
-	for _, e := range []agentcore.SessionEntry{
-		{Kind: agentcore.EntryGoal, Goal: "STATUS: DONE appears"},
-		{Kind: agentcore.EntryMessage, Message: &agentcore.Message{Role: agentcore.RoleUser, Content: "count the beans"}},
-	} {
-		if err := store.Append(ctx, "s-crashed", e); err != nil {
-			t.Fatalf("seed log: %v", err)
-		}
+	retry := agentcore.RetryPolicy{MaxAttempts: 1}
+	provider := func(stream ai.StreamFn) *ai.FallbackProvider {
+		return &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: stream}}}
+	}
+	cfg := agentcore.Config{
+		NativeProvider: provider(func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+			return nil, errors.New("provider unavailable")
+		}),
+		Model: "test", Goal: "count the beans", Retry: &retry,
+	}
+	opts := preset.Options{Spill: spill.NewMemorySpillStore(), NativeHistory: true}
+	first, err := agentcore.Build(preset.Full(cfg, opts)...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := first.Prompt(ctx, "count the beans")
+	if err == nil || len(failed.NativeState) == 0 {
+		t.Fatalf("expected checkpointed failure: %v", err)
 	}
 
-	// First answer omits the sentinel and must be refused; the second carries it.
-	provider := agentcore.NewFauxProvider(
-		agentcore.AssistantText("42 beans"),
-		agentcore.AssistantText("42 beans. STATUS: DONE"),
+	calls := 0
+	script := ai.ScriptedStream(
+		ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "42 beans"})},
+		ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "42 beans.\nSTATUS: DONE"})},
 	)
-	cfg := fullConfig()
-	cfg.Extensions = nil
-	cfg.Provider = provider
-	cfg.Session = store
-	cfg.SessionID = "s-crashed"
-	cfg.ResumeSession = true
-	// The resuming caller does not know the condition. That is the point.
+	cfg.NativeProvider = provider(func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		calls++
+		if calls == 2 {
+			raw, _ := json.Marshal(view.Messages())
+			if !strings.Contains(string(raw), "[goal gate]") {
+				t.Error("recovered goal did not add its continuation nudge")
+			}
+		}
+		return script(ctx, model, view, options)
+	})
 	cfg.Goal = ""
-
-	agent, err := agentcore.Build(preset.Full(cfg, preset.Options{
-		Spill:              spill.NewMemorySpillStore(),
-		ReportLogInvariant: func(observe.LogInvariantViolation) {},
-	})...)
+	resumed, err := agentcore.Build(preset.Full(cfg, opts)...)
 	if err != nil {
-		t.Fatalf("Build(preset.Full): %v", err)
+		t.Fatal(err)
 	}
-	res, err := agent.Prompt(ctx, "continue")
+	res, err := resumed.RunNative(ctx, agentcore.NativeRun{State: failed.NativeState, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "continue"}}})
 	if err != nil {
-		t.Fatalf("Prompt: %v", err)
+		t.Fatal(err)
 	}
-	if len(provider.Recorded) < 2 {
-		t.Fatalf("the recovered goal did not gate the run — %d provider calls, want the sentinel-less answer re-opened", len(provider.Recorded))
+	if calls != 2 || !strings.Contains(res.Final, "STATUS: DONE") {
+		t.Fatalf("recovered goal failed to gate: calls=%d final=%q", calls, res.Final)
 	}
-	if !strings.Contains(res.Final, "STATUS: DONE") {
-		t.Fatalf("the run stopped without meeting its recovered goal: %q", res.Final)
+	var checkpoint struct{ Goal string }
+	if err := json.Unmarshal(res.NativeState, &checkpoint); err != nil || checkpoint.Goal != "count the beans" {
+		t.Fatalf("resumed checkpoint lost goal: %+v %v", checkpoint, err)
 	}
 }
 
@@ -379,29 +376,15 @@ func TestEjectRemovesEveryTrace(t *testing.T) {
 	}
 }
 
-// TestReplaceSwapsOneSeam is the payoff: changing the control flow is a
-// one-line edit to a plugin list, with every other plugin — including
-// governance — untouched. The driver seam has no preset entry, so a custom
-// driver is a plugin whose Register claims it via SetDriver.
 func TestReplaceSwapsOneSeam(t *testing.T) {
-	drv := &recordingDriver{answer: "from the custom driver"}
-	list := preset.Replace(preset.Plugins(fullConfig()), driverPlugin{drv})
-
+	list := preset.Replace(preset.Plugins(fullConfig()), agentcore.PolicyDenyAll())
 	agent, err := agentcore.Build(list...)
 	if err != nil {
-		t.Fatalf("Build: %v", err)
+		t.Fatal(err)
 	}
-	res, err := agent.Prompt(context.Background(), "go")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if res.Final != "from the custom driver" {
-		t.Fatalf("the replacement driver did not run: %q", res.Final)
-	}
-	// And the rest of the composition survived the swap.
-	d := agent.Describe()
-	if !describes(d, "goal", "ship it") {
-		t.Fatalf("replacing the loop disturbed other plugins:\n%s", d)
+	description := agent.Describe()
+	if !describes(description, "policy", "agentcore.DenyAll") || !describes(description, "goal", "ship it") {
+		t.Fatalf("policy replacement disturbed the composition:\n%s", description)
 	}
 }
 
@@ -469,23 +452,6 @@ func describes(dump, key, value string) bool {
 	return false
 }
 
-// driverPlugin claims the driver seam — the two-line plugin a composition
-// writes when it wants control flow other than agentcore's default.
-type driverPlugin struct{ d agentcore.Driver }
-
-func (driverPlugin) Name() string { return "loop" }
-
-func (p driverPlugin) Register(r *agentcore.Registry) error { return r.SetDriver(p.d) }
-
-// recordingDriver replaces the loop with a canned answer.
-type recordingDriver struct{ answer string }
-
-func (d *recordingDriver) Name() string { return "recording" }
-
-func (d *recordingDriver) Drive(ctx context.Context, a *agentcore.Agent, msgs []agentcore.Message, task string, sink agentcore.StreamSink, emit func(agentcore.StreamEvent)) (agentcore.RunResult, error) {
-	return agentcore.RunResult{Final: d.answer, Turns: 1}, nil
-}
-
 // extensionsLine returns the "extensions:" line of a Describe() dump.
 func extensionsLine(desc string) string {
 	for _, line := range strings.Split(desc, "\n") {
@@ -543,7 +509,6 @@ func TestEveryPluginSharesOneInterface(t *testing.T) {
 		jobs.Local(),
 		sessionquery.OwnSession(),
 		subagent.SelfOnly(),
-		observe.LogInvariant{},
 	}
 	for _, p := range extensions {
 		f, ok := p.(agentcore.ExtensionFactory)
@@ -568,15 +533,13 @@ func TestEveryPluginSharesOneInterface(t *testing.T) {
 // explicit no-tools stance).
 //
 // They need their own test precisely because preset.Plugins never names them:
-// without this, the only thing holding todo.Plugin, observe.Hooks and friends
+// without this, the only thing holding todo.Plugin and friends
 // to the plugin contract is that they happen to compile, and plugins/README.md's
 // claim that every capability is the same two-method value would be unchecked
 // for exactly the half of the surface that lives outside the default agent.
 func TestOptInPluginsShareTheSameInterface(t *testing.T) {
 	optIn := []agentcore.Plugin{
 		todo.With(todo.NewStore()),
-		observe.Hooks{Label: "audit", OnAgentEnd: []agentcore.AgentEndHook{func(context.Context, agentcore.RunResult) {}}},
-		observe.Monitor{Sink: observe.SinkFunc(func(observe.TraceRecord) {})},
 		agentcore.PolicyDenyAll(),
 		sessionquery.Via(stubQuery{}),
 	}
@@ -596,21 +559,13 @@ func TestOptInPluginsShareTheSameInterface(t *testing.T) {
 		t.Fatalf("BuildRegistry with the opt-in plugins: %v", err)
 	}
 	// Each one leaves the trace its KIND is supposed to leave: todo a tool,
-	// monitor a provider decorator, session_query an extension, observe a
-	// listener. Read off the REGISTRY dump, which is the only one that reports
-	// contributions (a provider decorator is invisible once composed).
+	// session_query an extension. Read the registry before building.
 	regDump := reg.Describe()
-	if !strings.Contains(regDump, todo.ToolName) {
-		t.Fatalf("todo did not contribute its tool:\n%s", regDump)
-	}
-	if !strings.Contains(regDump, "provider_wrappers: 1") {
-		t.Fatalf("monitor did not contribute its provider decorator:\n%s", regDump)
+	if !strings.Contains(extensionsLine(regDump), "todo") {
+		t.Fatalf("todo did not install its run extension:\n%s", regDump)
 	}
 	if !strings.Contains(extensionsLine(regDump), "session_query") {
 		t.Fatalf("session_query did not install its extension:\n%s", regDump)
-	}
-	if strings.Contains(regDump, "agent_end=0") {
-		t.Fatalf("observe.Hooks did not register its listeners:\n%s", regDump)
 	}
 
 	agent, err := reg.Agent()
@@ -637,7 +592,6 @@ func (stubQuery) Search(context.Context, sessionquery.SessionQueryRequest) (sess
 // confusion the seam/extension distinction exists to prevent.
 func TestSeamsAreNotExtensions(t *testing.T) {
 	seams := []agentcore.Plugin{
-		driverPlugin{agentcore.DefaultDriver()},
 		agentcore.PolicyAllowList("echo"),
 		agentcore.CompactionPlugin{},
 		agentcore.ToolsOf(&echoTool{name: "echo"}),

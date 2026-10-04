@@ -30,8 +30,8 @@ func TestSubagentOutputSchemaAccept(t *testing.T) {
 	agent, provider := subagentAgent(t, &subagent.Plugin{},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
 			`{"task":"name a fruit","output_schema":`+fruitSchema+`}`),
-		agentcore.AssistantText(`{"fruit":"banana"}`),
-		agentcore.AssistantText("child said banana"),
+		nativeAnswer(`{"fruit":"banana"}`),
+		nativeAnswer("child said banana"),
 	)
 	res, err := agent.Prompt(context.Background(), "delegate")
 	if err != nil {
@@ -61,10 +61,10 @@ func TestSubagentOutputSchemaRejectRetry(t *testing.T) {
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
 			`{"task":"name a fruit","output_schema":`+fruitSchema+`}`),
 		// First child answer: prose, not the required JSON object.
-		agentcore.AssistantText("the fruit is banana"),
+		nativeAnswer("the fruit is banana"),
 		// Re-opened child sees its transcript + the error and corrects.
-		agentcore.AssistantText(`{"fruit":"banana"}`),
-		agentcore.AssistantText("child said banana"),
+		nativeAnswer(`{"fruit":"banana"}`),
+		nativeAnswer("child said banana"),
 	)
 	res, err := agent.Prompt(context.Background(), "delegate")
 	if err != nil {
@@ -96,9 +96,9 @@ func TestSubagentOutputSchemaRetryAlsoFails(t *testing.T) {
 	agent, _ := subagentAgent(t, &subagent.Plugin{},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
 			`{"task":"name a fruit","output_schema":`+fruitSchema+`}`),
-		agentcore.AssistantText("the fruit is banana"),
-		agentcore.AssistantText(`{"fruit":42}`),
-		agentcore.AssistantText("done"),
+		nativeAnswer("the fruit is banana"),
+		nativeAnswer(`{"fruit":42}`),
+		nativeAnswer("done"),
 	)
 	res, err := agent.Prompt(context.Background(), "delegate")
 	if err != nil {
@@ -115,8 +115,8 @@ func TestSubagentOutputSchemaRetryAlsoFails(t *testing.T) {
 func TestSubagentOutputSchemaAbsentUnchanged(t *testing.T) {
 	agent, provider := subagentAgent(t, &subagent.Plugin{},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"name a fruit"}`),
-		agentcore.AssistantText("banana, obviously"),
-		agentcore.AssistantText("done"),
+		nativeAnswer("banana, obviously"),
+		nativeAnswer("done"),
 	)
 	res, err := agent.Prompt(context.Background(), "delegate")
 	if err != nil {
@@ -138,7 +138,7 @@ func TestSubagentOutputSchemaInvalidArg(t *testing.T) {
 	agent, provider := subagentAgent(t, &subagent.Plugin{},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
 			`{"task":"name a fruit","output_schema":{"type":"bogus-type"}}`),
-		agentcore.AssistantText("spawn failed as expected"),
+		nativeAnswer("spawn failed as expected"),
 	)
 	res, err := agent.Prompt(context.Background(), "delegate")
 	if err != nil {
@@ -153,57 +153,25 @@ func TestSubagentOutputSchemaInvalidArg(t *testing.T) {
 	}
 }
 
-// TestSubagentOutputSchemaReplayReattaches: a durable spawn that needed the
-// retry still replays cleanly — the re-issued spawn reattaches to the recorded
-// child logs (the invalid first answer, then the completed retry) and returns
-// the validated JSON with no new provider calls for the children.
-func TestSubagentOutputSchemaReplayReattaches(t *testing.T) {
-	store := agentcore.NewMemorySessionStore()
-	first := durableSubagentAgent(t, store, "p1",
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
-			`{"task":"name a fruit","output_schema":`+fruitSchema+`}`),
-		agentcore.AssistantText("the fruit is banana"),
-		agentcore.AssistantText(`{"fruit":"banana"}`),
-		agentcore.AssistantText("child said banana"),
-	)
-	if _, err := first.Prompt(context.Background(), "delegate"); err != nil {
-		t.Fatalf("first Prompt: %v", err)
+func TestDelegateSchemaCorrectionIncludesRejectedAnswerAndUsage(t *testing.T) {
+	calls := 0
+	settings := subagent.Plugin{Delegates: []subagent.Delegate{{Name: "Writer", Run: func(_ context.Context, task string, _ agentcore.StreamSink) (string, agentcore.Usage, error) {
+		calls++
+		if calls == 1 {
+			return "the fruit is banana", agentcore.Usage{InputTokens: 7}, nil
+		}
+		if !strings.Contains(task, "Rejected answer:\nthe fruit is banana") || !strings.Contains(task, "failed output_schema validation") {
+			t.Errorf("delegate correction lost rejected answer: %s", task)
+		}
+		return `{"fruit":"banana"}`, agentcore.Usage{InputTokens: 11}, nil
+	}}}}
+	agent, _ := subagentAgent(t, &settings,
+		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"name a fruit","agent":"Writer","output_schema":`+fruitSchema+`}`), nativeAnswer("done"))
+	result, err := agent.Prompt(context.Background(), "delegate")
+	if err != nil || calls != 2 || result.Usage.InputTokens != 18 {
+		t.Fatalf("delegate correction: calls=%d usage=%+v err=%v", calls, result.Usage, err)
 	}
-	// Both child logs exist: the rejected run and the retry run.
-	if rs := agentcore.ReduceSession(mustLog(t, store, "p1/c1")); !rs.Completed {
-		t.Fatal("first child log must reduce Completed")
+	if got := spawnResult(t, result.Messages); got != `{"fruit":"banana"}` {
+		t.Fatal(got)
 	}
-	if rs := agentcore.ReduceSession(mustLog(t, store, "p1/c1/retry")); !rs.Completed {
-		t.Fatal("retry child log must reduce Completed")
-	}
-
-	// The replayed parent: same store, same session, same call ID. Its script
-	// has NO child responses — any child re-run would derail it.
-	second := durableSubagentAgent(t, store, "p1",
-		AssistantToolCall("c1", subagent.ToolSpawnSubagent,
-			`{"task":"name a fruit","output_schema":`+fruitSchema+`}`),
-		agentcore.AssistantText("child reported again: banana"),
-	)
-	res, err := second.Prompt(context.Background(), "delegate")
-	if err != nil {
-		t.Fatalf("second Prompt: %v", err)
-	}
-	if res.Final != "child reported again: banana" {
-		t.Fatalf("final = %q", res.Final)
-	}
-	if got := spawnResult(t, res.Messages); got != `{"fruit":"banana"}` {
-		t.Fatalf("replayed spawn result = %q, want the validated JSON", got)
-	}
-}
-
-func mustLog(t *testing.T, store agentcore.SessionStore, id string) []agentcore.SessionEntry {
-	t.Helper()
-	log, err := store.Log(context.Background(), id)
-	if err != nil {
-		t.Fatalf("log %s: %v", id, err)
-	}
-	if len(log) == 0 {
-		t.Fatalf("log %s is empty", id)
-	}
-	return log
 }

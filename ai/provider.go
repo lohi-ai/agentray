@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Model is one entry from a provider's live list-models response. IDs are
@@ -27,12 +27,12 @@ type Model struct {
 	ContextWindow int `json:"context_window,omitempty"`
 	// Capabilities is sparse tri-state metadata. Missing fields mean unknown,
 	// not unsupported; explicit live discovery values refine adapter defaults.
-	Capabilities agentcore.ModelCapabilities `json:"capabilities,omitempty"`
+	Capabilities protocol.ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 // Provider is the runtime unit: identity, auth, live model list, Chat/Stream.
 type Provider interface {
-	agentcore.LLMProvider
+	protocol.LLMProvider
 	ID() string
 	Vendor() string
 	DisplayName() string
@@ -99,16 +99,16 @@ func APIKeyOptional(vendor string) bool {
 // ChatResponse. Codex and Antigravity have no non-streaming wire, so their
 // Chat is this loop — kept once here so drain semantics (mid-stream error,
 // usage capture, stop reason) can't drift between two copies.
-func chatViaStream(ctx context.Context, p agentcore.LLMProvider, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func chatViaStream(ctx context.Context, p protocol.LLMProvider, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	ch, err := p.Stream(ctx, req)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
-	var resp agentcore.ChatResponse
-	resp.Message.Role = agentcore.RoleAssistant
+	var resp protocol.ChatResponse
+	resp.Message.Role = protocol.RoleAssistant
 	for d := range ch {
 		if d.Err != nil {
-			return agentcore.ChatResponse{}, d.Err
+			return protocol.ChatResponse{}, d.Err
 		}
 		resp.Message.Content += d.ContentDelta
 		if d.ToolCall != nil {

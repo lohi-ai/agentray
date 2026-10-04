@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 type toolSchemaDialect uint8
@@ -87,13 +87,13 @@ func toolParameters(parameters map[string]any, dialect toolSchemaDialect) map[st
 // refuses that rewrite because its canonical validator would then reject a
 // generated null. A schema that cannot preserve its argument semantics simply
 // runs non-strict and retains full local validation.
-func projectedToolParameters(schema agentcore.ToolSchema, dialect toolSchemaDialect) (map[string]any, *bool) {
+func projectedToolParameters(schema protocol.ToolSchema, dialect toolSchemaDialect) (map[string]any, *bool) {
 	parameters := toolParameters(schema.Parameters, dialect)
 	switch schema.Strict {
-	case agentcore.ToolStrictDisabled:
+	case protocol.ToolStrictDisabled:
 		value := false
 		return parameters, &value
-	case agentcore.ToolStrictEnabled:
+	case protocol.ToolStrictEnabled:
 		strict, ok := cloneJSONMap(parameters)
 		if !ok {
 			return parameters, nil

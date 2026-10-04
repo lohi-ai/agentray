@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -117,7 +117,7 @@ func runShape(turns, compactEvery int) [][]agentcore.Message {
 // feed writes one request sequence through the sink as a session's calls.
 func feed(sink *storeTraceSink, traceID, session string, reqs [][]agentcore.Message) {
 	for _, r := range reqs {
-		sink.Record(observe.TraceRecord{
+		sink.Record(llm.TraceRecord{
 			TraceID:    traceID,
 			SessionKey: session,
 			Provider:   "p",
@@ -173,7 +173,7 @@ func TestTraceReasoningBlocksPersistAndReplayExactly(t *testing.T) {
 	block := agentcore.ReasoningBlock{
 		Type: agentcore.ReasoningBlockThinking, Text: "opaque", Signature: "sig", ReplayScope: "anthropic:scope",
 	}
-	sink.Record(observe.TraceRecord{
+	sink.Record(llm.TraceRecord{
 		TraceID: "run-1", Provider: "anthropic", Model: "claude-test",
 		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "hi"}},
 		Response: "done", ReasoningBlocks: []agentcore.ReasoningBlock{block},
@@ -285,7 +285,7 @@ func TestTraceSeparatesSubagentSessions(t *testing.T) {
 	// Interleave them the way a parent that delegates every other turn does.
 	for i := range parent {
 		feed(sink, "run-1", "run-1", parent[i:i+1])
-		sink.Record(observe.TraceRecord{
+		sink.Record(llm.TraceRecord{
 			TraceID: "run-1", SessionKey: "run-1/call-" + fmt.Sprint(i), Depth: 1,
 			Provider: "p", Model: "m", Messages: child[i],
 		})

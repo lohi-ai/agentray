@@ -2,6 +2,9 @@ package goal_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"testing"
 
@@ -12,15 +15,15 @@ import (
 // TestGoalGateHoldsUntilDone verifies a finish without a sentinel re-opens the
 // run with the keep-going nudge, and a later STATUS: DONE answer is accepted.
 func TestGoalGateHoldsUntilDone(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("made some progress"),
-		agentcore.AssistantText("still working on it"),
-		agentcore.AssistantText("all fixed.\nSTATUS: DONE"),
+	faux := newNativeScript(
+		nativeAnswer("made some progress"),
+		nativeAnswer("still working on it"),
+		nativeAnswer("all fixed.\nSTATUS: DONE"),
 	)
 	agent, err := agentcore.New(gated(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
-		Goal:     "all tests pass",
+		NativeProvider: faux.Provider,
+		Model:          "test",
+		Goal:           "all tests pass",
 	}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -61,10 +64,10 @@ func TestGoalGateHoldsUntilDone(t *testing.T) {
 // TestGoalGateAcceptsBlocked verifies the honest-blocker escape hatch: a
 // STATUS: BLOCKED answer ends the run on the first finish.
 func TestGoalGateAcceptsBlocked(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("Need prod credentials only you have.\nSTATUS: BLOCKED"),
+	faux := newNativeScript(
+		nativeAnswer("Need prod credentials only you have.\nSTATUS: BLOCKED"),
 	)
-	agent, err := agentcore.New(gated(agentcore.Config{Provider: faux, Model: "test", Goal: "deploy to prod"}))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "deploy to prod"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -82,8 +85,8 @@ func TestGoalGateAcceptsBlocked(t *testing.T) {
 
 // TestGoalGateCaseInsensitive verifies sentinel matching tolerates casing.
 func TestGoalGateCaseInsensitive(t *testing.T) {
-	faux := agentcore.NewFauxProvider(agentcore.AssistantText("Everything works now. Status: done"))
-	agent, err := agentcore.New(gated(agentcore.Config{Provider: faux, Model: "test", Goal: "make it work"}))
+	faux := newNativeScript(nativeAnswer("Everything works now. Status: done"))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "make it work"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -99,11 +102,11 @@ func TestGoalGateCaseInsensitive(t *testing.T) {
 // sentinel does not close the gate: only the answer's last non-empty line
 // counts, per the contract's "end your final answer with the line".
 func TestGoalGateSentinelMustCloseAnswer(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("I cannot yet write STATUS: DONE — the tests still fail.\nNext I will retry the flaky suite."),
-		agentcore.AssistantText("all green now.\nSTATUS: DONE"),
+	faux := newNativeScript(
+		nativeAnswer("I cannot yet write STATUS: DONE — the tests still fail.\nNext I will retry the flaky suite."),
+		nativeAnswer("all green now.\nSTATUS: DONE"),
 	)
-	agent, err := agentcore.New(gated(agentcore.Config{Provider: faux, Model: "test", Goal: "all tests pass"}))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "all tests pass"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -119,61 +122,51 @@ func TestGoalGateSentinelMustCloseAnswer(t *testing.T) {
 	}
 }
 
-// TestGoalGateSurvivesResume verifies a crashed goal-gated run resumed WITHOUT
-// re-supplying Config.Goal is still gated: the goal comes back from the durable
-// log's agentcore.EntryGoal record.
+// A failed run's native checkpoint restores the goal even when the consumer
+// cannot re-supply Config.Goal. The recovered gate must still reject a finish
+// without the completion sentinel.
 func TestGoalGateSurvivesResume(t *testing.T) {
-	store := agentcore.NewMemorySessionStore()
 	ctx := context.Background()
-	// Simulate the crashed run's log: the goal record plus the seed prompt,
-	// no leaf.
-	for _, e := range []agentcore.SessionEntry{
-		{Kind: agentcore.EntryGoal, Goal: "the report is published"},
-		{Kind: agentcore.EntryMessage, Message: &agentcore.Message{Role: agentcore.RoleUser, Content: "publish the report"}},
-	} {
-		if err := store.Append(ctx, "sess-goal-resume", e); err != nil {
-			t.Fatalf("Append: %v", err)
-		}
-	}
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("resumed, still working"),
-		agentcore.AssistantText("published.\nSTATUS: DONE"),
-	)
-	agent, err := agentcore.New(gated(agentcore.Config{
-		Provider:      faux,
-		Model:         "test",
-		Session:       store,
-		SessionID:     "sess-goal-resume",
-		ResumeSession: true,
-		// Goal deliberately empty: the resume caller cannot re-supply it.
-	}))
+	retry := agentcore.RetryPolicy{MaxAttempts: 1}
+	first, err := agentcore.New(gated(agentcore.Config{NativeProvider: nativeProvider(func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+		return nil, errors.New("provider unavailable")
+	}), Model: "test", Goal: "the report is published", Retry: &retry}))
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatal(err)
 	}
-	res, err := agent.Prompt(context.Background(), "resume")
+	failed, err := first.Prompt(ctx, "publish the report")
+	if err == nil || len(failed.NativeState) == 0 {
+		t.Fatalf("expected checkpointed failure: %v", err)
+	}
+	faux := newNativeScript(nativeAnswer("resumed, still working"), nativeAnswer("published.\nSTATUS: DONE"))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test"}))
 	if err != nil {
-		t.Fatalf("Prompt: %v", err)
+		t.Fatal(err)
+	}
+	res, err := agent.RunNative(ctx, agentcore.NativeRun{State: failed.NativeState, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "resume"}}})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(faux.Recorded) != 2 {
-		t.Fatalf("provider calls = %d, want 2 — the recovered goal must nudge the sentinel-free finish", len(faux.Recorded))
+		t.Fatalf("recovered goal did not nudge: %d requests", len(faux.Recorded))
 	}
-	sys := faux.Recorded[0].Messages[0]
-	if sys.Role != agentcore.RoleSystem || !strings.Contains(sys.Content, "the report is published") {
-		t.Fatalf("goal contract missing from resumed system prompt: %q", sys.Content)
+	var saved struct{ Goal string }
+	if err := json.Unmarshal(res.NativeState, &saved); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(res.Final, "STATUS: DONE") {
-		t.Fatalf("final = %q, want the STATUS: DONE answer", res.Final)
+	if saved.Goal != "the report is published" || !strings.Contains(res.Final, goal.Done) {
+		t.Fatalf("goal lost on resume: %+v %q", saved, res.Final)
 	}
 }
 
 // TestGoalGateStallBreaker verifies a model repeating the same sentinel-free
 // answer after a nudge stops the run as goal_stalled instead of burning turns.
 func TestGoalGateStallBreaker(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("I cannot make further progress."),
-		agentcore.AssistantText("I cannot make further progress."),
+	faux := newNativeScript(
+		nativeAnswer("I cannot make further progress."),
+		nativeAnswer("I cannot make further progress."),
 	)
-	agent, err := agentcore.New(gated(agentcore.Config{Provider: faux, Model: "test", Goal: "impossible thing"}))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "impossible thing"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -195,12 +188,12 @@ func TestGoalGateStallBreaker(t *testing.T) {
 // TestGoalGateSkippedOnBudgetWrapUp verifies the budget ceiling always wins:
 // a wrap-up turn ends the run even without a sentinel.
 func TestGoalGateSkippedOnBudgetWrapUp(t *testing.T) {
-	faux := agentcore.NewFauxProvider(agentcore.AssistantText("partial progress summary"))
+	faux := newNativeScript(nativeAnswer("partial progress summary"))
 	agent, err := agentcore.New(gated(agentcore.Config{
-		Provider:   faux,
-		Model:      "test",
-		Goal:       "never satisfied",
-		BudgetGate: func(context.Context, agentcore.Usage) bool { return true },
+		NativeProvider: faux.Provider,
+		Model:          "test",
+		Goal:           "never satisfied",
+		BudgetGate:     func(context.Context, agentcore.Usage) bool { return true },
 	}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -220,15 +213,15 @@ func TestGoalGateSkippedOnBudgetWrapUp(t *testing.T) {
 // TestGoalGateBoundedByMaxTurns verifies an ever-changing sentinel-free answer
 // still terminates at the MaxTurns budget.
 func TestGoalGateBoundedByMaxTurns(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("attempt one"),
-		agentcore.AssistantText("attempt two"),
-		agentcore.AssistantText("attempt three"),
-		agentcore.AssistantText("attempt four"),
+	faux := newNativeScript(
+		nativeAnswer("attempt one"),
+		nativeAnswer("attempt two"),
+		nativeAnswer("attempt three"),
+		nativeAnswer("attempt four"),
 	)
 	limits := agentcore.DefaultLimits()
 	limits.MaxTurns = 3
-	agent, err := agentcore.New(gated(agentcore.Config{Provider: faux, Model: "test", Goal: "unreachable", Limits: &limits}))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "unreachable", Limits: &limits}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -239,44 +232,39 @@ func TestGoalGateBoundedByMaxTurns(t *testing.T) {
 	if res.StopReason != "max_turns" {
 		t.Fatalf("stop reason = %q, want max_turns", res.StopReason)
 	}
-	if len(faux.Recorded) != 3 {
-		t.Fatalf("provider calls = %d, want 3 (MaxTurns bound)", len(faux.Recorded))
+	if len(faux.Recorded) != 4 {
+		t.Fatalf("provider calls = %d, want 3 work turns plus one tool-free wrap-up", len(faux.Recorded))
 	}
 }
 
-// TestGoalGateNudgePersistedDurably verifies the injected nudge lands in the
-// durable log, so a resumed run replays the same conversation the model saw.
+// Corrective input must survive checkpoint serialization so the next run sees
+// the same native transcript, including the gate's earlier nudge.
 func TestGoalGateNudgePersistedDurably(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("not there yet"),
-		agentcore.AssistantText("done now.\nSTATUS: DONE"),
-	)
-	store := agentcore.NewMemorySessionStore()
-	agent, err := agentcore.New(gated(agentcore.Config{
-		Provider:  faux,
-		Model:     "test",
-		Goal:      "finish the report",
-		Session:   store,
-		SessionID: "sess-goal",
-	}))
+	faux := newNativeScript(nativeAnswer("not there yet"), nativeAnswer("done now.\nSTATUS: DONE"))
+	agent, err := agentcore.New(gated(agentcore.Config{NativeProvider: faux.Provider, Model: "test", Goal: "finish the report"}))
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := agent.Prompt(context.Background(), "start"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	entries, err := store.Log(context.Background(), "sess-goal")
+	result, err := agent.Prompt(context.Background(), "start")
 	if err != nil {
-		t.Fatalf("Log: %v", err)
+		t.Fatal(err)
 	}
-	var found bool
-	for _, e := range entries {
-		if e.Kind == agentcore.EntryMessage && e.Message != nil && e.Message.Role == agentcore.RoleUser && strings.Contains(e.Message.Content, "[goal gate]") {
+	resumed := newNativeScript(nativeAnswer("still done.\nSTATUS: DONE"))
+	agent, err = agentcore.New(gated(agentcore.Config{NativeProvider: resumed.Provider, Model: "test"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunNative(context.Background(), agentcore.NativeRun{State: result.NativeState, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "continue"}}}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range resumed.Recorded[0].Messages {
+		if m.Role == agentcore.RoleUser && strings.Contains(m.Content, "[goal gate]") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("goal nudge not persisted to the durable log (%d entries)", len(entries))
+		t.Fatal("checkpoint lost the goal nudge")
 	}
 }
 
@@ -284,16 +272,16 @@ func TestGoalGateNudgePersistedDurably(t *testing.T) {
 // without consulting the finish guard; the guard sees only sentinel-bearing
 // finishes.
 func TestGoalGateRunsBeforeFinishGuard(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("no sentinel yet"),
-		agentcore.AssistantText("finished.\nSTATUS: DONE"),
+	faux := newNativeScript(
+		nativeAnswer("no sentinel yet"),
+		nativeAnswer("finished.\nSTATUS: DONE"),
 	)
 	var guardSaw []string
 	agent, err := agentcore.New(gated(agentcore.Config{
-		Provider:   faux,
-		Model:      "test",
-		Goal:       "do the thing",
-		Extensions: []agentcore.ExtensionFactory{recordingStopper{seen: &guardSaw}},
+		NativeProvider: faux.Provider,
+		Model:          "test",
+		Goal:           "do the thing",
+		Extensions:     []agentcore.ExtensionFactory{recordingStopper{seen: &guardSaw}},
 	}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -332,8 +320,21 @@ func gated(cfg agentcore.Config) agentcore.Config {
 	// any verify-on-stop extension does. preset.New encodes the same ordering.
 	//
 	// Installed even when cfg.Goal is empty — a resumed run recovers its goal
-	// from the durable log, and an extension that was never registered cannot
+	// from its native checkpoint, and an extension that was never registered cannot
 	// enforce it.
 	cfg.Extensions = append([]agentcore.ExtensionFactory{goal.Until(cfg.Goal)}, cfg.Extensions...)
 	return cfg
+}
+
+func TestPublicTextAndStreamTailHideOnlyClosingProtocol(t *testing.T) {
+	if got := goal.PublicText("answer\n**STATUS: DONE**\n"); got != "answer" {
+		t.Fatal(got)
+	}
+	if got := goal.StripStatusLine(" words tiếp theo\nSTATUS: BLOCKED"); got != " words tiếp theo" {
+		t.Fatal(got)
+	}
+	text := "I cannot claim STATUS: DONE yet.\nMore work remains."
+	if goal.PublicText(text) != text {
+		t.Fatal("ordinary prose was removed")
+	}
 }

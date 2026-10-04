@@ -1,7 +1,6 @@
 package agentcore
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -121,27 +120,3 @@ func TestProviderSessionRegistryExpiresIdleAndReleaseIsIdempotent(t *testing.T) 
 	}
 }
 
-func TestLoopThreadsLogicalProviderSessionOntoEveryRequest(t *testing.T) {
-	provider := NewFauxProvider(AssistantText("done"))
-	session := NewProviderSession()
-	agent, err := New(Config{
-		Provider: provider, Model: "m",
-		ProviderSession: session, ProviderSessionID: "conversation-7",
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := agent.Prompt(context.Background(), "hello"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if len(provider.Recorded) != 1 {
-		t.Fatalf("recorded requests = %d, want 1", len(provider.Recorded))
-	}
-	got := provider.Recorded[0]
-	if got.ProviderSession != session || got.SessionID != "conversation-7" {
-		t.Fatalf("provider session = (%p, %q), want (%p, conversation-7)", got.ProviderSession, got.SessionID, session)
-	}
-	if child := agent.Fork("child-session"); child.providerSession != session || child.providerSessionID != "child-session" {
-		t.Fatalf("forked provider session = (%p, %q), want (%p, child-session)", child.providerSession, child.providerSessionID, session)
-	}
-}

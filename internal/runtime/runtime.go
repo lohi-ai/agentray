@@ -11,9 +11,7 @@ import (
 	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
 	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
-	sandboxplugin "github.com/lohi-ai/agentray/agentcore/plugins/sandbox"
 	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
@@ -21,6 +19,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
 	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 )
 
 // BuildParams is everything needed to construct a Growth Analyst agent for one
@@ -102,7 +101,7 @@ type BuildParams struct {
 	// in this run (and its escalation rungs) emits a TraceRecord with the request
 	// messages, response, tokens, and computed cost. nil — the default — still
 	// prices each call (filling Usage.CostUSD) but emits no trace.
-	Tracer observe.Sink
+	Tracer llm.Sink
 	// StepGate is the optional pause-before-each-turn hook for the Lab's explain
 	// mode. When set it is passed straight to agentcore.Config.StepGate, which
 	// blocks each turn until the consumer permits it; nil — the default — keeps a
@@ -234,12 +233,6 @@ type BuildParams struct {
 	// process would make a resumed run read its own spill back as not-found. nil
 	// — the default — leaves the loop's head+tail truncation in place.
 	Spill spill.SpillStore
-	// ReportLogInvariant receives each divergence between what the model was
-	// shown and what reached the durable log — the check that catches resume
-	// corruption at the turn it is introduced rather than in a resumed run weeks
-	// later. It is advisory: the detector never alters the run, so the right sink
-	// is an error-level log. nil — the default — installs no detector.
-	ReportLogInvariant func(observe.LogInvariantViolation)
 }
 
 // resolveBaseURL applies the §13.1 precedence: per-config base_url ->
@@ -293,26 +286,7 @@ func NewTierProviderWithSource(provider, baseURL, apiKey string, ts ai.TokenSour
 func NewTierProviderForModelWithSource(provider, baseURL, apiKey string, ts ai.TokenSource, capabilities agentcore.ModelCapabilities) (agentcore.LLMProvider, error) {
 	// A connectivity check is not a run and has no trace to attribute; calls are
 	// still priced.
-	return buildTracedProviderForModel(provider, baseURL, apiKey, ts, nil, capabilities)
-}
-
-// buildTracedProvider builds a provider for a call made OUTSIDE a composition —
-// a connectivity probe, the triage classifier, the reflect pass. Nothing will
-// decorate it, so it is priced and traced here.
-//
-// Inside a composition, use buildProvider: the monitor plugin decorates every
-// rung once, and wrapping twice would double-price the call and emit two trace
-// rows per turn.
-func buildTracedProvider(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink) (agentcore.LLMProvider, error) {
-	return buildTracedProviderForModel(provider, baseURL, apiKey, ts, tracer, agentcore.ModelCapabilities{})
-}
-
-func buildTracedProviderForModel(provider, baseURL, apiKey string, ts ai.TokenSource, tracer observe.Sink, capabilities agentcore.ModelCapabilities) (agentcore.LLMProvider, error) {
-	prov, err := buildProviderForModel(provider, baseURL, apiKey, ts, "", capabilities)
-	if err != nil {
-		return nil, err
-	}
-	return observe.Wrap(prov, observe.DefaultPricing(), tracer), nil
+	return buildProviderForModel(provider, baseURL, apiKey, ts, "", capabilities)
 }
 
 // buildProvider constructs an LLMProvider for one tier's settings, applying the
@@ -409,13 +383,18 @@ func revisableGoal(p BuildParams) bool { return p.ReviseGoal && p.Goal != "" }
 func permittedToolNames(p BuildParams) []string {
 	names := ScopeToolNames(p.Scopes)
 	if p.ReadOnly {
+		names = ReadOnlyToolNames(names)
+	}
+	if p.Memory != nil {
+		names = append(names, memory.ToolMemoryRecall)
+	}
+	if p.ReadOnly {
 		// A read-only run keeps the analytics reads and loses everything else
 		// the product grants: the authoring tools, the outbound HTTP surface,
 		// the selectable runtime tools (run_shell and friends), and delegation
 		// — a sub-agent is built from its own grants, so leaving spawn in would
 		// hand back the writes this line takes away. The loop's own plumbing
 		// (the plan, the goal gate) stays: neither touches the project.
-		names = ReadOnlyToolNames(names)
 		if p.Todo != nil {
 			names = append(names, todo.ToolName)
 		}
@@ -492,6 +471,12 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	}
 
 	tools, hooks := buildToolsAndHooks(p, scopeID)
+	// Execution infrastructure belongs to the host, not the agent plugin list.
+	// Tools already hold their sandbox backend. Inspect unresolved arguments
+	// before other consumer hooks; the executor resolves secrets after gating.
+	if p.Sandbox != nil {
+		hooks.Before = append([]agentcore.BeforeToolCall{sandbox.NewInjectionGuard().Hook()}, hooks.Before...)
+	}
 
 	names := permittedToolNames(p)
 	cfg := agentcore.Config{
@@ -505,6 +490,7 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		Tools:              tools,
 		Memory:             p.Memory,
 		Hooks:              hooks,
+		Env:                &agentcore.Env{Sandbox: p.Sandbox, Credentials: p.Credentials},
 		Definition: agentcore.AgentDefinition{
 			ScopeID:     scopeID,
 			Soul:        p.Soul,
@@ -564,16 +550,10 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 	// the only one that needs infrastructure; without a durable store it stays
 	// off and the loop's own truncation stands.
 	list := preset.Full(cfg, preset.Options{
-		Spill:              p.Spill,
-		ReportLogInvariant: p.ReportLogInvariant,
+		Spill: p.Spill,
 	})
 
 	// --- the product's own plugins -----------------------------------------
-
-	// Cost accounting brackets every model call this composition can make — the
-	// primary rung, each escalation rung, and the compaction rung. A nil tracer
-	// still prices (so Usage.CostUSD is honest) and emits nothing.
-	list = append(list, observe.Monitor{Sink: p.Tracer})
 
 	// The goal gate is already in the list: preset's goal.Plugin registers the
 	// durable half (the seam that records the condition) AND the gate extension,
@@ -610,17 +590,6 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 		// The tool and the context hook are one plugin: either alone is broken —
 		// a plan the model never sees again, or a pin on a plan nothing can write.
 		list = append(list, todo.With(p.Todo))
-	}
-	// A wired sandbox brings its own runtime injection guard for risky selectable
-	// tools (run_shell and friends). One plugin carries both, so the substrate
-	// can never be installed with nothing reading what is sent into it. Tool
-	// exposure itself stays policy/catalog driven — a backend alone exposes
-	// nothing.
-	if p.Sandbox != nil {
-		list = append(list, sandboxplugin.Guarded(p.Sandbox, sandbox.NewInjectionGuard().Hook()))
-	}
-	if p.Credentials != nil {
-		list = append(list, sandboxplugin.Vault(p.Credentials))
 	}
 	return agentcore.Build(list...)
 }

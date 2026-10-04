@@ -9,13 +9,6 @@ import (
 	"github.com/lohi-ai/agentray/ai"
 )
 
-// Preparation is host work, even if a credential or context callback returns a
-// ProviderError. Retain the cause without treating it as provider admission.
-type nativePreparationError struct{ cause error }
-
-func (e *nativePreparationError) Error() string { return e.cause.Error() }
-func (e *nativePreparationError) Unwrap() error { return e.cause }
-
 type nativePreparedAttempt struct {
 	request    engine.Request
 	transcript ai.TranscriptContext
@@ -30,10 +23,10 @@ type nativePreparedAttempt struct {
 func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRung, source engine.Request, options map[string]any) (prepared nativePreparedAttempt, err error) {
 	defer func() {
 		if err != nil {
-			err = &nativePreparationError{cause: err}
+			err = &ai.PreparationError{Cause: err}
 		}
 	}()
-	if s.native == nil || s.config.nativeLadder == nil || source.Context == nil {
+	if s.agent == nil || s.config.nativeLadder == nil || source.Context == nil {
 		return prepared, errors.New("native request preparation requires an agent, ladder and context")
 	}
 	check := func() error {
@@ -62,7 +55,7 @@ func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRu
 	if err != nil {
 		return prepared, err
 	}
-	cloned, err := s.native.bindUpdate(raw)
+	cloned, err := s.agent.bindUpdate(raw)
 	if err != nil {
 		return prepared, err
 	}
@@ -78,7 +71,7 @@ func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRu
 	if err != nil {
 		return prepared, err
 	}
-	update, err := s.native.bindUpdate(updateRaw)
+	update, err := s.agent.bindUpdate(updateRaw)
 	if err != nil {
 		return prepared, err
 	}

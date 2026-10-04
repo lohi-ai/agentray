@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 const (
@@ -57,7 +57,7 @@ var claudeCodeBetas = []string{
 // comma-joined set of betas it actually uses, or "" when none apply. In OAuth
 // (claude-code) mode the subscription client's fixed beta set always applies
 // and the per-request betas merge on top.
-func antBetaHeader(req agentcore.ChatRequest, oauth bool) string {
+func antBetaHeader(req protocol.ChatRequest, oauth bool) string {
 	var betas []string
 	if oauth {
 		betas = append(betas, claudeCodeBetas...)
@@ -85,14 +85,14 @@ func antCacheTTL(retention string) string {
 
 // usesExtendedCache reports whether the request opts into the 1-hour cache
 // window, which requires the extended-cache beta header.
-func usesExtendedCache(req agentcore.ChatRequest) bool {
+func usesExtendedCache(req protocol.ChatRequest) bool {
 	return req.CacheKey != "" && antCacheTTL(req.CacheRetention) == "1h"
 }
 
 // AnthropicProvider speaks the Anthropic Messages API. The wire format diverges
 // from OpenAI completions (top-level system, tool_use/tool_result content
 // blocks, x-api-key auth), so per the spec it gets its own implementation
-// rather than a compat entry — and proves the agentcore.LLMProvider seam (§12 AC: a second
+// rather than a compat entry — and proves the protocol.LLMProvider seam (§12 AC: a second
 // provider needs no edits to agent.go).
 type AnthropicProvider struct {
 	APIKey  string
@@ -133,7 +133,7 @@ func NewAnthropicProvider(apiKey, baseURL string) *AnthropicProvider {
 	}
 }
 
-// UpdateAPIKey swaps the key used for subsequent requests (agentcore.KeyUpdater), letting
+// UpdateAPIKey swaps the key used for subsequent requests (protocol.KeyUpdater), letting
 // the loop refresh an expiring BYO token between turns.
 func (p *AnthropicProvider) UpdateAPIKey(key string) {
 	if key != "" {
@@ -154,7 +154,7 @@ func (p *AnthropicProvider) apiKey() string {
 // the OAuth flag makes it a Bearer credential instead of an x-api-key. The
 // clone keeps concurrent calls from overwriting each other's token on the
 // shared client.
-func (p *AnthropicProvider) applyOAuthToken(tok OAuthToken) agentcore.LLMProvider {
+func (p *AnthropicProvider) applyOAuthToken(tok OAuthToken) protocol.LLMProvider {
 	return &AnthropicProvider{
 		APIKey: tok.AccessToken, BaseURL: p.BaseURL, OAuth: p.OAuth,
 		HTTP: p.HTTP, StreamHTTP: p.StreamHTTP,
@@ -169,7 +169,7 @@ func (p *AnthropicProvider) Name() string {
 }
 func (p *AnthropicProvider) SupportsTools() bool { return true }
 
-func (p *AnthropicProvider) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (p *AnthropicProvider) ModelCapabilities(model string) protocol.ModelCapabilities {
 	return CapabilitiesFor(p.Name(), model)
 }
 
@@ -178,7 +178,7 @@ func (p *AnthropicProvider) ModelCapabilities(model string) agentcore.ModelCapab
 // User-Agent, x-app: cli, the fixed subscription beta set merged with the
 // request's own betas, and Accept: application/json even when streaming (the
 // OAuth surface answers SSE either way).
-func (p *AnthropicProvider) setHeaders(httpReq *http.Request, req agentcore.ChatRequest, stream bool) {
+func (p *AnthropicProvider) setHeaders(httpReq *http.Request, req protocol.ChatRequest, stream bool) {
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("anthropic-version", anthropicVersion)
 	key := p.apiKey()
@@ -266,7 +266,7 @@ type antRequest struct {
 	Tools    []antTool    `json:"tools,omitempty"`
 	Stream   bool         `json:"stream,omitempty"`
 	// OutputFormat constrains the text answer to a JSON Schema (structured
-	// outputs beta). Sent only when the neutral request carries an agentcore.OutputSchema.
+	// outputs beta). Sent only when the neutral request carries an protocol.OutputSchema.
 	OutputFormat *antOutputFormat `json:"output_format,omitempty"`
 	ToolChoice   *antToolChoice   `json:"tool_choice,omitempty"`
 }
@@ -294,8 +294,8 @@ type antUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
-func (u antUsage) usage() agentcore.Usage {
-	return agentcore.Usage{
+func (u antUsage) usage() protocol.Usage {
+	return protocol.Usage{
 		InputTokens:      u.InputTokens,
 		OutputTokens:     u.OutputTokens,
 		CacheReadTokens:  u.CacheReadInputTokens,
@@ -312,18 +312,18 @@ type antResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func anthropicReasoningBlockBytes(block agentcore.ReasoningBlock) int {
+func anthropicReasoningBlockBytes(block protocol.ReasoningBlock) int {
 	return len(block.Text) + len(block.Signature) + len(block.Data)
 }
 
-func validAnthropicReasoningBlock(block agentcore.ReasoningBlock) bool {
+func validAnthropicReasoningBlock(block protocol.ReasoningBlock) bool {
 	if anthropicReasoningBlockBytes(block) > maxAnthropicReasoningBlockBytes {
 		return false
 	}
 	switch block.Type {
-	case agentcore.ReasoningBlockThinking:
+	case protocol.ReasoningBlockThinking:
 		return block.Signature != ""
-	case agentcore.ReasoningBlockRedacted:
+	case protocol.ReasoningBlockRedacted:
 		return block.Data != ""
 	default:
 		return false
@@ -339,21 +339,21 @@ func (p *AnthropicProvider) replayScope(model string) string {
 }
 
 // Chat performs one non-streaming Messages call.
-func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (p *AnthropicProvider) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	body := p.encode(req)
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/v1/messages", bytes.NewReader(raw))
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	p.setHeaders(httpReq, req, false)
 
 	resp, err := p.HTTP.Do(httpReq)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	defer resp.Body.Close()
 	var data []byte
@@ -367,7 +367,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 	// but well-formed answer, so a truncated turn looks like a successful one.
 	// nil resp => Status 0 => IsRetryable, so the ladder retries instead.
 	if readErr != nil && resp.StatusCode < 400 {
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), nil,
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), nil,
 			fmt.Sprintf("truncated response body (status %d): %s", resp.StatusCode, describeReadErr(ctx, p.HTTP, readErr)))
 	}
 
@@ -377,18 +377,18 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 		if json.Unmarshal(data, &errorBody) == nil && errorBody.Error != nil && errorBody.Error.Message != "" {
 			message = errorBody.Error.Message
 		}
-		return agentcore.ChatResponse{}, agentcore.NewProviderError(p.Name(), resp, message)
+		return protocol.ChatResponse{}, protocol.NewProviderError(p.Name(), resp, message)
 	}
 	if providerErr, ok := inBandProviderError(p.Name(), resp, data); ok {
-		return agentcore.ChatResponse{}, providerErr
+		return protocol.ChatResponse{}, providerErr
 	}
 
 	var decoded antResponse
 	if err := json.Unmarshal(data, &decoded); err != nil {
-		return agentcore.ChatResponse{}, fmt.Errorf("decode anthropic response (status %d): %w", resp.StatusCode, err)
+		return protocol.ChatResponse{}, fmt.Errorf("decode anthropic response (status %d): %w", resp.StatusCode, err)
 	}
 
-	msg := agentcore.Message{Role: agentcore.RoleAssistant}
+	msg := protocol.Message{Role: protocol.RoleAssistant}
 	replayScope := p.replayScope(req.Model)
 	reasoningBytes := 0
 	for _, block := range decoded.Content {
@@ -396,8 +396,8 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 		case "text":
 			msg.Content += block.Text
 		case "thinking":
-			candidate := agentcore.ReasoningBlock{
-				Type: agentcore.ReasoningBlockThinking, Text: block.Thinking,
+			candidate := protocol.ReasoningBlock{
+				Type: protocol.ReasoningBlockThinking, Text: block.Thinking,
 				Signature: block.Signature, ReplayScope: replayScope,
 			}
 			if validAnthropicReasoningBlock(candidate) &&
@@ -407,8 +407,8 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 				reasoningBytes += anthropicReasoningBlockBytes(candidate)
 			}
 		case "redacted_thinking":
-			candidate := agentcore.ReasoningBlock{
-				Type: agentcore.ReasoningBlockRedacted, Data: block.Data, ReplayScope: replayScope,
+			candidate := protocol.ReasoningBlock{
+				Type: protocol.ReasoningBlockRedacted, Data: block.Data, ReplayScope: replayScope,
 			}
 			if validAnthropicReasoningBlock(candidate) &&
 				len(msg.ReasoningBlocks) < maxAnthropicReasoningBlocks &&
@@ -417,12 +417,12 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req agentcore.ChatRequest)
 				reasoningBytes += anthropicReasoningBlockBytes(candidate)
 			}
 		case "tool_use":
-			msg.ToolCalls = append(msg.ToolCalls, agentcore.ToolCall{
+			msg.ToolCalls = append(msg.ToolCalls, protocol.ToolCall{
 				ID: block.ID, Name: block.Name, Arguments: string(block.Input),
 			})
 		}
 	}
-	return agentcore.ChatResponse{
+	return protocol.ChatResponse{
 		Message:    msg,
 		StopReason: decoded.StopReason,
 		Usage:      decoded.Usage.usage(),
@@ -461,7 +461,7 @@ type antStreamEvent struct {
 }
 
 type antReasoningCapture struct {
-	block   agentcore.ReasoningBlock
+	block   protocol.ReasoningBlock
 	invalid bool
 }
 
@@ -470,7 +470,7 @@ type antReasoningCapture struct {
 // fragments (keyed by content-block index) into whole ToolCalls flushed before
 // the terminal Done delta. Proves the streaming seam holds for a second provider
 // with no edits to the loop (§12 AC).
-func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (p *AnthropicProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	body := p.encode(req)
 	body.Stream = true
 	raw, err := json.Marshal(body)
@@ -490,24 +490,24 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 	if resp.StatusCode >= 400 {
 		data := readProviderErrorBody(resp.Body)
 		resp.Body.Close()
-		return nil, agentcore.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
+		return nil, protocol.NewProviderError(p.Name(), resp, strings.TrimSpace(string(data)))
 	}
 
-	ch := make(chan agentcore.ChatDelta, 16)
+	ch := make(chan protocol.ChatDelta, 16)
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
 		// Each content-block index is either text or a tool_use call assembled
 		// from JSON fragments; track the in-progress tool calls by index.
-		toolAcc := map[int]*agentcore.ToolCall{}
+		toolAcc := map[int]*protocol.ToolCall{}
 		var order []int
 		reasoningAcc := map[int]*antReasoningCapture{}
 		var reasoningOrder []int
 		emittedReasoning := map[int]bool{}
 		reasoningBytes := 0
 		var stopReason string
-		var usage agentcore.Usage
+		var usage protocol.Usage
 		terminal := false
 		replayScope := p.replayScope(req.Model)
 		emitReasoning := func(index int) {
@@ -523,14 +523,14 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 			}
 			emittedReasoning[index] = true
 			copy := capture.block
-			ch <- agentcore.ChatDelta{ReasoningBlock: &copy}
+			ch <- protocol.ChatDelta{ReasoningBlock: &copy}
 		}
 		invalidateReasoning := func(capture *antReasoningCapture) {
 			if capture == nil || capture.invalid {
 				return
 			}
 			reasoningBytes -= anthropicReasoningBlockBytes(capture.block)
-			capture.block = agentcore.ReasoningBlock{}
+			capture.block = protocol.ReasoningBlock{}
 			capture.invalid = true
 		}
 		appendReasoning := func(capture *antReasoningCapture, delta string, signature bool) {
@@ -563,7 +563,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 				continue
 			}
 			if providerErr, ok := inBandProviderError(p.Name(), resp, []byte(payload)); ok {
-				ch <- agentcore.ChatDelta{Done: true, Err: providerErr, Usage: usage}
+				ch <- protocol.ChatDelta{Done: true, Err: providerErr, Usage: usage}
 				return
 			}
 			var ev antStreamEvent
@@ -584,14 +584,14 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 				if ev.ContentBlock != nil {
 					switch ev.ContentBlock.Type {
 					case "tool_use":
-						toolAcc[ev.Index] = &agentcore.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}
+						toolAcc[ev.Index] = &protocol.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}
 						order = append(order, ev.Index)
 					case "thinking":
 						if len(reasoningOrder) >= maxAnthropicReasoningBlocks {
 							continue
 						}
-						capture := &antReasoningCapture{block: agentcore.ReasoningBlock{
-							Type: agentcore.ReasoningBlockThinking, Text: ev.ContentBlock.Thinking,
+						capture := &antReasoningCapture{block: protocol.ReasoningBlock{
+							Type: protocol.ReasoningBlockThinking, Text: ev.ContentBlock.Thinking,
 							Signature: ev.ContentBlock.Signature, ReplayScope: replayScope,
 						}}
 						reasoningAcc[ev.Index] = capture
@@ -599,7 +599,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 						size := anthropicReasoningBlockBytes(capture.block)
 						if size > maxAnthropicReasoningBlockBytes || reasoningBytes+size > maxAnthropicReasoningTotalBytes {
 							capture.invalid = true
-							capture.block = agentcore.ReasoningBlock{}
+							capture.block = protocol.ReasoningBlock{}
 						} else {
 							reasoningBytes += size
 						}
@@ -607,15 +607,15 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 						if len(reasoningOrder) >= maxAnthropicReasoningBlocks {
 							continue
 						}
-						capture := &antReasoningCapture{block: agentcore.ReasoningBlock{
-							Type: agentcore.ReasoningBlockRedacted, Data: ev.ContentBlock.Data, ReplayScope: replayScope,
+						capture := &antReasoningCapture{block: protocol.ReasoningBlock{
+							Type: protocol.ReasoningBlockRedacted, Data: ev.ContentBlock.Data, ReplayScope: replayScope,
 						}}
 						reasoningAcc[ev.Index] = capture
 						reasoningOrder = append(reasoningOrder, ev.Index)
 						size := anthropicReasoningBlockBytes(capture.block)
 						if size > maxAnthropicReasoningBlockBytes || reasoningBytes+size > maxAnthropicReasoningTotalBytes {
 							capture.invalid = true
-							capture.block = agentcore.ReasoningBlock{}
+							capture.block = protocol.ReasoningBlock{}
 						} else {
 							reasoningBytes += size
 						}
@@ -628,18 +628,18 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 				switch ev.Delta.Type {
 				case "text_delta":
 					if ev.Delta.Text != "" {
-						ch <- agentcore.ChatDelta{ContentDelta: ev.Delta.Text}
+						ch <- protocol.ChatDelta{ContentDelta: ev.Delta.Text}
 					}
 				case "input_json_delta":
 					if acc, ok := toolAcc[ev.Index]; ok {
 						acc.Arguments += ev.Delta.PartialJSON
 					}
 				case "thinking_delta":
-					if acc := reasoningAcc[ev.Index]; acc != nil && acc.block.Type == agentcore.ReasoningBlockThinking {
+					if acc := reasoningAcc[ev.Index]; acc != nil && acc.block.Type == protocol.ReasoningBlockThinking {
 						appendReasoning(acc, ev.Delta.Thinking, false)
 					}
 				case "signature_delta":
-					if acc := reasoningAcc[ev.Index]; acc != nil && acc.block.Type == agentcore.ReasoningBlockThinking {
+					if acc := reasoningAcc[ev.Index]; acc != nil && acc.block.Type == protocol.ReasoningBlockThinking {
 						appendReasoning(acc, ev.Delta.Signature, true)
 					}
 				}
@@ -654,7 +654,7 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 				}
 			case "error":
 				if ev.Error != nil {
-					ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), resp, ev.Error.Message), Usage: usage}
+					ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), resp, ev.Error.Message), Usage: usage}
 					return
 				}
 			case "message_stop":
@@ -662,11 +662,11 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 			}
 		}
 		if err := sc.Err(); err != nil {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream read failed: "+err.Error()), Usage: usage}
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil, "stream read failed: "+err.Error()), Usage: usage}
 			return
 		}
 		if !terminal {
-			ch <- agentcore.ChatDelta{Done: true, Err: agentcore.NewProviderError(p.Name(), nil, "stream ended before a terminal event"), Usage: usage}
+			ch <- protocol.ChatDelta{Done: true, Err: protocol.NewProviderError(p.Name(), nil, "stream ended before a terminal event"), Usage: usage}
 			return
 		}
 		for _, idx := range reasoningOrder {
@@ -675,17 +675,17 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req agentcore.ChatReques
 		for _, idx := range order {
 			tc := *toolAcc[idx]
 			tc.Arguments = string(ParseStreamingJSON(tc.Arguments))
-			ch <- agentcore.ChatDelta{ToolCall: &tc}
+			ch <- protocol.ChatDelta{ToolCall: &tc}
 		}
-		ch <- agentcore.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
+		ch <- protocol.ChatDelta{Done: true, StopReason: stopReason, Usage: usage}
 	}()
 	return ch, nil
 }
 
-// encode maps the neutral agentcore.ChatRequest onto the Anthropic wire format: system
+// encode maps the neutral protocol.ChatRequest onto the Anthropic wire format: system
 // messages collapse into the top-level system field; tool calls/results become
 // tool_use/tool_result content blocks.
-func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
+func (p *AnthropicProvider) encode(req protocol.ChatRequest) antRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = anthropicDefaultTokens
@@ -708,11 +708,11 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 	replayScope := p.replayScope(req.Model)
 	for _, m := range req.Messages {
 		switch m.Role {
-		case agentcore.RoleSystem:
+		case protocol.RoleSystem:
 			if m.Content != "" {
 				systemParts = append(systemParts, m.Content)
 			}
-		case agentcore.RoleTool:
+		case protocol.RoleTool:
 			text := messageText(m)
 			images := messageImages(m)
 			var content any = text
@@ -736,7 +736,7 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 					Type: "tool_result", ToolUseID: m.ToolCallID, Content: content,
 				}},
 			})
-		case agentcore.RoleAssistant:
+		case protocol.RoleAssistant:
 			blocks := []antContentBlock{}
 			reasoningBytes := 0
 			reasoningCount := 0
@@ -749,11 +749,11 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 					continue
 				}
 				switch reasoning.Type {
-				case agentcore.ReasoningBlockThinking:
+				case protocol.ReasoningBlockThinking:
 					blocks = append(blocks, antContentBlock{
 						Type: "thinking", Thinking: reasoning.Text, Signature: reasoning.Signature,
 					})
-				case agentcore.ReasoningBlockRedacted:
+				case protocol.ReasoningBlockRedacted:
 					blocks = append(blocks, antContentBlock{Type: "redacted_thinking", Data: reasoning.Data})
 				}
 				reasoningBytes += size
@@ -798,7 +798,7 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 		// block below), so an anchor on one has nothing to attach to.
 		if m.CacheAnchor {
 			anchorRequested = true
-			if m.Role != agentcore.RoleSystem && len(out.Messages) > 0 {
+			if m.Role != protocol.RoleSystem && len(out.Messages) > 0 {
 				anchored = append(anchored, len(out.Messages)-1)
 			}
 		}
@@ -832,7 +832,7 @@ func (p *AnthropicProvider) encode(req agentcore.ChatRequest) antRequest {
 		}
 	}
 
-	// Anchor-driven breakpoints: the loop decides placement (agentcore.Message.CacheAnchor,
+	// Anchor-driven breakpoints: the loop decides placement (protocol.Message.CacheAnchor,
 	// see markCacheAnchors); this provider only translates each anchor into
 	// cache_control on that message's last block. With no anchors REQUESTED at all
 	// (the provider used standalone, outside the loop) fall back to the classic

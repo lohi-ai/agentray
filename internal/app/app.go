@@ -10,7 +10,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/internal/dataplane/alerting"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/experiments"
@@ -191,9 +191,9 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	// on — it is the monitoring console's source of truth (one row per LLM call,
 	// keyed by run → agent_id). An optional JSONL file sink is added for offline
 	// debugging when AGENTRAY_AGENT_TRACE_FILE is set.
-	traceSinks := observe.MultiSink{agentruntime.NewStoreTraceSink(store)}
+	traceSinks := llm.MultiSink{agentruntime.NewStoreTraceSink(store)}
 	if cfg.AgentTraceFile != "" {
-		if fs, err := observe.NewFileSink(cfg.AgentTraceFile); err != nil {
+		if fs, err := llm.NewFileSink(cfg.AgentTraceFile); err != nil {
 			log.Printf("agent trace file %q: %v (file tracing disabled)", cfg.AgentTraceFile, err)
 		} else {
 			traceSinks = append(traceSinks, fs)
@@ -214,9 +214,7 @@ func New(ctx context.Context, cfg config.Config) (*Server, error) {
 	runnerOpts = append(runnerOpts, agentruntime.WithSpillStore(agentruntime.NewSpillStore(store)))
 	// Rotation-safe long runs: re-resolve each rung's BYO key before every turn.
 	runnerOpts = append(runnerOpts, agentruntime.WithKeyRefresh())
-	if cfg.AgentNativeGo {
-		runnerOpts = append(runnerOpts, agentruntime.WithPiRuntime(agentruntime.PiRuntimeConfig{}))
-	}
+
 	// Optional compaction-budget override (deployment/test knob); 0 keeps the 200k
 	// default.
 	if cfg.AgentMaxContextTokens > 0 {

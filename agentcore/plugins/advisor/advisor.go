@@ -1,37 +1,14 @@
-// Package advisor installs a reviewer over the agent's finished work: at a
-// normal finish a second model reads what the run actually did and may leave
-// notes, and a note that matters re-opens the run so the agent must resolve it
-// before the answer is accepted.
-//
-// It is the capability finishguard's README lists as its own limitation — "the
-// guard sees only passive evidence; it cannot run a check of its own, call a
-// tool, or consult a model". The seam is the same (StopInterceptor, consulted
-// only on a finish the run chose, bounded by StopInfo.Attempt, injection
-// persisted to the durable log like a steer); what changes is that the verdict
-// comes from a reviewer rather than a rule.
-//
-// The kernel and this plugin never learn that the reviewer is a model. It is a
-// func supplied by the host, which is what keeps the plugin testable without a
-// provider and keeps the model/tier/credential choice where those decisions
-// already live.
-//
-// Ported from oh-my-pi's advisor subsystem. Two deliberate divergences, both
-// consequences of reviewing a FINISH rather than a stream of deltas:
-//
-//   - omp's advisor watches incremental transcript deltas and can interrupt a
-//     turn in flight. This one is consulted when the run tries to end, which is
-//     the moment "you did not actually check that" is both cheap to say and
-//     still actionable, and the only moment at which the work under review is
-//     complete enough to review.
-//   - omp caps the reviewer at one note per update because it is consulted
-//     dozens of times per session. This one is consulted at most MaxRounds
-//     times per run, so the per-review budget is about breadth (how much a
-//     single injection may say), not about noise over time — see
-//     DefaultMaxNotesPerReview.
+// Package advisor reviews completed work and, optionally, work in progress at
+// turn boundaries. Reviewer callbacks contribute bounded, deduplicated notes;
+// material concerns reopen a finish or enter the next request. Each reviewer
+// owns independent review caps, cooldown and checkpointed delivery history.
+// Native bindings account AI usage to the owning run. No background scheduler
+// or in-flight turn interruption is introduced.
 package advisor
 
 import (
 	"context"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
@@ -123,6 +100,13 @@ type Reviewer func(ctx context.Context, r Review) ([]Note, error)
 type Plugin struct {
 	// Reviewer is consulted at each normal finish.
 	Reviewer Reviewer
+	// Reviewers adds independently scheduled reviewers (at most four).
+	Reviewers []ReviewerConfig
+	// IntervalTurns enables periodic review after this many completed turns.
+	IntervalTurns      int
+	MaxPeriodicReviews int
+	CooldownTurns      int
+	Timeout            time.Duration
 	// MaxRounds bounds consultations per run. 0 uses DefaultMaxRounds. The cap
 	// lives here rather than in the loop because it is this capability's
 	// property: the loop only knows that SOMETHING asked to continue.
@@ -146,7 +130,7 @@ func (Plugin) Name() string { return "advisor" }
 
 // Register adds the plugin as a run extension. A nil reviewer declines.
 func (p Plugin) Register(r *agentcore.Registry) error {
-	if p.Reviewer == nil {
+	if p.Reviewer == nil && len(p.Reviewers) == 0 {
 		return nil
 	}
 	r.AddExtension(p)
@@ -155,7 +139,10 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 
 // BeginRun starts one run's advisor state: its round budget, its emission
 // guard, and the message snapshot the reviewer will read.
-func (p Plugin) BeginRun(context.Context, agentcore.RunInfo) (agentcore.Extension, error) {
+func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
+	if len(p.Reviewers) > 0 {
+		return p.beginGroup(ctx, info)
+	}
 	if p.Reviewer == nil {
 		return nil, nil
 	}
@@ -168,10 +155,14 @@ func (p Plugin) BeginRun(context.Context, agentcore.RunInfo) (agentcore.Extensio
 		perReview = DefaultMaxNotesPerReview
 	}
 	return &advisorRun{
-		reviewer: p.Reviewer,
-		rounds:   rounds,
-		onNotes:  p.OnNotes,
-		guard:    NewEmissionGuard(perReview),
+		reviewer:    p.Reviewer,
+		interval:    p.IntervalTurns,
+		maxPeriodic: defaultPositive(p.MaxPeriodicReviews, 8),
+		cooldown:    defaultPositive(p.CooldownTurns, 3),
+		timeout:     p.Timeout,
+		rounds:      rounds,
+		onNotes:     p.OnNotes,
+		guard:       NewEmissionGuard(perReview),
 	}, nil
 }
 
@@ -180,12 +171,15 @@ func (p Plugin) BeginRun(context.Context, agentcore.RunInfo) (agentcore.Extensio
 // list are what make a second round "did you deal with it" rather than a
 // repeat of the first.
 type advisorRun struct {
-	reviewer  Reviewer
-	rounds    int
-	onNotes   func(context.Context, []Note, bool)
-	guard     *EmissionGuard
-	messages  []agentcore.Message
-	delivered []Note
+	interval, maxPeriodic, cooldown                                int
+	timeout                                                        time.Duration
+	periodic, finished, ticks, lastTurn, lastReview, cooldownUntil int
+	reviewer                                                       Reviewer
+	rounds                                                         int
+	onNotes                                                        func(context.Context, []Note, bool)
+	guard                                                          *EmissionGuard
+	messages                                                       []agentcore.Message
+	delivered                                                      []Note
 }
 
 // Name identifies the extension in composition diagnostics.
@@ -202,12 +196,25 @@ func (*advisorRun) Name() string { return "advisor" }
 // A rebase (compaction, a context edit) replaces the history the earlier notes
 // were about, so the dedupe history is dropped with it — a reviewer looking at
 // a rewritten transcript must be free to re-raise what it raised before.
-func (a *advisorRun) ObserveMessages(_ context.Context, phase agentcore.ObservePhase, _ int, msgs []agentcore.Message) {
+func (a *advisorRun) ObserveMessages(_ context.Context, phase agentcore.ObservePhase, turn int, msgs []agentcore.Message) {
 	switch phase {
+	case agentcore.PhaseExternalInput:
+		if turn == 0 && len(msgs) > 0 && a.finished > 0 {
+			a.periodic = 0
+			a.finished = 0
+			a.ticks = 0
+			a.lastTurn = 0
+			a.lastReview = 0
+			a.cooldownUntil = 0
+			a.delivered = nil
+			a.guard.Reset()
+		}
+	case agentcore.PhaseAppend:
+		a.messages = boundedMessages(append(a.messages, msgs...))
 	case agentcore.PhaseRequest:
-		a.messages = append(a.messages[:0], msgs...)
+		a.messages = boundedMessages(msgs)
 	case agentcore.PhaseRebase:
-		a.messages = append(a.messages[:0], msgs...)
+		a.messages = boundedMessages(msgs)
 		a.guard.Reset()
 	}
 }
@@ -219,18 +226,36 @@ func (a *advisorRun) ObserveMessages(_ context.Context, phase agentcore.ObserveP
 // error, like a panicking guard, accepts the finish: the advisor is a second
 // opinion and must never be the reason a run cannot end.
 func (a *advisorRun) TurnStopping(ctx context.Context, info agentcore.StopInfo) agentcore.StopDecision {
-	if info.Attempt >= a.rounds {
+	if info.Attempt >= a.rounds || a.finished >= a.rounds {
 		return agentcore.StopDecision{}
 	}
-	a.guard.BeginReview()
-	raw, err := a.reviewer(ctx, Review{
+	a.finished++
+	return a.review(ctx, Review{
 		Final:     info.Final,
 		Turns:     info.Turns,
 		Tools:     info.Tools,
 		Messages:  a.messages,
-		Round:     info.Attempt,
+		Round:     a.finished - 1,
 		Delivered: a.delivered,
 	})
+}
+
+func (a *advisorRun) review(ctx context.Context, review Review) agentcore.StopDecision {
+	a.guard.BeginReview()
+	timeout := a.timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	review.Final = agentcore.TruncateMiddle(review.Final, 8000)
+	review.Tools = boundedTools(review.Tools)
+	review.Messages = boundedMessages(review.Messages)
+	review.Delivered = append([]Note(nil), review.Delivered...)
+	raw, err := a.reviewer(ctx, review)
+	if err != nil {
+		a.cooldownUntil = a.ticks + a.cooldown
+	}
 	if err != nil || len(raw) == 0 {
 		return agentcore.StopDecision{}
 	}
@@ -263,6 +288,9 @@ func (a *advisorRun) TurnStopping(ctx context.Context, info agentcore.StopInfo) 
 		return agentcore.StopDecision{}
 	}
 	a.delivered = append(a.delivered, accepted...)
+	if len(a.delivered) > 32 {
+		a.delivered = append([]Note(nil), a.delivered[len(a.delivered)-32:]...)
+	}
 	return agentcore.StopDecision{
 		Continue: true,
 		Inject:   []agentcore.Message{{Role: agentcore.RoleUser, Content: FormatInjection(accepted)}},

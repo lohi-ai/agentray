@@ -13,14 +13,14 @@ import (
 // injects its nudge as a user message, the loop continues, and the guard's
 // evidence snapshot carries the answer that triggered it.
 func TestFinishGuardNudgeReopensRun(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("unverified claim"),
-		agentcore.AssistantText("verified answer"),
+	faux := newNativeScript(
+		nativeAnswer("unverified claim"),
+		nativeAnswer("verified answer"),
 	)
 	var states []finishguard.State
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
+		NativeProvider: faux.Provider,
+		Model:          "test",
 		Extensions: []agentcore.ExtensionFactory{finishguard.Of(func(_ context.Context, s finishguard.State) string {
 			states = append(states, s)
 			if s.Nudges == 0 {
@@ -66,15 +66,15 @@ func TestFinishGuardNudgeReopensRun(t *testing.T) {
 // TestFinishGuardCapped verifies an always-rejecting guard is cut off at
 // finishguard.DefaultMaxNudges so the run still terminates with the model's answer.
 func TestFinishGuardCapped(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("try 1"),
-		agentcore.AssistantText("try 2"),
-		agentcore.AssistantText("try 3"),
+	faux := newNativeScript(
+		nativeAnswer("try 1"),
+		nativeAnswer("try 2"),
+		nativeAnswer("try 3"),
 	)
 	consults := 0
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
+		NativeProvider: faux.Provider,
+		Model:          "test",
 		Extensions: []agentcore.ExtensionFactory{finishguard.Of(func(context.Context, finishguard.State) string {
 			consults++
 			return "never satisfied"
@@ -102,12 +102,12 @@ func TestFinishGuardCapped(t *testing.T) {
 // budget-exhausted wrap-up turn: the ceiling is hit, so nothing may re-open the
 // run.
 func TestFinishGuardSkippedOnBudgetWrapUp(t *testing.T) {
-	faux := agentcore.NewFauxProvider(agentcore.AssistantText("wrap-up summary"))
+	faux := newNativeScript(nativeAnswer("wrap-up summary"))
 	consulted := false
 	agent, err := agentcore.New(agentcore.Config{
-		Provider:   faux,
-		Model:      "test",
-		BudgetGate: func(context.Context, agentcore.Usage) bool { return true },
+		NativeProvider: faux.Provider,
+		Model:          "test",
+		BudgetGate:     func(context.Context, agentcore.Usage) bool { return true },
 		Extensions: []agentcore.ExtensionFactory{
 			finishguard.Of(func(context.Context, finishguard.State) string { consulted = true; return "reopen" }),
 		},
@@ -130,10 +130,10 @@ func TestFinishGuardSkippedOnBudgetWrapUp(t *testing.T) {
 // TestFinishGuardPanicAcceptsFinish verifies a panicking guard is hardened: the
 // finish is accepted rather than crashing the run goroutine.
 func TestFinishGuardPanicAcceptsFinish(t *testing.T) {
-	faux := agentcore.NewFauxProvider(agentcore.AssistantText("answer"))
+	faux := newNativeScript(nativeAnswer("answer"))
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
+		NativeProvider: faux.Provider,
+		Model:          "test",
 		Extensions: []agentcore.ExtensionFactory{
 			finishguard.Of(func(context.Context, finishguard.State) string { panic("reckless guard") }),
 		},
@@ -151,20 +151,16 @@ func TestFinishGuardPanicAcceptsFinish(t *testing.T) {
 }
 
 // TestFinishGuardNudgePersistedDurably verifies the injected nudge lands in the
-// durable session log as a message entry, so a resume replays the same
-// conversation the model saw.
+// native checkpoint, so a resume presents the same corrective input.
 func TestFinishGuardNudgePersistedDurably(t *testing.T) {
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantText("first"),
-		agentcore.AssistantText("second"),
+	faux := newNativeScript(
+		nativeAnswer("first"),
+		nativeAnswer("second"),
 	)
-	store := agentcore.NewMemorySessionStore()
 	nudged := false
 	agent, err := agentcore.New(agentcore.Config{
-		Provider:  faux,
-		Model:     "test",
-		Session:   store,
-		SessionID: "sess-guard",
+		NativeProvider: faux.Provider,
+		Model:          "test",
 		Extensions: []agentcore.ExtensionFactory{finishguard.Of(func(_ context.Context, s finishguard.State) string {
 			if nudged {
 				return ""
@@ -176,20 +172,25 @@ func TestFinishGuardNudgePersistedDurably(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := agent.Prompt(context.Background(), "start"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	entries, err := store.Log(context.Background(), "sess-guard")
+	result, err := agent.Prompt(context.Background(), "start")
 	if err != nil {
-		t.Fatalf("Log: %v", err)
+		t.Fatal(err)
 	}
-	var found bool
-	for _, e := range entries {
-		if e.Kind == agentcore.EntryMessage && e.Message != nil && e.Message.Role == agentcore.RoleUser && e.Message.Content == "GUARD-NUDGE" {
+	resumed := newNativeScript(nativeAnswer("continued"))
+	agent, err = agentcore.New(agentcore.Config{NativeProvider: resumed.Provider, Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunNative(context.Background(), agentcore.NativeRun{State: result.NativeState, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "continue"}}}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range resumed.Recorded[0].Messages {
+		if m.Role == agentcore.RoleUser && m.Content == "GUARD-NUDGE" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("guard nudge not persisted to the durable log (%d entries)", len(entries))
+		t.Fatal("native checkpoint lost guard nudge")
 	}
 }

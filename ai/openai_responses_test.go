@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 func writeResponsesText(w http.ResponseWriter, id, text string, input, output, cached int) {
@@ -41,10 +41,10 @@ func decodeResponsesRequest(t *testing.T, r *http.Request) responsesRequest {
 	return body
 }
 
-func drainResponseStream(t *testing.T, ch <-chan agentcore.ChatDelta) agentcore.ChatResponse {
+func drainResponseStream(t *testing.T, ch <-chan protocol.ChatDelta) protocol.ChatResponse {
 	t.Helper()
-	var out agentcore.ChatResponse
-	out.Message.Role = agentcore.RoleAssistant
+	var out protocol.ChatResponse
+	out.Message.Role = protocol.RoleAssistant
 	for delta := range ch {
 		if delta.Err != nil {
 			t.Fatalf("stream error: %v", delta.Err)
@@ -82,12 +82,12 @@ func TestOpenAIResponsesChainsOnlyExactWirePrefix(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	firstProvider := NewOpenAIResponsesProvider("sk-one", srv.URL)
 	firstProvider.StreamHTTP = srv.Client()
-	first, err := firstProvider.Chat(context.Background(), agentcore.ChatRequest{
+	first, err := firstProvider.Chat(context.Background(), protocol.ChatRequest{
 		Model: "gpt-test", SessionID: "conversation-1", ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "weather?"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "weather?"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,12 +103,12 @@ func TestOpenAIResponsesChainsOnlyExactWirePrefix(t *testing.T) {
 	// session, not the Go client instance, owns the chain.
 	secondProvider := NewOpenAIResponsesProvider("sk-one", srv.URL)
 	secondProvider.StreamHTTP = srv.Client()
-	second, err := secondProvider.Chat(context.Background(), agentcore.ChatRequest{
+	second, err := secondProvider.Chat(context.Background(), protocol.ChatRequest{
 		Model: "gpt-test", SessionID: "conversation-1", ProviderSession: session,
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleUser, Content: "weather?"},
-			{Role: agentcore.RoleAssistant, ToolCalls: first.Message.ToolCalls},
-			{Role: agentcore.RoleTool, ToolCallID: "call_1", Name: "weather", Content: `{"temperature":31}`},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleUser, Content: "weather?"},
+			{Role: protocol.RoleAssistant, ToolCalls: first.Message.ToolCalls},
+			{Role: protocol.RoleTool, ToolCallID: "call_1", Name: "weather", Content: `{"temperature":31}`},
 		},
 	})
 	if err != nil {
@@ -143,22 +143,22 @@ func TestOpenAIResponsesHistoryMutationBreaksChain(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	p := NewOpenAIResponsesProvider("sk", srv.URL)
 	p.StreamHTTP = srv.Client()
-	first, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	first, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "original"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "original"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = p.Chat(context.Background(), agentcore.ChatRequest{
+	_, err = p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleUser, Content: "edited"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleUser, Content: "edited"},
 			first.Message,
-			{Role: agentcore.RoleUser, Content: "next"},
+			{Role: protocol.RoleUser, Content: "next"},
 		},
 	})
 	if err != nil {
@@ -186,21 +186,21 @@ func TestOpenAIResponsesStaleChainRetriesFullContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	p := NewOpenAIResponsesProvider("sk", srv.URL)
 	p.StreamHTTP = srv.Client()
-	first, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	first, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "one"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "one"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	second, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{
-			{Role: agentcore.RoleUser, Content: "one"}, first.Message,
-			{Role: agentcore.RoleUser, Content: "two"},
+		Messages: []protocol.Message{
+			{Role: protocol.RoleUser, Content: "one"}, first.Message,
+			{Role: protocol.RoleUser, Content: "two"},
 		},
 	})
 	if err != nil {
@@ -230,23 +230,23 @@ func TestOpenAIResponsesStateLossAccountResetAndKeyChangeReplayFully(t *testing.
 	}))
 	defer srv.Close()
 
-	session := agentcore.NewProviderSession()
+	session := protocol.NewProviderSession()
 	p := NewOpenAIResponsesProvider("key-a", srv.URL)
 	p.StreamHTTP = srv.Client()
-	first, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	first, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "one"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "one"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	history := []agentcore.Message{
-		{Role: agentcore.RoleUser, Content: "one"}, first.Message,
-		{Role: agentcore.RoleUser, Content: "two"},
+	history := []protocol.Message{
+		{Role: protocol.RoleUser, Content: "one"}, first.Message,
+		{Role: protocol.RoleUser, Content: "two"},
 	}
 
 	session.ResetAccountScoped()
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session, Messages: history,
 	}); err != nil {
 		t.Fatal(err)
@@ -256,7 +256,7 @@ func TestOpenAIResponsesStateLossAccountResetAndKeyChangeReplayFully(t *testing.
 	}
 
 	p.UpdateAPIKey("key-b")
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session, Messages: history,
 	}); err != nil {
 		t.Fatal(err)
@@ -267,7 +267,7 @@ func TestOpenAIResponsesStateLossAccountResetAndKeyChangeReplayFully(t *testing.
 
 	// A different process/replica has no state at all. It replays fully and asks
 	// the provider not to retain a response, yet returns the same answer.
-	if _, err := p.Chat(context.Background(), agentcore.ChatRequest{
+	if _, err := p.Chat(context.Background(), protocol.ChatRequest{
 		Model: "m", SessionID: "s", Messages: history,
 	}); err != nil {
 		t.Fatal(err)
@@ -296,10 +296,10 @@ func TestOpenAIResponsesSerializesOneConversationChain(t *testing.T) {
 
 	p := NewOpenAIResponsesProvider("sk", srv.URL)
 	p.StreamHTTP = srv.Client()
-	session := agentcore.NewProviderSession()
-	request := agentcore.ChatRequest{
+	session := protocol.NewProviderSession()
+	request := protocol.ChatRequest{
 		Model: "m", SessionID: "s", ProviderSession: session,
-		Messages: []agentcore.Message{{Role: agentcore.RoleUser, Content: "one"}},
+		Messages: []protocol.Message{{Role: protocol.RoleUser, Content: "one"}},
 	}
 	first, err := p.Stream(context.Background(), request)
 	if err != nil {
@@ -348,11 +348,11 @@ func TestOpenAIResponsesSerializesOneConversationChain(t *testing.T) {
 
 func TestOpenAIResponsesEncodesReasoningSchemaAndTools(t *testing.T) {
 	p := NewOpenAIResponsesProvider("sk", "")
-	body := p.encode(agentcore.ChatRequest{
+	body := p.encode(protocol.ChatRequest{
 		Model: "gpt-test", MaxTokens: 123, ReasoningEffort: "high", CacheKey: "conversation-1",
-		Messages:     []agentcore.Message{{Role: agentcore.RoleSystem, Content: "system"}, {Role: agentcore.RoleUser, Content: "hi"}},
-		Tools:        []agentcore.ToolSchema{{Name: "read", Description: "read a file"}},
-		OutputSchema: &agentcore.OutputSchema{Name: "verdict", Strict: true, Schema: map[string]any{"type": "object"}},
+		Messages:     []protocol.Message{{Role: protocol.RoleSystem, Content: "system"}, {Role: protocol.RoleUser, Content: "hi"}},
+		Tools:        []protocol.ToolSchema{{Name: "read", Description: "read a file"}},
+		OutputSchema: &protocol.OutputSchema{Name: "verdict", Strict: true, Schema: map[string]any{"type": "object"}},
 	})
 	if body.Instructions != "system" || body.MaxOutputTokens != 123 || body.PromptCacheKey != "conversation-1" {
 		t.Fatalf("body = %+v", body)
@@ -410,10 +410,10 @@ func TestOpenAIResponsesDoesNotWeakenUnrelatedBadRequest(t *testing.T) {
 
 	p := NewOpenAIResponsesProvider("sk", srv.URL)
 	p.StreamHTTP = srv.Client()
-	_, err := p.Stream(context.Background(), agentcore.ChatRequest{
-		Model: "m", SessionID: "s", ProviderSession: agentcore.NewProviderSession(),
-		Messages:     []agentcore.Message{{Role: agentcore.RoleUser, Content: "one"}},
-		OutputSchema: &agentcore.OutputSchema{Name: "bad", Schema: map[string]any{"type": "broken"}},
+	_, err := p.Stream(context.Background(), protocol.ChatRequest{
+		Model: "m", SessionID: "s", ProviderSession: protocol.NewProviderSession(),
+		Messages:     []protocol.Message{{Role: protocol.RoleUser, Content: "one"}},
+		OutputSchema: &protocol.OutputSchema{Name: "bad", Schema: map[string]any{"type": "broken"}},
 	})
 	if err == nil {
 		t.Fatal("invalid schema unexpectedly succeeded")

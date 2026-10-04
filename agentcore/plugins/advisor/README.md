@@ -177,3 +177,22 @@ element and let what follows read as the host's own instructions.
   run's transcript, so turning it on can send that conversation to a vendor the
   run itself did not use. That is a workspace configuration question, not
   something the plugin can decide.
+
+## Periodic and multiple reviewers
+
+`Plugin.IntervalTurns` enables review at existing turn boundaries, with
+`MaxPeriodicReviews` (default 8), `CooldownTurns` after errors (default 3), and
+`Timeout` (default 30 seconds). Finish review retains its separate two-round cap.
+There is no background scheduler: reviews are synchronous, cancellable callbacks
+before the next primary request. Custom callbacks must respect their context.
+
+`Plugin.Reviewers` accepts up to four uniquely named `ReviewerConfig` values,
+each with its own reviewer, cadence, caps, cooldown and emission guard. Evidence
+is bounded to 32 text messages / 32 tool traces, and delivered-note history to
+32 notes. Cadence, budgets, cooldown and dedupe are checkpointed. A fresh user
+request after finish review starts a new review allowance. Compaction resets
+note dedupe but does not replenish review quotas.
+
+`NativeWithOptions(provider, options)` applies these scheduling controls to the
+native reviewer; all fallback attempts are charged to the owning agent. Reviewer
+errors accept the primary result and defer periodic retries through cooldown.

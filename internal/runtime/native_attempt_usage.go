@@ -3,20 +3,11 @@ package agentruntime
 import (
 	"encoding/json"
 	"errors"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 )
-
-func nativeAttemptMessage(outcome nativeAttemptOutcome) *ai.Message {
-	if outcome.terminal.Type == "done" {
-		return outcome.terminal.Message
-	}
-	if outcome.terminal.Type == "error" {
-		return outcome.terminal.Error
-	}
-	return nil
-}
 
 func nativeUsageTerminal(raw json.RawMessage) (json.RawMessage, error) {
 	var fields map[string]json.RawMessage
@@ -40,8 +31,8 @@ func (p *piRunProjection) addUsage(u agentcore.Usage, known bool) {
 
 // Settled attempts are charged exactly once, including responses discarded for
 // retry/escalation. No failed message is inserted into native conversation state.
-func (p *piRunProjection) accountNativeAttempt(rung nativeBoundRung, attempt nativeRetryAttempt) error {
-	message := nativeAttemptMessage(attempt.outcome)
+func (p *piRunProjection) accountNativeAttempt(rung nativeBoundRung, attempt ai.FallbackAttempt) error {
+	message := attempt.Outcome.Message()
 	if message == nil {
 		return nil
 	}
@@ -49,7 +40,7 @@ func (p *piRunProjection) accountNativeAttempt(rung nativeBoundRung, attempt nat
 	if err != nil {
 		return err
 	}
-	projected, err := projectPiMessage(raw)
+	projected, err := nativehost.ProjectMessage(raw)
 	if err != nil {
 		return err
 	}
@@ -64,8 +55,8 @@ func (p *piRunProjection) accountNativeAttempt(rung nativeBoundRung, attempt nat
 // Register before terminal publication, so the engine cannot emit message_end
 // before accounting owns it. This is a per-request handoff, not content-based
 // global deduplication: two identical later responses are charged independently.
-func (p *piRunProjection) expectNativeTerminal(outcome nativeAttemptOutcome) error {
-	message := nativeAttemptMessage(outcome)
+func (p *piRunProjection) expectNativeTerminal(outcome ai.AttemptOutcome) error {
+	message := outcome.Message()
 	if message == nil {
 		return errors.New("native attempt has no terminal message")
 	}

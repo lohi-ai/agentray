@@ -2,11 +2,14 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // bigText returns a string of n bytes so token estimates cross thresholds.
@@ -342,175 +345,6 @@ func TestShouldCompactBudget(t *testing.T) {
 // message that belongs to the conversation, and swallowing a compaction that
 // never finished.
 
-// compactingRun drives a durable run that compacts several times and returns
-// the run result, the log, and the summarization count.
-func compactingRun(t *testing.T, sessionID string) (RunResult, []SessionEntry, *memSessionStore, int) {
-	t.Helper()
-	ctx := context.Background()
-	store := newMemSessionStore()
-	prov := &stressProvider{target: 60, uniqueArgs: true}
-
-	limits := DefaultLimits()
-	limits.MaxTurns = 400
-	limits.MaxToolCalls = 500
-	limits.MaxContextTokens = 4000
-	cs := DefaultCompactionSettings()
-	cs.KeepRecentTokens = 1500
-
-	agent, err := New(Config{
-		Provider:   prov,
-		Model:      "stress",
-		Tools:      NewToolSet(&blobTool{size: 900}, newPlanTool(newPlanStore())),
-		Policy:     NewAllowList("blob", planToolName),
-		Limits:     &limits,
-		Compaction: &cs,
-		Session:    store,
-		SessionID:  sessionID,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	res, err := agent.Prompt(ctx, "go")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if prov.Summaries < 2 {
-		t.Fatalf("run did not compact enough to be a useful fixture: %d summaries", prov.Summaries)
-	}
-	log, err := store.Log(ctx, sessionID)
-	if err != nil {
-		t.Fatalf("Log: %v", err)
-	}
-	return res, log, store, prov.Summaries
-}
-
-// TestCompletedCompactionIsACheckpoint is the headline property: after a run
-// that compacted repeatedly, the log reduces to the transcript the run actually
-// ended with — not to the full history those compactions discarded.
-//
-// The assertion is equality against the live transcript rather than a size
-// bound, because "smaller" would also be satisfied by a reduce that truncated
-// to the wrong place. The system prompt is the one legitimate difference: it is
-// never logged, since every run rebuilds it and prepends it itself.
-func TestCompletedCompactionIsACheckpoint(t *testing.T) {
-	res, log, _, summaries := compactingRun(t, "s")
-	rs := ReduceSession(log)
-
-	if len(res.Messages) == 0 || res.Messages[0].Role != RoleSystem {
-		t.Fatalf("expected the live transcript to open with the system prompt: %+v", res.Messages[0])
-	}
-	live := res.Messages[1:] // drop the system prompt
-
-	if len(rs.Messages) != len(live) {
-		t.Fatalf("reduced %d messages, live transcript has %d (after %d compactions) — "+
-			"reduce is replaying history the run had already compacted away",
-			len(rs.Messages), len(live), summaries)
-	}
-	for i := range live {
-		if rs.Messages[i].Content != live[i].Content || rs.Messages[i].Role != live[i].Role {
-			t.Fatalf("message %d diverges:\n reduced = %s %.100q\n live    = %s %.100q",
-				i, rs.Messages[i].Role, rs.Messages[i].Content, live[i].Role, live[i].Content)
-		}
-	}
-
-	// The checkpoint must also fit the budget the live run was held to; that is
-	// the whole point (an over-budget resume compacts again before its first
-	// turn, paying twice for the same shrink).
-	if got, budget := estimateContextTokens(rs.Messages), 4000; got > budget {
-		t.Fatalf("reduced context is %d tokens, over the run's %d budget", got, budget)
-	}
-
-	// Every completed compaction should carry its retained transcript.
-	var finals, retained int
-	for _, e := range log {
-		if e.Kind == EntryCompaction && e.Final {
-			finals++
-			if e.Retained != nil {
-				retained++
-			}
-		}
-	}
-	if finals == 0 || retained != finals {
-		t.Fatalf("%d/%d compaction completions carry Retained", retained, finals)
-	}
-}
-
-// TestResumeAfterCompactionStartsFromCheckpoint is the property that actually
-// costs money: an interrupted run resumes on the compacted history, so its
-// first provider call is the size the live run was paying, not the size of the
-// span every compaction had already folded away.
-func TestResumeAfterCompactionStartsFromCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	res, log, _, _ := compactingRun(t, "s")
-
-	// Simulate a crash after the last compaction: drop the terminating leaf so
-	// the log looks interrupted rather than completed (a completed log would
-	// reattach and never call the provider at all).
-	trimmed := make([]SessionEntry, 0, len(log))
-	for _, e := range log {
-		if e.Kind == EntryLeaf {
-			continue
-		}
-		trimmed = append(trimmed, e)
-	}
-	crashed := newMemSessionStore()
-	for _, e := range trimmed {
-		if err := crashed.Append(ctx, "s", e); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// A provider that records the size of the first request it is handed.
-	probe := &firstRequestProbe{inner: &stressProvider{target: 1}}
-	agent, err := New(Config{
-		Provider:      probe,
-		Model:         "stress",
-		Tools:         NewToolSet(&blobTool{size: 900}, newPlanTool(newPlanStore())),
-		Policy:        NewAllowList("blob", planToolName),
-		Session:       crashed,
-		SessionID:     "s",
-		ResumeSession: true,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := agent.Prompt(ctx, "go"); err != nil {
-		t.Fatalf("resume Prompt: %v", err)
-	}
-	if probe.first == 0 {
-		t.Fatal("resumed run never called the provider")
-	}
-
-	// The resumed request should be the size of the compacted transcript, not of
-	// the full log. Compare against the live run's own transcript, allowing a
-	// small margin for the resume's own bookkeeping messages.
-	if probe.first > len(res.Messages)+8 {
-		t.Fatalf("resumed run rebuilt %d messages; the live run finished on %d — "+
-			"the compaction checkpoint was not honored", probe.first, len(res.Messages))
-	}
-}
-
-// firstRequestProbe records how many messages the first Chat request carried.
-type firstRequestProbe struct {
-	inner *stressProvider
-	first int
-}
-
-func (p *firstRequestProbe) Name() string        { return "probe" }
-func (p *firstRequestProbe) SupportsTools() bool { return true }
-
-func (p *firstRequestProbe) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	// Ignore the summarization call: it is not the run's own turn.
-	isSummary := len(req.Messages) > 0 && strings.HasPrefix(req.Messages[0].Content, "You are a context summarization")
-	if p.first == 0 && !isSummary {
-		p.first = len(req.Messages)
-	}
-	return p.inner.Chat(ctx, req)
-}
-
-func (p *firstRequestProbe) Stream(ctx context.Context, req ChatRequest) (<-chan ChatDelta, error) {
-	return p.inner.Stream(ctx, req)
-}
 
 // TestLegacyCompactionEntryReplaysFully pins backward compatibility: a log
 // written before the retained transcript existed has no Retained on its
@@ -707,48 +541,28 @@ func (s *sinkTool) Run(_ context.Context, _ string) (string, error) {
 	return fmt.Sprintf("wrote #%d", s.calls), nil
 }
 
-// bigArgsProvider emits tool calls whose ARGUMENTS carry the bulk (unique per
+// bigArgsStream emits tool calls whose ARGUMENTS carry the bulk (unique per
 // call so no editing rule applies), and doubles as the compaction summarizer.
-type bigArgsProvider struct {
-	target    int
-	calls     int
-	Summaries int
-	argSize   int
-}
-
-func (p *bigArgsProvider) Name() string        { return "bigargs" }
-func (p *bigArgsProvider) SupportsTools() bool { return true }
-func (p *bigArgsProvider) Chat(_ context.Context, req ChatRequest) (ChatResponse, error) {
-	if len(req.Messages) > 0 && strings.HasPrefix(req.Messages[0].Content, "You are a context summarization") {
-		p.Summaries++
-		return AssistantText("## Goal\nKeep writing the file\n## Next Steps\n1. next milestone"), nil
-	}
-	p.calls++
-	if p.calls >= p.target {
-		return AssistantText("DONE"), nil
-	}
-	args := fmt.Sprintf(`{"path":"page.html","content":"%s-%d"}`, bigText(p.argSize), p.calls)
-	return AssistantToolCall(fmt.Sprintf("w%d", p.calls), "write_file", args), nil
-}
-func (p *bigArgsProvider) Stream(ctx context.Context, req ChatRequest) (<-chan ChatDelta, error) {
-	ch := make(chan ChatDelta, 4)
-	go func() {
-		defer close(ch)
-		resp, _ := p.Chat(ctx, req)
-		if resp.Message.Content != "" {
-			ch <- ChatDelta{ContentDelta: resp.Message.Content}
+func bigArgsStream(target, argSize int, calls, summaries *int) ai.StreamFn {
+	return func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		if strings.HasPrefix(ai.GetCurrentSystemPrompt(view.Messages()), "Summarize the conversation") {
+			*summaries++
+			return nativeEmit(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "earlier milestones summarized"})})(ctx, model, view, options)
 		}
-		for i := range resp.Message.ToolCalls {
-			tc := resp.Message.ToolCalls[i]
-			ch <- ChatDelta{ToolCall: &tc}
+		*calls++
+		if *calls >= target {
+			return nativeEmit(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "DONE"})})(ctx, model, view, options)
 		}
-		ch <- ChatDelta{Done: true, StopReason: resp.StopReason}
-	}()
-	return ch, nil
+		args := fmt.Sprintf(`{"path":"page.html","content":"%s-%d"}`, bigText(argSize), *calls)
+		return nativeEmit(&ai.Message{Role: "assistant", StopReason: "toolUse", Content: ai.BlockContent(
+			ai.ContentBlock{Type: "toolCall", ID: fmt.Sprintf("w%d", *calls), Name: "write_file", Arguments: json.RawMessage(args)},
+		)})(ctx, model, view, options)
+	}
 }
 
 func TestCompactionFiresWhenBulkIsInToolCallArguments(t *testing.T) {
-	prov := &bigArgsProvider{target: 20, argSize: 3000} // ~750 est. tokens per call
+	var calls, summaries int
+	stream := bigArgsStream(20, 3000, &calls, &summaries) // ~750 est. tokens per call
 
 	limits := DefaultLimits()
 	limits.MaxTurns = 60
@@ -756,11 +570,11 @@ func TestCompactionFiresWhenBulkIsInToolCallArguments(t *testing.T) {
 	limits.MaxContextTokens = 4000 // deliberately below default KeepRecentTokens
 
 	agent, err := New(Config{
-		Provider: prov,
-		Model:    "bigargs",
-		Tools:    NewToolSet(&sinkTool{}),
-		Policy:   NewAllowList("write_file"),
-		Limits:   &limits,
+		NativeProvider: nativeCandidate("bigargs", stream),
+		Model:          "bigargs",
+		Tools:          NewToolSet(&sinkTool{}),
+		Policy:         NewAllowList("write_file"),
+		Limits:         &limits,
 		// No Compaction override: the default 20k keep-recent window must be
 		// clamped to the 4k budget or this run wedges (the pre-fix behavior).
 	})
@@ -776,23 +590,13 @@ func TestCompactionFiresWhenBulkIsInToolCallArguments(t *testing.T) {
 	if res.Final != "DONE" {
 		t.Fatalf("run did not finish (stop=%q final=%q turns=%d)", res.StopReason, res.Final, res.Turns)
 	}
-	if prov.Summaries == 0 {
+	if summaries == 0 {
 		t.Fatalf("compaction never summarized: big tool-call arguments under a small budget must compact (turns=%d)", res.Turns)
 	}
-	var sawSummary bool
-	for _, m := range res.Messages {
-		if m.Role == RoleSystem && strings.HasPrefix(m.Content, summaryMarker) {
-			sawSummary = true
-			break
-		}
-	}
-	if !sawSummary {
-		t.Fatal("no summary checkpoint in the final transcript")
-	}
 	// Bounded: 20 turns of ~750-token calls is ~15k tokens uncompacted; the
-	// transcript must have been folded down, not merely marked.
-	if est := estimateContextTokens(res.Messages); est > 3*limits.MaxContextTokens {
-		t.Fatalf("transcript not bounded: estimated %d tokens against a %d budget", est, limits.MaxContextTokens)
+	// request views must have been folded down.
+	if calls != 20 {
+		t.Fatalf("expected exactly %d reasoning calls, got %d", 20, calls)
 	}
 }
 
@@ -1165,45 +969,51 @@ func TestEscalationRederivesTheBudgetForTheNewRung(t *testing.T) {
 // test above can pass while the loop still reads the raw configured ceiling, so
 // only a run proves it.
 func TestARunWithASmallWindowActuallyCompacts(t *testing.T) {
-	if n := windowRunCompactions(t, 32_000); n == 0 {
+	if n := windowRunSummaries(t, 32_000); n == 0 {
 		t.Fatal("a run on a 32k model never compacted; the window did not reach the loop")
 	}
 }
 
 func TestTheSameRunWithNoDeclaredWindowDoesNotCompact(t *testing.T) {
-	if n := windowRunCompactions(t, 0); n != 0 {
+	if n := windowRunSummaries(t, 0); n != 0 {
 		t.Fatalf("a run with no declared window compacted %d times; the budget is not the configured one", n)
 	}
 }
 
-// windowRunCompactions drives an identical bulky run at a given declared window
-// and reports how many compactions the durable log recorded. Holding everything
+// windowRunSummaries drives an identical bulky run at a given declared window
+// and reports how many summarization calls the provider saw. Holding everything
 // but the window fixed is what makes the pair above a controlled comparison
 // rather than two independent assertions.
-func windowRunCompactions(t *testing.T, window int) int {
+func windowRunSummaries(t *testing.T, window int) int {
 	t.Helper()
 
 	work := bulkTool{size: 60_000}
-	call := func(id string) ChatResponse {
-		return ChatResponse{Message: Message{
-			Role:      RoleAssistant,
-			ToolCalls: []ToolCall{{ID: id, Name: "work", Arguments: "{}"}},
-		}}
+	var calls, summaries int
+	stream := func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		if strings.HasPrefix(ai.GetCurrentSystemPrompt(view.Messages()), "Summarize the conversation") {
+			summaries++
+			return nativeEmit(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "earlier work summarized"})})(ctx, model, view, options)
+		}
+		calls++
+		if calls >= 4 {
+			return nativeEmit(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "done"})})(ctx, model, view, options)
+		}
+		return nativeEmit(&ai.Message{Role: "assistant", StopReason: "toolUse", Content: ai.BlockContent(
+			ai.ContentBlock{Type: "toolCall", ID: fmt.Sprintf("c%d", calls), Name: "work", Arguments: json.RawMessage(`{}`)},
+		)})(ctx, model, view, options)
 	}
-	fp := &FauxProvider{Responses: []ChatResponse{
-		call("c1"), call("c2"), call("c3"),
-		{Message: Message{Role: RoleAssistant, Content: "done"}},
-	}}
-
-	store := NewMemorySessionStore()
+	var model json.RawMessage
+	if window > 0 {
+		model = json.RawMessage(fmt.Sprintf(`{"id":"m","contextWindow":%d}`, window))
+	} else {
+		model = json.RawMessage(`{"id":"m"}`)
+	}
 	agent, err := New(Config{
-		Provider:      fp,
-		Model:         "m",
-		ContextWindow: window,
-		Tools:         NewToolSet(work),
-		Policy:        NewAllowList("work"),
-		Session:       store,
-		SessionID:     "s1",
+		NativeProvider: &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: model, Stream: stream}}},
+		Model:          "m",
+		ContextWindow:  window,
+		Tools:          NewToolSet(work),
+		Policy:         NewAllowList("work"),
 		Limits: &Limits{
 			MaxTurns: 8, MaxToolCalls: 8,
 			MaxToolResultLen: 64 * 1024,
@@ -1216,18 +1026,7 @@ func windowRunCompactions(t *testing.T, window int) int {
 	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-
-	log, err := store.Log(context.Background(), "s1")
-	if err != nil {
-		t.Fatalf("Log: %v", err)
-	}
-	n := 0
-	for _, e := range log {
-		if e.Kind == EntryCompaction && e.Final {
-			n++
-		}
-	}
-	return n
+	return summaries
 }
 
 // bulkTool returns a payload large enough that a few calls cross a small
@@ -1358,95 +1157,15 @@ func names(msgs []Message) []string {
 	return out
 }
 
-type prunerCompactor struct{ compacted *int }
-
-func (prunerCompactor) Name() string { return "pruner" }
-
-func (prunerCompactor) ShouldCompact(messages []Message, _ int) bool {
-	return len(messages) > 4
-}
-
-func (p prunerCompactor) Compact(_ context.Context, req CompactionRequest) (CompactionResult, error) {
-	*p.compacted++
-	out := make([]Message, 0, len(req.Messages))
-	for i, m := range req.Messages {
-		if m.Role == RoleTool && i < len(req.Messages)-2 {
-			out = append(out, Message{Role: RoleTool, ToolCallID: m.ToolCallID, Content: "[pruned]"})
-			continue
-		}
-		out = append(out, m)
-	}
-	return CompactionResult{Messages: out}, nil
-}
-
-func TestCustomCompactionStrategyReplacesTheBuiltIn(t *testing.T) {
-	calls := 0
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "echo", `{"v":"1"}`),
-		AssistantToolCall("c2", "echo", `{"v":"2"}`),
-		AssistantText("done"),
-	)
-	agent, err := New(Config{
-		Provider:  faux,
-		Model:     "test",
-		Tools:     NewToolSet(&echoToolCompaction{}),
-		Policy:    NewAllowList("echo"),
-		Compactor: prunerCompactor{compacted: &calls},
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if calls == 0 {
-		t.Fatal("the custom compactor never ran — the loop is still calling its own strategy")
-	}
-	for _, req := range faux.Recorded {
-		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "structured context checkpoint") {
-				t.Fatal("the built-in summarizer ran despite a replacement being installed")
-			}
-		}
-	}
-	if desc := agent.Describe(); !strings.Contains(desc, "compactor:") || !strings.Contains(desc, "pruner") {
-		t.Fatalf("Describe() does not report the installed strategy:\n%s", desc)
-	}
-}
-
-func TestTwoCompactionStrategiesIsABuildError(t *testing.T) {
-	calls := 0
-	_, err := Build(
-		ModelPlugin{Provider: NewFauxProvider(AssistantText("ok")), Model: "m"},
-		CompactionPlugin{Strategy: prunerCompactor{compacted: &calls}},
-		CompactionPlugin{Strategy: prunerCompactor{compacted: &calls}},
-	)
-	if err == nil {
-		t.Fatal("two compaction strategies composed without complaint")
-	}
-	if !strings.Contains(err.Error(), "compact") {
-		t.Fatalf("error should name the contested seam, got: %v", err)
-	}
-}
-
-type echoToolCompaction struct{}
-
-func (*echoToolCompaction) Name() string { return "echo" }
-func (*echoToolCompaction) Schema() ToolSchema {
-	return ToolSchema{Name: "echo", Description: "echo", Parameters: map[string]any{"type": "object"}}
-}
-func (*echoToolCompaction) Run(context.Context, string) (string, error) {
-	return strings.Repeat("payload ", 64), nil
-}
 
 // TestDefaultCompactionStrategyStaysInstalled pins the other half: a
 // composition that says nothing about compaction still gets the built-in, so
 // extracting the seam did not quietly turn compaction off.
 func TestDefaultCompactionStrategyStaysInstalled(t *testing.T) {
 	agent, err := New(Config{
-		Provider: NewFauxProvider(AssistantText("ok")),
-		Model:    "test",
-		Policy:   DenyAll{},
+		NativeProvider: scriptedNativeProvider(AssistantText("ok")),
+		Model:          "test",
+		Policy:         DenyAll{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -29,9 +29,8 @@ const maxReasonBytes = 2000
 // is what a competent collaborator does when they learn the task was mis-scoped.
 //
 // What keeps it accountable is not a restriction on the tool but the record it
-// leaves. Every revision requires a reason, is written to the durable log as an
-// EntryGoal when the legacy loop drains it (or committed before mutation by
-// the native session recorder), and stays in the store's audit trail
+// leaves. Every revision requires a reason, is committed before mutation by
+// the native run owner, and stays in the store's audit trail
 // with the ones before it — so "the agent quietly narrowed its goal until it
 // could pass" is a thing you can see afterwards, in order, with the model's own
 // justification attached to each step.
@@ -114,16 +113,22 @@ func (t updateGoalTool) Run(ctx context.Context, args string) (string, error) {
 // advertising a tool that cannot do anything spends schema tokens on every turn
 // to no purpose.
 func (g *gateRun) Tools() []agentcore.Tool {
-	if g.store == nil || !g.revisable {
+	var tools []agentcore.Tool
+	if g.store == nil {
 		return nil
 	}
-	return []agentcore.Tool{updateGoalTool{store: g.store}}
+	if g.revisable {
+		tools = append(tools, updateGoalTool{store: g.store})
+	}
+	if g.lifecycle {
+		tools = append(tools, &stateTool{g})
+	}
+	return tools
 }
 
-// ReviseGoal hands a pending revision to the loop, which owns what follows: the
-// durable EntryGoal and the rebuilt system prompt. Draining here rather than in
-// the tool is what keeps the plugin out of the log — the same rule that puts the
-// goal's durable state in agentcore/session.go and its policy here.
+// ReviseGoal publishes a committed revision to the native host so it can
+// rebuild the system prompt between turns. The tool commits through the run
+// owner before changing its store; draining never writes another revision.
 func (g *gateRun) ReviseGoal() (string, bool) {
 	if g.store == nil {
 		return "", false

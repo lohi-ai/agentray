@@ -39,7 +39,7 @@ func TestPiAskPreparationMatchesGoPlugin(t *testing.T) {
 			defer host.Close()
 			var requests int
 			var prepared json.RawMessage
-			worker := agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["beforeToolCall"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+			worker := NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["beforeToolCall"]}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				switch method {
 				case "beforeToolCall":
 					var call struct{ Args json.RawMessage }

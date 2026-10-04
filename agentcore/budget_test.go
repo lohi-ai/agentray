@@ -25,7 +25,7 @@ func toolCallWithCost(id, name, args string, cost float64) ChatResponse {
 // turn).
 func TestBudgetGateGracefulStop(t *testing.T) {
 	work := &echoTool{name: "do_work"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		toolCallWithCost("w1", "do_work", `{"step":1}`, 0.30), // usage after: 0.30
 		toolCallWithCost("w2", "do_work", `{"step":2}`, 0.30), // usage after: 0.60 (>= cap)
 		// The finalizing turn: a well-behaved model, seeing no tools, writes a
@@ -38,11 +38,11 @@ func TestBudgetGateGracefulStop(t *testing.T) {
 	)
 	limits := DefaultLimits()
 	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(work),
-		Policy:   NewAllowList("do_work"),
-		Limits:   &limits,
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(work),
+		Policy:         NewAllowList("do_work"),
+		Limits:         &limits,
 		BudgetGate: func(_ context.Context, u Usage) bool {
 			return u.CostUSD >= 0.50
 		},
@@ -81,17 +81,17 @@ func TestBudgetGateGracefulStop(t *testing.T) {
 // own final answer.
 func TestBudgetGateInactiveWhenUnderCap(t *testing.T) {
 	work := &echoTool{name: "do_work"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		toolCallWithCost("w1", "do_work", `{"step":1}`, 0.10),
 		AssistantText("done"),
 	)
 	limits := DefaultLimits()
 	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(work),
-		Policy:   NewAllowList("do_work"),
-		Limits:   &limits,
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(work),
+		Policy:         NewAllowList("do_work"),
+		Limits:         &limits,
 		BudgetGate: func(_ context.Context, u Usage) bool {
 			return u.CostUSD >= 100.0
 		},
@@ -139,7 +139,7 @@ func countSteers(messages []Message) int {
 // real work, then "Something went wrong. Try again."
 func TestMaxTurnsEndsWithAnAnswerNotSilence(t *testing.T) {
 	work := &echoTool{name: "run_sql"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		AssistantToolCall("c1", "run_sql", `{"q":1}`),
 		AssistantToolCall("c2", "run_sql", `{"q":2}`),
 		AssistantToolCall("c3", "run_sql", `{"q":3}`),
@@ -150,7 +150,7 @@ func TestMaxTurnsEndsWithAnAnswerNotSilence(t *testing.T) {
 	)
 	limits := DefaultLimits()
 	limits.MaxTurns = 3
-	agent, err := New(Config{Provider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
+	agent, err := New(Config{NativeProvider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -180,15 +180,15 @@ func TestMaxTurnsEndsWithAnAnswerNotSilence(t *testing.T) {
 // the last thing in the history and nothing ever read them.
 func TestMaxToolCallsEndsWithAnAnswerNotSilence(t *testing.T) {
 	work := &echoTool{name: "run_sql"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		AssistantToolCall("c1", "run_sql", `{"q":1}`),
 		AssistantToolCall("c2", "run_sql", `{"q":2}`),
-		AssistantToolCall("c3", "run_sql", `{"q":3}`), // blocked: budget spent
+		// Native admission removes tools before this next model turn.
 		AssistantText("Two queries in, activation looks like the gap. I ran out of queries before confirming it."),
 	)
 	limits := DefaultLimits()
 	limits.MaxToolCalls = 2
-	agent, err := New(Config{Provider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
+	agent, err := New(Config{NativeProvider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -219,8 +219,8 @@ func TestMaxToolCallsIsHardCapForParallelBatch(t *testing.T) {
 	limits := DefaultLimits()
 	limits.MaxToolCalls = 1
 	agent, err := New(Config{
-		Provider: NewFauxProvider(batch, AssistantText("one call completed; the other hit the cap")),
-		Model:    "test", Tools: NewToolSet(work), Policy: NewAllowList(work.Name()), Limits: &limits,
+		NativeProvider: scriptedNativeProvider(batch, AssistantText("one call completed; the other hit the cap")),
+		Model:          "test", Tools: NewToolSet(work), Policy: NewAllowList(work.Name()), Limits: &limits,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -275,11 +275,11 @@ func TestWrapUpBorrowsExactlyOneTurn(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		script = append(script, AssistantToolCall("c", "run_sql", `{"q":1}`))
 	}
-	faux := NewFauxProvider(script...)
+	faux := scriptedNativeProvider(script...)
 	limits := DefaultLimits()
 	limits.MaxTurns = 4
 	limits.MaxToolCalls = 100
-	agent, err := New(Config{Provider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
+	agent, err := New(Config{NativeProvider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -301,14 +301,14 @@ func TestWrapUpBorrowsExactlyOneTurn(t *testing.T) {
 // answer with a summary of itself.
 func TestCleanFinishOnTheLastTurnKeepsItsOwnAnswer(t *testing.T) {
 	work := &echoTool{name: "run_sql"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		AssistantToolCall("c1", "run_sql", `{"q":1}`),
 		AssistantToolCall("c2", "run_sql", `{"q":2}`),
 		AssistantText("Activation is the weakest step, at 24%."),
 	)
 	limits := DefaultLimits()
 	limits.MaxTurns = 3
-	agent, err := New(Config{Provider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
+	agent, err := New(Config{NativeProvider: faux, Model: "test", Tools: NewToolSet(work), Policy: NewAllowList("run_sql"), Limits: &limits})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

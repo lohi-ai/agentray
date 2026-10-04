@@ -9,13 +9,10 @@
 // Two rules define this package, and both are tests rather than promises (see
 // boundary_test.go):
 //
-//   - The kernel depends on nothing else in this module. agentcore imports only
-//     the standard library plus focused Unicode and JSON Schema libraries.
-//     Everything product-specific enters through an interface declared here —
-//     including the model itself:
-//     agentcore declares [LLMProvider] and never speaks a wire protocol. The
-//     OpenAI and Anthropic implementations live in agentray/ai, which imports
-//     this package, so a vendor change cannot reach the loop.
+//   - Composition depends only on shared runtime modules. Provider-neutral
+//     contracts live in ai/protocol and are re-exported here during migration;
+//     ai no longer imports agentcore. The native loop lives in engine and
+//     reusable native compaction/checkpoint policy lives in host.
 //   - The kernel names no plugin. Delete every package under agentcore/plugins
 //     and this package still compiles, still runs, and still passes its tests —
 //     it just does less.
@@ -45,7 +42,7 @@
 //     error naming both plugins. Bought property: replaceability.
 //   - Extension — r.AddExtension(...). Ordered by explicit Priority, never by
 //     registration order. This is how a capability reaches a running agent.
-//   - Additive — r.AddTools / r.AddHooks / r.WrapProvider. Accumulates.
+//   - Additive — r.AddTools / r.AddHooks. Accumulates.
 //
 // # Reading this package
 //

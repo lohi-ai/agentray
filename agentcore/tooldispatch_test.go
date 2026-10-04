@@ -414,15 +414,16 @@ func TestToolValidatorCacheIsBounded(t *testing.T) {
 // execution, the precise reason reaches the model, and the tool never runs.
 func TestLoopRejectsBadArgs(t *testing.T) {
 	tool := &schemaTool{}
-	faux := NewFauxProvider(
+	recorder := &nativeRecorder{}
+	faux := recordedNativeProvider(recorder,
 		AssistantToolCall("c1", "run_query", `{"mode":"read"}`), // missing required sql
 		AssistantText("sorry, I omitted the sql field"),
 	)
 	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(tool),
-		Policy:   NewAllowList("run_query"),
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(tool),
+		Policy:         NewAllowList("run_query"),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -439,7 +440,7 @@ func TestLoopRejectsBadArgs(t *testing.T) {
 	}
 	// The second turn's request must carry the validation error as a tool result
 	// so the model can self-correct.
-	last := faux.Recorded[len(faux.Recorded)-1]
+	last := recorder.all()[recorder.count()-1]
 	var sawError bool
 	for _, m := range last.Messages {
 		if m.Role == RoleTool && contains(m.Content, "required") {
@@ -579,7 +580,7 @@ func TestSerializeToolArgsMalformedOversizedFallsThrough(t *testing.T) {
 // refusal is traced as not-allowed without spending tool-call budget.
 func TestTruncatedResponseNeverExecutesTools(t *testing.T) {
 	tool := &echoTool{name: "write_file"}
-	faux := NewFauxProvider(
+	faux := scriptedNativeProvider(
 		ChatResponse{
 			Message: Message{Role: RoleAssistant, ToolCalls: []ToolCall{
 				{ID: "c1", Name: "write_file", Arguments: `{"path":"a.go","content":"package main`},
@@ -589,10 +590,10 @@ func TestTruncatedResponseNeverExecutesTools(t *testing.T) {
 		AssistantText("re-issued with complete arguments"),
 	)
 	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(tool),
-		Policy:   NewAllowList("write_file"),
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(tool),
+		Policy:         NewAllowList("write_file"),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -643,11 +644,11 @@ func TestTruncatedStopReasons(t *testing.T) {
 // tool calls: a length-stopped response with no calls is still the run's
 // answer (truncated text is better than none, and nothing unsafe can run).
 func TestTruncatedFinalAnswerStillReturned(t *testing.T) {
-	faux := NewFauxProvider(ChatResponse{
+	faux := scriptedNativeProvider(ChatResponse{
 		Message:    Message{Role: RoleAssistant, Content: "partial ans"},
 		StopReason: "length",
 	})
-	agent, err := New(Config{Provider: faux, Model: "test"})
+	agent, err := New(Config{NativeProvider: faux, Model: "test"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -660,353 +661,7 @@ func TestTruncatedFinalAnswerStillReturned(t *testing.T) {
 	}
 }
 
-// streamingProbe is a StreamingTool that emits a fixed set of partials before
-// returning its final result.
-type streamingProbe struct{ partials []string }
 
-func (streamingProbe) Name() string { return "probe" }
-func (streamingProbe) Schema() ToolSchema {
-	return ToolSchema{Name: "probe", Description: "streams partials", Parameters: map[string]any{"type": "object"}}
-}
-func (streamingProbe) Run(context.Context, string) (string, error) { return "final result", nil }
-func (p streamingProbe) RunStreaming(_ context.Context, _ string, emit func(string)) (string, error) {
-	for _, s := range p.partials {
-		emit(s)
-	}
-	return "final result", nil
-}
-
-// TestStreamingToolEmitsPartials verifies a streaming tool's partials reach the
-// sink as tool_execution_update events before the final tool_execution_end, and
-// that the final result is unchanged.
-func TestStreamingToolEmitsPartials(t *testing.T) {
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "probe", `{}`),
-		AssistantText("ok"),
-	)
-	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(streamingProbe{partials: []string{"25%", "50%", "75%"}}),
-		Policy:   NewAllowList("probe"),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	var updates []string
-	var sawEndAfterUpdates bool
-	var updateCount, endCount int
-	sink := func(ev StreamEvent) {
-		switch ev.Type {
-		case StreamToolExecUpdate:
-			updates = append(updates, ev.Note)
-			updateCount++
-		case StreamToolExecEnd:
-			endCount++
-			if updateCount >= 2 {
-				sawEndAfterUpdates = true
-			}
-		}
-	}
-	res, err := agent.PromptStream(context.Background(), "go", sink)
-	if err != nil {
-		t.Fatalf("PromptStream: %v", err)
-	}
-	if len(updates) < 2 {
-		t.Fatalf("expected >=2 partials, got %v", updates)
-	}
-	if !sawEndAfterUpdates {
-		t.Fatalf("tool_execution_end did not follow the partials")
-	}
-	// Final tool result fed to the model is the authoritative value, not a partial.
-	var sawFinal bool
-	for _, m := range res.Messages {
-		if m.Role == RoleTool && m.Content == "final result" {
-			sawFinal = true
-		}
-	}
-	if !sawFinal {
-		t.Fatalf("final tool result missing or overwritten by a partial: %+v", res.Messages)
-	}
-}
-
-// TestNonStreamingToolNoUpdates verifies a plain tool produces no
-// tool_execution_update events (the partial path is opt-in).
-func TestNonStreamingToolNoUpdates(t *testing.T) {
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "noop", `{}`),
-		AssistantText("ok"),
-	)
-	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(noopTool{}),
-		Policy:   NewAllowList("noop"),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	var updates int
-	sink := func(ev StreamEvent) {
-		if ev.Type == StreamToolExecUpdate {
-			updates++
-		}
-	}
-	if _, err := agent.PromptStream(context.Background(), "go", sink); err != nil {
-		t.Fatalf("PromptStream: %v", err)
-	}
-	if updates != 0 {
-		t.Fatalf("non-streaming tool emitted %d updates, want 0", updates)
-	}
-}
-
-// runKeyCapture executes one agent run whose single tool call records the
-// idempotency key it was handed, returning (key, ok).
-func runKeyCapture(t *testing.T, sessionID string) (string, bool) {
-	t.Helper()
-	var key string
-	var ok bool
-	tool := funcTool{
-		name: "effect",
-		run: func(ctx context.Context, _ string) (string, error) {
-			key, ok = IdempotencyKey(ctx)
-			return "done", nil
-		},
-	}
-	cfg := Config{
-		Provider: NewFauxProvider(
-			AssistantToolCall("c1", "effect", `{}`),
-			AssistantText("ok"),
-		),
-		Model:  "test",
-		Tools:  NewToolSet(tool),
-		Policy: NewAllowList("effect"),
-	}
-	if sessionID != "" {
-		cfg.Session = newMemSessionStore()
-		cfg.SessionID = sessionID
-	}
-	agent, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := agent.Prompt(context.Background(), "start"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	return key, ok
-}
-
-// TestIdempotencyKeyStableAcrossResume pins the dedupe contract: the same
-// logical call — same session, same tool-call ID, exactly what RecoverSession
-// replays after a crash — must resolve to the same key in a fresh process, so
-// an external system can drop the duplicated side effect.
-func TestIdempotencyKeyStableAcrossResume(t *testing.T) {
-	k1, ok1 := runKeyCapture(t, "sess-A")
-	k2, ok2 := runKeyCapture(t, "sess-A") // fresh agent + store: simulates the resumed process
-	if !ok1 || !ok2 {
-		t.Fatalf("durable runs must hand tools a key (ok1=%v ok2=%v)", ok1, ok2)
-	}
-	if !strings.HasPrefix(k1, "ik_") {
-		t.Fatalf("key %q missing ik_ prefix", k1)
-	}
-	if k1 != k2 {
-		t.Fatalf("same (session, call) produced different keys: %q vs %q", k1, k2)
-	}
-	// A different session must never collide, or cross-run effects would dedupe
-	// against each other.
-	k3, _ := runKeyCapture(t, "sess-B")
-	if k3 == k1 {
-		t.Fatalf("different sessions produced the same key %q", k1)
-	}
-}
-
-// TestIdempotencyKeyAbsentWithoutSession verifies a storeless run hands out no
-// key: without a durable log there is no replay, and a key that changed every
-// process restart would be worse than none.
-func TestIdempotencyKeyAbsentWithoutSession(t *testing.T) {
-	key, ok := runKeyCapture(t, "")
-	if ok || key != "" {
-		t.Fatalf("storeless run leaked a key: %q ok=%v", key, ok)
-	}
-}
-
-// TestIdempotencyKeyOnTrace verifies the key is persisted on the tool trace so
-// an external side effect can be correlated back to the logical call.
-func TestIdempotencyKeyOnTrace(t *testing.T) {
-	agent, err := New(Config{
-		Provider: NewFauxProvider(
-			AssistantToolCall("c1", "noop", `{}`),
-			AssistantText("ok"),
-		),
-		Model:     "test",
-		Tools:     NewToolSet(noopTool{}),
-		Policy:    NewAllowList("noop"),
-		Session:   newMemSessionStore(),
-		SessionID: "sess-trace",
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	res, err := agent.Prompt(context.Background(), "start")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	var traced string
-	for _, tr := range res.Tools {
-		if tr.Tool == "noop" {
-			traced = tr.IdempotencyKey
-		}
-	}
-	if traced == "" {
-		t.Fatal("executed tool trace missing idempotency key")
-	}
-	if traced != toolIdempotencyKey("sess-trace", "c1") {
-		t.Fatalf("trace key %q does not match derivation", traced)
-	}
-}
-
-// recordingTool captures the exact argument string it was handed, so a test can
-// assert what reached the tool vs. what was traced.
-type recordingTool struct {
-	name     string
-	lastArgs string
-	called   int
-}
-
-func (r *recordingTool) Name() string { return r.name }
-func (r *recordingTool) Schema() ToolSchema {
-	return ToolSchema{Name: r.name, Description: "rec", Parameters: map[string]any{"type": "object"}}
-}
-func (r *recordingTool) Run(_ context.Context, args string) (string, error) {
-	r.called++
-	r.lastArgs = args
-	return "ok", nil
-}
-
-// stubResolver is a test CredentialResolver driven by a func.
-type stubResolver struct {
-	resolve func(string) (string, error)
-}
-
-func (s stubResolver) Resolve(_ context.Context, args string) (string, error) {
-	return s.resolve(args)
-}
-
-// TestCredentialResolverInjectsAtTrustBoundary proves the core F7 property: the
-// resolved secret reaches the tool, but the trace (and therefore the persisted
-// record and the model-visible call) keeps the {{cred:NAME}} placeholder — the
-// literal is never observable outside the executing tool.
-func TestCredentialResolverInjectsAtTrustBoundary(t *testing.T) {
-	tool := &recordingTool{name: "call_api"}
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "call_api", `{"key":"{{cred:API_KEY}}"}`),
-		AssistantText("done"),
-	)
-	env := DefaultEnv()
-	env.Credentials = stubResolver{resolve: func(args string) (string, error) {
-		return strings.ReplaceAll(args, "{{cred:API_KEY}}", "sk-secret-value"), nil
-	}}
-	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(tool),
-		Policy:   NewAllowList("call_api"),
-		Env:      &env,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	res, err := agent.Prompt(context.Background(), "go")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-
-	// The tool received the resolved secret.
-	if want := `{"key":"sk-secret-value"}`; tool.lastArgs != want {
-		t.Fatalf("tool args: want %q, got %q", want, tool.lastArgs)
-	}
-	// The trace kept the placeholder — no secret leaked into the persisted record.
-	if len(res.Tools) != 1 {
-		t.Fatalf("expected 1 trace, got %d", len(res.Tools))
-	}
-	if got := res.Tools[0].Args; got != `{"key":"{{cred:API_KEY}}"}` {
-		t.Fatalf("trace args leaked or changed: %q", got)
-	}
-	if strings.Contains(res.Tools[0].Args, "sk-secret-value") {
-		t.Fatal("secret value leaked into the tool trace")
-	}
-}
-
-// TestCredentialResolverFailsClosed verifies a resolver error blocks the call
-// (the tool never runs) and the reason is returned to the model.
-func TestCredentialResolverFailsClosed(t *testing.T) {
-	tool := &recordingTool{name: "call_api"}
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "call_api", `{"key":"{{cred:MISSING}}"}`),
-		AssistantText("understood"),
-	)
-	env := DefaultEnv()
-	env.Credentials = stubResolver{resolve: func(string) (string, error) {
-		return "", errors.New("unknown credential \"MISSING\"")
-	}}
-	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(tool),
-		Policy:   NewAllowList("call_api"),
-		Env:      &env,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	res, err := agent.Prompt(context.Background(), "go")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if tool.called != 0 {
-		t.Fatalf("tool must not run when resolution fails, got %d calls", tool.called)
-	}
-	if len(res.Tools) != 1 || res.Tools[0].Allowed {
-		t.Fatalf("expected 1 blocked trace, got %+v", res.Tools)
-	}
-	var sawBlock bool
-	for _, m := range res.Messages {
-		if m.Role == RoleTool && strings.Contains(m.Content, "blocked:") {
-			sawBlock = true
-		}
-	}
-	if !sawBlock {
-		t.Fatal("block reason was not returned to the model")
-	}
-}
-
-// TestNoCredentialResolverPassesArgsThrough is the default-off path: with no
-// resolver wired, arguments reach the tool byte-for-byte unchanged.
-func TestNoCredentialResolverPassesArgsThrough(t *testing.T) {
-	tool := &recordingTool{name: "call_api"}
-	faux := NewFauxProvider(
-		AssistantToolCall("c1", "call_api", `{"key":"{{cred:API_KEY}}"}`),
-		AssistantText("done"),
-	)
-	agent, err := New(Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    NewToolSet(tool),
-		Policy:   NewAllowList("call_api"),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if want := `{"key":"{{cred:API_KEY}}"}`; tool.lastArgs != want {
-		t.Fatalf("args should pass through unchanged: want %q, got %q", want, tool.lastArgs)
-	}
-}
 
 func TestTruncateMiddleKeepsHeadAndTail(t *testing.T) {
 	s := "HEAD-" + strings.Repeat("x", 4096) + "-TAIL"
@@ -1051,9 +706,9 @@ func TestTruncateMiddleUTF8Safe(t *testing.T) {
 // TestReasoningEffortThreadedIntoRequests proves the per-agent knob reaches
 // every provider call of a run.
 func TestReasoningEffortThreadedIntoRequests(t *testing.T) {
-	provider := NewFauxProvider(AssistantText("ok"))
+	recorder := &nativeRecorder{}
 	agent, err := New(Config{
-		Provider:        provider,
+		NativeProvider:  recordedNativeProvider(recorder, AssistantText("ok")),
 		Model:           "faux-1",
 		Tools:           NewToolSet(),
 		Policy:          NewAllowList(),
@@ -1065,7 +720,150 @@ func TestReasoningEffortThreadedIntoRequests(t *testing.T) {
 	if _, err := agent.Prompt(t.Context(), "hello"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	if len(provider.Recorded) == 0 || provider.Recorded[0].ReasoningEffort != "high" {
-		t.Fatalf("reasoning effort not threaded: %+v", provider.Recorded)
+	got := recorder.all()
+	if len(got) == 0 || got[0].Options["reasoning"] != "high" {
+		t.Fatalf("reasoning effort not threaded: %+v", got)
+	}
+}
+
+// recordingTool captures the exact argument string it was handed, so a test can
+// assert what reached the tool vs. what was traced.
+type recordingTool struct {
+	name     string
+	lastArgs string
+	called   int
+}
+
+func (r *recordingTool) Name() string { return r.name }
+func (r *recordingTool) Schema() ToolSchema {
+	return ToolSchema{Name: r.name, Description: "rec", Parameters: map[string]any{"type": "object"}}
+}
+func (r *recordingTool) Run(_ context.Context, args string) (string, error) {
+	r.called++
+	r.lastArgs = args
+	return "ok", nil
+}
+
+// stubResolver is a test CredentialResolver driven by a func.
+type stubResolver struct {
+	resolve func(string) (string, error)
+}
+
+func (s stubResolver) Resolve(_ context.Context, args string) (string, error) {
+	return s.resolve(args)
+}
+
+// TestCredentialResolverInjectsAtTrustBoundary proves the core F7 property: the
+// resolved secret reaches the tool, but the trace (and therefore the persisted
+// record and the model-visible call) keeps the {{cred:NAME}} placeholder — the
+// literal is never observable outside the executing tool.
+func TestCredentialResolverInjectsAtTrustBoundary(t *testing.T) {
+	tool := &recordingTool{name: "call_api"}
+	faux := scriptedNativeProvider(
+		AssistantToolCall("c1", "call_api", `{"key":"{{cred:API_KEY}}"}`),
+		AssistantText("done"),
+	)
+	env := DefaultEnv()
+	env.Credentials = stubResolver{resolve: func(args string) (string, error) {
+		return strings.ReplaceAll(args, "{{cred:API_KEY}}", "sk-secret-value"), nil
+	}}
+	agent, err := New(Config{
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(tool),
+		Policy:         NewAllowList("call_api"),
+		Env:            &env,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// The tool received the resolved secret.
+	if want := `{"key":"sk-secret-value"}`; tool.lastArgs != want {
+		t.Fatalf("tool args: want %q, got %q", want, tool.lastArgs)
+	}
+	// The trace kept the placeholder — no secret leaked into the persisted record.
+	if len(res.Tools) != 1 {
+		t.Fatalf("expected 1 trace, got %d", len(res.Tools))
+	}
+	if got := res.Tools[0].Args; got != `{"key":"{{cred:API_KEY}}"}` {
+		t.Fatalf("trace args leaked or changed: %q", got)
+	}
+	if strings.Contains(res.Tools[0].Args, "sk-secret-value") {
+		t.Fatal("secret value leaked into the tool trace")
+	}
+}
+
+// TestCredentialResolverFailsClosed verifies a resolver error blocks the call
+// (the tool never runs) and the reason is returned to the model.
+func TestCredentialResolverFailsClosed(t *testing.T) {
+	tool := &recordingTool{name: "call_api"}
+	faux := scriptedNativeProvider(
+		AssistantToolCall("c1", "call_api", `{"key":"{{cred:MISSING}}"}`),
+		AssistantText("understood"),
+	)
+	env := DefaultEnv()
+	env.Credentials = stubResolver{resolve: func(string) (string, error) {
+		return "", errors.New("unknown credential \"MISSING\"")
+	}}
+	agent, err := New(Config{
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(tool),
+		Policy:         NewAllowList("call_api"),
+		Env:            &env,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := agent.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if tool.called != 0 {
+		t.Fatalf("tool must not run when resolution fails, got %d calls", tool.called)
+	}
+	if len(res.Tools) != 1 || res.Tools[0].Allowed {
+		t.Fatalf("expected 1 blocked trace, got %+v", res.Tools)
+	}
+	var sawBlock bool
+	for _, m := range res.Messages {
+		if m.Role == RoleTool && strings.Contains(m.Content, "blocked:") {
+			sawBlock = true
+		}
+	}
+	if !sawBlock {
+		t.Fatal("block reason was not returned to the model")
+	}
+}
+
+// TestNoCredentialResolverPassesArgsThrough is the default-off path: with no
+// resolver wired, arguments reach the tool byte-for-byte unchanged.
+func TestNoCredentialResolverPassesArgsThrough(t *testing.T) {
+	tool := &recordingTool{name: "call_api"}
+	faux := scriptedNativeProvider(
+		AssistantToolCall("c1", "call_api", `{"key":"{{cred:API_KEY}}"}`),
+		AssistantText("done"),
+	)
+	agent, err := New(Config{
+		NativeProvider: faux,
+		Model:          "test",
+		Tools:          NewToolSet(tool),
+		Policy:         NewAllowList("call_api"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := agent.Prompt(context.Background(), "go"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if want := `{"key":"{{cred:API_KEY}}"}`; tool.lastArgs != want {
+		t.Fatalf("args should pass through unchanged: want %q, got %q", want, tool.lastArgs)
 	}
 }

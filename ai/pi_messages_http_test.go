@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -419,7 +419,7 @@ func TestPiMessagesHTTPFailureMetadata(t *testing.T) {
 			if !closed || result.StopReason != "error" {
 				t.Fatal("error did not settle and close body")
 			}
-			failure, ok := capture.Failure().(*agentcore.ProviderError)
+			failure, ok := capture.Failure().(*protocol.ProviderError)
 			if callback {
 				if ok || !capture.HostFailure() {
 					t.Fatal("callback failure classified as provider failure")

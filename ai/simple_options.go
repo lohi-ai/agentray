@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"slices"
 )
@@ -166,12 +167,48 @@ func buildOpenAISimpleOptions(rawModel json.RawMessage, transcript TranscriptCon
 	return json.Marshal(base)
 }
 
+// ResolveSamplingParams applies model defaults, effective-thinking-level defaults,
+// then request overrides. A nil result means no sampling object was supplied.
+func ResolveSamplingParams(rawModel json.RawMessage, thinkingLevel string, requestParams json.RawMessage) (json.RawMessage, error) {
+	var model completionsModel
+	if err := json.Unmarshal(rawModel, &model); err != nil {
+		return nil, err
+	}
+	if len(requestParams) > 0 && !json.Valid(requestParams) {
+		return nil, errors.New("invalid sampling parameters JSON")
+	}
+	params := resolveSamplingParams(model, thinkingLevel, requestParams)
+	if params == nil {
+		return nil, nil
+	}
+	return json.Marshal(params)
+}
+
+func resolveSamplingParams(model completionsModel, thinkingLevel string, requestParams json.RawMessage) map[string]json.RawMessage {
+	level := clampThinkingLevel(model, thinkingLevel)
+	levelParams, _ := samplingObject(model.SamplingParamsByThinkingLevel[level])
+	request, _ := samplingObject(requestParams)
+	if model.SamplingParams == nil && levelParams == nil && request == nil {
+		return nil
+	}
+	result := make(map[string]json.RawMessage)
+	for _, params := range []map[string]json.RawMessage{model.SamplingParams, levelParams, request} {
+		for key, value := range params {
+			result[key] = value
+		}
+	}
+	return result
+}
+
 func nativeBaseOptions(model completionsModel, transcript TranscriptContext, options map[string]json.RawMessage) map[string]json.RawMessage {
 	base := map[string]json.RawMessage{}
-	for _, name := range []string{"temperature", "samplingParams", "signal", "telemetryContext", "apiKey", "fetch", "transport", "cacheRetention", "sessionId", "headers", "onPayload", "onResponse", "onProviderStreamEvent", "timeoutMs", "websocketConnectTimeoutMs", "maxRetries", "maxRetryDelayMs", "metadata", "env", "toolChoice"} {
+	for _, name := range []string{"temperature", "signal", "telemetryContext", "apiKey", "fetch", "transport", "cacheRetention", "sessionId", "headers", "onPayload", "onResponse", "onProviderStreamEvent", "timeoutMs", "websocketConnectTimeoutMs", "maxRetries", "maxRetryDelayMs", "metadata", "env", "toolChoice"} {
 		if value, exists := options[name]; exists {
 			base[name] = value
 		}
+	}
+	if sampling := resolveSamplingParams(model, samplingString(options["reasoning"]), options["samplingParams"]); sampling != nil {
+		base["samplingParams"], _ = json.Marshal(sampling)
 	}
 	maxTokens := model.MaxTokens
 	if samplingNonNull(options["maxTokens"]) {

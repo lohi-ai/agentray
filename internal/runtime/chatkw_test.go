@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
 func TestParseMagicKeywords(t *testing.T) {
@@ -81,9 +80,7 @@ func TestParseMagicKeywordsDedupesButStripsAll(t *testing.T) {
 func TestChatMagicKeywordSetsEffortAndStrips(t *testing.T) {
 	var got chatWork
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: routeData}, nil
-		},
+
 		handle: func(_ context.Context, w chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 			got = w
 			return ChatResult{Final: "done"}, nil
@@ -104,9 +101,7 @@ func TestChatMagicKeywordSetsEffortAndStrips(t *testing.T) {
 func TestChatMagicKeywordInCodeDoesNotFire(t *testing.T) {
 	var got chatWork
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			return chatDecision{Route: routeData}, nil
-		},
+
 		handle: func(_ context.Context, w chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 			got = w
 			return ChatResult{Final: "done"}, nil
@@ -128,10 +123,7 @@ func TestChatMagicKeywordInCodeDoesNotFire(t *testing.T) {
 func TestChatMagicKeywordInsideGoalArg(t *testing.T) {
 	var got chatWork
 	svc := &ChatService{
-		classify: func(context.Context, string, []agentcore.Message, string) (chatDecision, error) {
-			t.Fatal("classifier must not run for a /goal turn")
-			return chatDecision{}, nil
-		},
+
 		handle: func(_ context.Context, w chatWork, _ agentcore.StreamSink) (ChatResult, error) {
 			got = w
 			return ChatResult{Final: "done"}, nil
@@ -149,18 +141,5 @@ func TestChatMagicKeywordInsideGoalArg(t *testing.T) {
 	}
 	if strings.Contains(got.Message, "ultrathink") {
 		t.Fatalf("keyword leaked into prompt: %q", got.Message)
-	}
-}
-
-func TestKeywordEntrySkippedByFoldHistory(t *testing.T) {
-	payload := `{"keywords":["ultrathink"]}`
-	entries := []storage.AgentConversationEntry{
-		msgEntry("1", "user", "ultrathink why?"),
-		{ID: "2", Kind: ConvKindKeyword, PayloadJSON: payload},
-		msgEntry("3", "assistant", "because"),
-	}
-	history := foldHistory(entries)
-	if len(history) != 2 {
-		t.Fatalf("keyword entry must not enter model context, got %+v", history)
 	}
 }

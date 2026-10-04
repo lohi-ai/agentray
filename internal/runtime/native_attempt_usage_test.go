@@ -87,8 +87,8 @@ func TestNativeAttemptUsageCountsDiscardedAndIdenticalResponsesOnce(t *testing.T
 func TestNativeAttemptUsageRejectsOverlapAndMismatchedTerminal(t *testing.T) {
 	p := &piRunProjection{}
 	message := usageFixture("stop", 3, 0.3)
-	outcome := nativeAttemptOutcome{terminal: ai.AssistantMessageEvent{Type: "done", Message: message}}
-	if err := p.accountNativeAttempt(nativeBoundRung{pricingKnown: true}, nativeRetryAttempt{outcome: outcome}); err != nil {
+	outcome := ai.AttemptOutcome{Terminal: ai.AssistantMessageEvent{Type: "done", Message: message}}
+	if err := p.accountNativeAttempt(nativeBoundRung{pricingKnown: true}, ai.FallbackAttempt{Outcome: outcome}); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.expectNativeTerminal(outcome); err != nil {

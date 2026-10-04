@@ -2,6 +2,7 @@ package subagent_test
 
 import (
 	"context"
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"testing"
 
@@ -13,15 +14,15 @@ import (
 // the only host tool, spawn_subagent + echo are policy-permitted, and the faux
 // provider replays the given script (shared by parent and child runs, in call
 // order).
-func subagentAgent(t *testing.T, settings *subagent.Plugin, script ...agentcore.ChatResponse) (*agentcore.Agent, *agentcore.FauxProvider) {
+func subagentAgent(t *testing.T, settings *subagent.Plugin, script ...ai.Message) (*agentcore.Agent, *nativeScript) {
 	t.Helper()
-	provider := agentcore.NewFauxProvider(script...)
+	provider := newNativeScript(script...)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider:   provider,
-		Model:      "faux-1",
-		Tools:      agentcore.NewToolSet(&echoTool{name: "echo"}),
-		Policy:     agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
-		Extensions: []agentcore.ExtensionFactory{settings},
+		NativeProvider: provider.Provider,
+		Model:          "faux-1",
+		Tools:          agentcore.NewToolSet(&echoTool{name: "echo"}),
+		Policy:         agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
+		Extensions:     []agentcore.ExtensionFactory{settings},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -39,9 +40,9 @@ func TestSubagentRunsIsolatedChildAndReturnsFinal(t *testing.T) {
 		// Child turn 1: use a tool inside the child run.
 		AssistantToolCall("c2", "echo", `{"text":"banana"}`),
 		// Child turn 2: child's final answer.
-		agentcore.AssistantText("the echo returned: banana"),
+		nativeAnswer("the echo returned: banana"),
 		// Parent turn 2: parent's final answer, quoting the child's result.
-		agentcore.AssistantText("child reported: banana"),
+		nativeAnswer("child reported: banana"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "delegate an echo test")
@@ -85,8 +86,8 @@ func TestSubagentDepthCap(t *testing.T) {
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"try to delegate again"}`),
 		// Child tries to spawn a grandchild — the tool is not registered at depth 1.
 		AssistantToolCall("c2", subagent.ToolSpawnSubagent, `{"task":"grandchild"}`),
-		agentcore.AssistantText("could not delegate further"),
-		agentcore.AssistantText("done"),
+		nativeAnswer("could not delegate further"),
+		nativeAnswer("done"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "nest")
@@ -115,10 +116,10 @@ func TestSubagentDepthCap(t *testing.T) {
 func TestSubagentPerRunBudget(t *testing.T) {
 	agent, _ := subagentAgent(t, &subagent.Plugin{MaxPerRun: 1},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"first"}`),
-		agentcore.AssistantText("first child answer"),
+		nativeAnswer("first child answer"),
 		AssistantToolCall("c2", subagent.ToolSpawnSubagent, `{"task":"second"}`),
 		// No child script needed: the second spawn is refused before any call.
-		agentcore.AssistantText("wrapped up without the second child"),
+		nativeAnswer("wrapped up without the second child"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "fan out")
@@ -147,12 +148,12 @@ func TestSubagentPerRunBudget(t *testing.T) {
 // parent run's accounting.
 func TestSubagentOutputCapAndUsageFolding(t *testing.T) {
 	long := strings.Repeat("A", 400) + "TAIL-SIGNAL"
-	childResp := agentcore.AssistantText(long)
-	childResp.Usage = agentcore.Usage{InputTokens: 100, OutputTokens: 40, CostUSD: 0.5}
+	childResp := nativeAnswer(long)
+	childResp.Usage = &ai.Usage{Input: 100, Output: 40, Cost: ai.UsageCost{Total: 0.5}}
 	agent, _ := subagentAgent(t, &subagent.Plugin{MaxOutputBytes: 256},
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"produce a long answer"}`),
 		childResp,
-		agentcore.AssistantText("done"),
+		nativeAnswer("done"),
 	)
 
 	res, err := agent.Prompt(context.Background(), "cap test")
@@ -187,16 +188,16 @@ func TestSubagentOutputCapAndUsageFolding(t *testing.T) {
 func TestSubagentRoutesToNamedDelegate(t *testing.T) {
 	var gotTask string
 	var gotDepth int
-	provider := agentcore.NewFauxProvider(
+	provider := newNativeScript(
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"summarize chapter 3","agent":"Writer"}`),
 		AssistantToolCall("c2", subagent.ToolSpawnSubagent, `{"task":"x","agent":"Nobody"}`),
-		agentcore.AssistantText("done"),
+		nativeAnswer("done"),
 	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: provider,
-		Model:    "faux-1",
-		Tools:    agentcore.NewToolSet(),
-		Policy:   agentcore.NewAllowList(subagent.ToolSpawnSubagent),
+		NativeProvider: provider.Provider,
+		Model:          "faux-1",
+		Tools:          agentcore.NewToolSet(),
+		Policy:         agentcore.NewAllowList(subagent.ToolSpawnSubagent),
 		Extensions: []agentcore.ExtensionFactory{subagent.To(subagent.Delegate{
 			Name:        "Writer",
 			Description: "drafts prose",
@@ -259,15 +260,15 @@ func TestSubagentRoutesToNamedDelegate(t *testing.T) {
 // TestSubagentDisabledWithoutConfig proves an agent without Config.Subagents
 // never advertises or accepts spawn_subagent even when policy would permit it.
 func TestSubagentDisabledWithoutConfig(t *testing.T) {
-	provider := agentcore.NewFauxProvider(
+	provider := newNativeScript(
 		AssistantToolCall("c1", subagent.ToolSpawnSubagent, `{"task":"x"}`),
-		agentcore.AssistantText("ok"),
+		nativeAnswer("ok"),
 	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: provider,
-		Model:    "faux-1",
-		Tools:    agentcore.NewToolSet(&echoTool{name: "echo"}),
-		Policy:   agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
+		NativeProvider: provider.Provider,
+		Model:          "faux-1",
+		Tools:          agentcore.NewToolSet(&echoTool{name: "echo"}),
+		Policy:         agentcore.NewAllowList("echo", subagent.ToolSpawnSubagent),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -289,7 +290,7 @@ func TestSubagentDisabledWithoutConfig(t *testing.T) {
 			toolMsg = m.Content
 		}
 	}
-	if !strings.Contains(toolMsg, "unknown tool") {
+	if !strings.Contains(toolMsg, "spawn_subagent not found") {
 		t.Fatalf("expected unknown-tool result, got %q", toolMsg)
 	}
 }

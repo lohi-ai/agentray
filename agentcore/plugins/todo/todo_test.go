@@ -2,8 +2,11 @@ package todo_test
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/lohi-ai/agentray/ai"
 	"strings"
 	"testing"
 )
@@ -49,77 +52,68 @@ func TestTodoToolRejectsBadStatusAndEmpty(t *testing.T) {
 	}
 }
 
-// TestContextHookInjectsLivePlan is the goal-stability property for the todo
-// list: the hook appends the CURRENT plan to the outgoing request as a trailing
-// system reminder, so even a compacted transcript (which no longer holds the
-// plan) still shows the model its checklist.
 func TestContextHookInjectsLivePlan(t *testing.T) {
 	store := todo.NewStore()
-	hook := todo.ContextHook(store)
-
-	// No plan yet -> hook injects nothing.
-	base := []agentcore.Message{{Role: agentcore.RoleSystem, Content: "persona"}, {Role: agentcore.RoleUser, Content: "go"}}
-	if got := hook(context.Background(), base); len(got) != len(base) {
-		t.Fatalf("empty plan must not inject; len=%d", len(got))
+	hook := todo.PiContextHook(store)
+	base := []json.RawMessage{json.RawMessage(`{"role":"system","content":"persona"}`), json.RawMessage(`{"role":"user","content":"go"}`)}
+	before, _ := json.Marshal(base)
+	if got, err := hook(context.Background(), base); err != nil || len(got) != len(base) {
+		t.Fatalf("empty plan changed native view: %s %v", got, err)
 	}
-
 	store.Set([]todo.Item{{Content: "ship it", Status: todo.StatusInProgress}})
-	out := hook(context.Background(), base)
-	if len(out) != len(base)+1 {
-		t.Fatalf("expected one injected reminder, got %d extra", len(out)-len(base))
+	out, err := hook(context.Background(), base)
+	if err != nil || len(out) != len(base)+1 {
+		t.Fatalf("missing native reminder: %s %v", out, err)
 	}
-	last := out[len(out)-1]
-	if last.Role != agentcore.RoleSystem || !strings.HasPrefix(last.Content, todo.ContextPrefix) || !strings.Contains(last.Content, "ship it") {
-		t.Fatalf("injected reminder wrong: %+v", last)
+	var last struct{ Role, Content string }
+	if err := json.Unmarshal(out[len(out)-1], &last); err != nil {
+		t.Fatal(err)
 	}
-	// The hook must not mutate the caller's history.
-	if len(base) != 2 {
-		t.Fatalf("hook mutated input history (len=%d)", len(base))
+	if last.Role != "system" || !strings.HasPrefix(last.Content, todo.ContextPrefix) || !strings.Contains(last.Content, "ship it") {
+		t.Fatalf("wrong native reminder: %+v", last)
+	}
+	after, _ := json.Marshal(base)
+	if string(after) != string(before) {
+		t.Fatal("native hook mutated caller history")
 	}
 }
 
-// TestTodoSurvivesCompaction proves the end-to-end goal-stability claim: after a
-// transcript is compacted (plan not in history), the context hook still presents
-// the live plan to the model.
+// Exercise the shipping request transform inside the engine. The live plan
+// survives real compaction without accumulating reminders in the checkpoint.
 func TestTodoSurvivesCompaction(t *testing.T) {
 	store := todo.NewStore()
-	store.Set([]todo.Item{
-		{Content: "phase 1", Status: todo.StatusCompleted},
-		{Content: "phase 2", Status: todo.StatusInProgress},
+	store.Set([]todo.Item{{Content: "phase 1", Status: todo.StatusCompleted}, {Content: "phase 2", Status: todo.StatusInProgress}})
+	requests := 0
+	a := newPlanAgent(t, store, func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		requests++
+		prompt := ai.GetCurrentSystemPrompt(view.Messages())
+		if !strings.Contains(prompt, "[~] phase 2") || strings.Count(prompt, todo.ContextPrefix) != 1 {
+			t.Errorf("live plan lost or duplicated after compaction: %s", prompt)
+		}
+		raw, _ := json.Marshal(view)
+		if !strings.Contains(string(raw), "[Earlier work summary]") {
+			t.Error("native request was not compacted")
+		}
+		return ai.ScriptedStream(nativePlanAnswer("continuing phase 2"))(ctx, model, view, options)
 	})
-	hook := todo.ContextHook(store)
-
-	// Compact for real, through the same seam the loop uses, so this proves the
-	// property against the shipping strategy rather than a stand-in.
-	prov := agentcore.NewFauxProvider(agentcore.AssistantText("## Goal\nx\n## Next Steps\n1. y"))
-	res, err := agentcore.DefaultCompactor().Compact(context.Background(), agentcore.CompactionRequest{
-		Messages: longTranscript(),
-		Budget:   agentcore.DefaultLimits().MaxContextTokens,
-		Settings: agentcore.CompactionSettings{KeepRecentTokens: 3000},
-		Provider: prov,
-		Model:    "m",
-	})
-	if err != nil {
-		t.Fatalf("Compact: %v", err)
+	input := []agentcore.Message{}
+	for i := 0; i < 10; i++ {
+		input = append(input, agentcore.Message{Role: agentcore.RoleUser, Content: strings.Repeat("old source evidence ", 100)})
 	}
-	compacted := res.Messages
-
-	out := hook(context.Background(), compacted)
-	last := out[len(out)-1]
-	if !strings.Contains(last.Content, "phase 2") || !strings.Contains(last.Content, "[~]") {
-		t.Fatalf("plan not pinned post-compaction: %q", last.Content)
+	input = append(input, agentcore.Message{Role: agentcore.RoleUser, Content: "continue"})
+	summaries := 0
+	result, err := a.RunNative(context.Background(), agentcore.NativeRun{Input: input, Compaction: &host.CompactionPolicy{Budget: 1200, KeepRecent: 100, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
+		summaries++
+		return "Earlier evidence.", agentcore.Usage{}, nil
+	}}})
+	if err != nil || requests != 1 || summaries != 1 {
+		t.Fatalf("native compaction: requests=%d summaries=%d err=%v", requests, summaries, err)
 	}
-}
-
-// longTranscript builds a transcript big enough that the compactor finds a span
-// worth summarizing.
-func longTranscript() []agentcore.Message {
-	out := []agentcore.Message{{Role: agentcore.RoleSystem, Content: "persona"}}
-	for i := 0; i < 60; i++ {
-		out = append(out,
-			agentcore.Message{Role: agentcore.RoleUser, Content: strings.Repeat("question ", 64)},
-			agentcore.Message{Role: agentcore.RoleAssistant, Content: strings.Repeat("answer ", 64)},
-		)
+	var checkpoint struct{ Messages, Summary json.RawMessage }
+	if err := json.Unmarshal(result.NativeState, &checkpoint); err != nil {
+		t.Fatal(err)
 	}
-	return out
+	if len(checkpoint.Summary) == 0 || strings.Contains(string(checkpoint.Messages), todo.ContextPrefix) {
+		t.Fatal("summary missing or request-only plan leaked into persisted history")
+	}
 }

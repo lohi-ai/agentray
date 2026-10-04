@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -28,7 +27,7 @@ func TestAzureModelBindingFreezesResolvedConfiguration(t *testing.T) {
 			if env == "" {
 				env = "{}"
 			}
-			original := agentcore.PiConfig{Options: json.RawMessage(`{"streamOptions":{"env":` + env + `,"temperature":0.25}}`)}
+			original := NativeAgentConfig{Options: json.RawMessage(`{"streamOptions":{"env":` + env + `,"temperature":0.25}}`)}
 			before := string(original.Options)
 			tier := ModelTier{TierConfig: TierConfig{Provider: " Azure-OpenAI-Responses ", Model: "model", BaseURL: tc.base, APIKey: "secret-key"}}
 			cfg, _, err := tier.BindPi(original, PiModelOptions{})
@@ -87,14 +86,14 @@ func TestAzureModelBindingFreezesResolvedConfiguration(t *testing.T) {
 func TestAzureModelBindingRejectsInvalidRoutesAndRefresh(t *testing.T) {
 	clearNativeAzureEnv(t)
 	for _, base := range []string{"", "not a URL", "file:///tmp/config", "https://user:password@example.test/v1"} {
-		if _, _, err := (ModelTier{TierConfig: TierConfig{Provider: ai.VendorAzureResponses, Model: "test", BaseURL: base}}).BindPi(agentcore.PiConfig{}, PiModelOptions{}); err == nil {
+		if _, _, err := (ModelTier{TierConfig: TierConfig{Provider: ai.VendorAzureResponses, Model: "test", BaseURL: base}}).BindPi(NativeAgentConfig{}, PiModelOptions{}); err == nil {
 			t.Fatalf("invalid host route admitted: %q", base)
 		}
 	}
 	sentinel := errors.New("refresh rejected")
 	for _, failure := range []error{nil, sentinel} {
 		tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorAzureResponses, Model: "test", BaseURL: "https://example.test/v1", APIKey: "stale"}}
-		cfg, _, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { return "", failure }})
+		cfg, _, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{RefreshKey: func(context.Context, string) (string, error) { return "", failure }})
 		if err != nil {
 			t.Fatal(err)
 		}

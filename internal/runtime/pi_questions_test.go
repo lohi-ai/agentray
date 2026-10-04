@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 func piQuestionLog(t *testing.T) []agentcore.SessionEntry {
@@ -65,7 +66,7 @@ func TestPiDelegationReceiptChainAndDeliveryValidation(t *testing.T) {
 		messages := deliveries[:delivered]
 		pending, err := piAnswerMessages(entries, piModelJSON(map[string]any{"messages": messages}))
 		want := len(deliveries) - delivered
-		if err != nil || len(pending) != want || (want > 0 && !samePiJSON(pending[0], deliveries[delivered])) {
+		if err != nil || len(pending) != want || (want > 0 && !nativehost.SameJSON(pending[0], deliveries[delivered])) {
 			t.Fatalf("delegation delivery was lost/duplicated: delivered=%v pending=%s err=%v", delivered, pending, err)
 		}
 	}

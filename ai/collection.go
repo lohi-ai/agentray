@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Collection holds registered providers and routes Chat/Stream to the owner
@@ -131,17 +131,17 @@ func (c *Collection) Owner(ctx context.Context, modelID string) (Provider, error
 	return nil, fmt.Errorf("ai: no registered provider owns model %q", modelID)
 }
 
-// Chat implements agentcore.LLMProvider: the owning provider serves the request.
-func (c *Collection) Chat(ctx context.Context, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+// Chat implements protocol.LLMProvider: the owning provider serves the request.
+func (c *Collection) Chat(ctx context.Context, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	p, err := c.Owner(ctx, req.Model)
 	if err != nil {
-		return agentcore.ChatResponse{}, err
+		return protocol.ChatResponse{}, err
 	}
 	return p.Chat(ctx, req)
 }
 
-// Stream implements agentcore.LLMProvider.
-func (c *Collection) Stream(ctx context.Context, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+// Stream implements protocol.LLMProvider.
+func (c *Collection) Stream(ctx context.Context, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	p, err := c.Owner(ctx, req.Model)
 	if err != nil {
 		return nil, err
@@ -152,16 +152,16 @@ func (c *Collection) Stream(ctx context.Context, req agentcore.ChatRequest) (<-c
 // ChatOn sends the request to a specific registered provider (used when a
 // tier names both a provider id and a model, so an ID collision cannot
 // mis-route).
-func (c *Collection) ChatOn(ctx context.Context, providerID string, req agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+func (c *Collection) ChatOn(ctx context.Context, providerID string, req protocol.ChatRequest) (protocol.ChatResponse, error) {
 	p, ok := c.Get(providerID)
 	if !ok {
-		return agentcore.ChatResponse{}, fmt.Errorf("ai: unknown provider %q", providerID)
+		return protocol.ChatResponse{}, fmt.Errorf("ai: unknown provider %q", providerID)
 	}
 	return p.Chat(ctx, req)
 }
 
 // StreamOn is Stream scoped to one registered provider.
-func (c *Collection) StreamOn(ctx context.Context, providerID string, req agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+func (c *Collection) StreamOn(ctx context.Context, providerID string, req protocol.ChatRequest) (<-chan protocol.ChatDelta, error) {
 	p, ok := c.Get(providerID)
 	if !ok {
 		return nil, fmt.Errorf("ai: unknown provider %q", providerID)
@@ -172,7 +172,7 @@ func (c *Collection) StreamOn(ctx context.Context, providerID string, req agentc
 func (c *Collection) Name() string        { return "collection" }
 func (c *Collection) SupportsTools() bool { return true }
 
-func (c *Collection) ModelCapabilities(model string) agentcore.ModelCapabilities {
+func (c *Collection) ModelCapabilities(model string) protocol.ModelCapabilities {
 	c.mu.RLock()
 	var listed Model
 	var provider Provider
@@ -185,9 +185,9 @@ func (c *Collection) ModelCapabilities(model string) agentcore.ModelCapabilities
 	}
 	c.mu.RUnlock()
 	if provider == nil {
-		return agentcore.ModelCapabilities{}
+		return protocol.ModelCapabilities{}
 	}
-	return agentcore.CapabilitiesOf(provider, model).Overlay(listed.Capabilities)
+	return protocol.CapabilitiesOf(provider, model).Overlay(listed.Capabilities)
 }
 
-var _ agentcore.LLMProvider = (*Collection)(nil)
+var _ protocol.LLMProvider = (*Collection)(nil)

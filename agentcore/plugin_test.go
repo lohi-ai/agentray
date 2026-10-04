@@ -64,7 +64,10 @@ func (p funcPlugin) Name() string               { return p.name }
 func (p funcPlugin) Register(r *Registry) error { return p.fn(r) }
 func modelOf(m string) Plugin {
 	return funcPlugin{name: "model", fn: func(r *Registry) error {
-		return r.SetModel(&FauxProvider{}, m)
+		if err := r.SetModel(&FauxProvider{}, m); err != nil {
+			return err
+		}
+		return r.SetNativeProvider(scriptedNativeProvider(AssistantText("done")))
 	}}
 }
 
@@ -77,9 +80,6 @@ func TestBuild_MinimalComposition(t *testing.T) {
 	}
 	// Every default an agent needs to be safe comes from the registry, not from
 	// Config — a plugin-built agent is as governed as a Config-built one.
-	if a.driver == nil || a.driver.Name() != "react" {
-		t.Fatal("a composition with no loop plugin must still get the default driver")
-	}
 	if _, ok := a.policy.(DenyAll); !ok {
 		t.Fatalf("an agent with no policy plugin must deny by default, got %T", a.policy)
 	}
@@ -128,7 +128,6 @@ func TestRegistry_EverySetterClaimsItsSeam(t *testing.T) {
 		seam string
 		set  func(*Registry) error
 	}{
-		{"driver", func(r *Registry) error { return r.SetDriver(DefaultDriver()) }},
 		{"goal", func(r *Registry) error { return r.SetGoal("g") }},
 		{"limits", func(r *Registry) error { return r.SetLimits(DefaultLimits()) }},
 		{"memory", func(r *Registry) error { return r.SetMemory(nil) }},
@@ -356,47 +355,6 @@ func TestRegistry_HookThrowIsNotDowngraded(t *testing.T) {
 	}
 }
 
-// --- driver seam ----------------------------------------------------------
-
-func TestDriver_ReplacesTheLoopButKeepsTheRunBracket(t *testing.T) {
-	drv := &cannedDriver{answer: "canned"}
-	a, err := Build(
-		modelOf("m"),
-		funcPlugin{name: "loop", fn: func(r *Registry) error { return r.SetDriver(drv) }},
-	)
-	if err != nil {
-		t.Fatalf("Build: %v", err)
-	}
-	res, err := a.Prompt(context.Background(), "anything")
-	if err != nil {
-		t.Fatalf("Prompt: %v", err)
-	}
-	if res.Final != "canned" {
-		t.Fatalf("the custom driver did not run: %q", res.Final)
-	}
-	if drv.calls != 1 {
-		t.Fatalf("driver called %d times", drv.calls)
-	}
-	// runLoop still owns the bracket, so single-flight is released even under a
-	// replacement driver.
-	if !a.tryAcquire() {
-		t.Fatal("the single-flight slot must be released after a custom-driver run")
-	}
-	a.release()
-}
-
-type cannedDriver struct {
-	calls  int
-	answer string
-}
-
-func (d *cannedDriver) Name() string { return "canned" }
-
-func (d *cannedDriver) Drive(ctx context.Context, a *Agent, messages []Message, task string, sink StreamSink, emit func(StreamEvent)) (RunResult, error) {
-	d.calls++
-	return RunResult{Final: d.answer, Turns: 1}, nil
-}
-
 // --- Config path ----------------------------------------------------------
 
 func TestApplyConfig_LeavesUnsetSeamsFree(t *testing.T) {
@@ -464,7 +422,7 @@ func TestAgentDescribe_ReportsPresenceNotSecrets(t *testing.T) {
 	if strings.Contains(out, "super-secret-token") {
 		t.Fatal("Describe must never render a credential")
 	}
-	for _, want := range []string{"refresh_key:", "session:", "driver:", "policy:"} {
+	for _, want := range []string{"refresh_key:", "session:", "policy:"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("Describe() missing %q:\n%s", want, out)
 		}

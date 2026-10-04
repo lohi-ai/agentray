@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
 // Native stream messages retain Pi's wire format. Pool reporting separately
@@ -18,7 +18,7 @@ func codexPoolFailure(cause error) error {
 	}
 	var httpError *codexHTTPError
 	if errors.As(cause, &httpError) {
-		return agentcore.NewProviderError(VendorOpenAICodex, &http.Response{StatusCode: httpError.Status, Header: httpError.Headers}, httpError.Message)
+		return protocol.NewProviderError(VendorOpenAICodex, &http.Response{StatusCode: httpError.Status, Header: httpError.Headers}, httpError.Message)
 	}
 	return cause
 }

@@ -2,6 +2,7 @@ package agentcore
 
 import (
 	"context"
+	"github.com/lohi-ai/agentray/ai/protocol"
 	"math"
 	"time"
 )
@@ -40,22 +41,14 @@ type Session struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// MemoryStore is the two-tier memory seam the consumer backs (Growth Analyst ->
-// Postgres). Working memory is the SessionRepo half; long-term memory is the
-// durable half. A nil MemoryStore is valid — the agent simply runs without
-// recall or persistence.
+// MemoryStore is the long-term recall seam backed by the consumer. Native
+// checkpoints and SessionStore own working history. A nil MemoryStore disables
+// recall and learning.
 type MemoryStore interface {
 	// Recall returns long-term entries relevant to the query for a scope.
 	Recall(ctx context.Context, scopeID, query string, limit int) ([]MemoryEntry, error)
 	// Remember persists a long-term entry (PII already redacted by the caller).
 	Remember(ctx context.Context, entry MemoryEntry) error
-
-	// CreateSession starts a working-memory thread.
-	CreateSession(ctx context.Context, scopeID string) (Session, error)
-	// SaveSession persists the message history of a thread.
-	SaveSession(ctx context.Context, s Session) error
-	// Fork branches a thread so the agent can explore without losing the trunk.
-	Fork(ctx context.Context, sessionID string) (Session, error)
 }
 
 // MemoryCurator is the OPTIONAL write-back half of the memory seam: a store
@@ -85,11 +78,7 @@ type MemoryCurator interface {
 // the consumer backs with a real vendor (OpenAIEmbedder) or a test fake. A nil
 // Embedder means the consumer falls back to keyword recall — embeddings are an
 // additive relevance upgrade, never a hard dependency.
-type Embedder interface {
-	// Embed returns one vector per input string, index-aligned. All returned
-	// vectors share the same dimension.
-	Embed(ctx context.Context, texts []string) ([][]float32, error)
-}
+type Embedder = protocol.Embedder
 
 // Cosine is the cosine similarity of two equal-length vectors, in [-1, 1].
 // Mismatched lengths or a zero-magnitude vector yield 0 (no signal) rather than

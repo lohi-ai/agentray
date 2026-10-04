@@ -2,8 +2,6 @@ package agentruntime
 
 import (
 	"strings"
-
-	goalgate "github.com/lohi-ai/agentray/agentcore/plugins/goal"
 )
 
 // chatcmd.go — the chat surface's slash commands.
@@ -148,41 +146,6 @@ func goalTurn(d Directive) (goal, prompt string) {
 		return d.Arg, "Work toward this goal until it is satisfied: " + d.Arg
 	}
 	return d.Arg, d.Rest
-}
-
-// stripGoalSentinel removes the goal gate's closing status line from an answer.
-//
-// The gate asks the agent to end with `STATUS: DONE` (or `STATUS: BLOCKED`) as a
-// machine-readable signal that the run may stop. In a terminal that reads as a
-// footer; in a product chat it is a leaked protocol token, and — because the
-// answer is persisted — it comes back on reload and is replayed to the model as
-// its own prior words.
-//
-// Only the LAST non-empty line is considered, and only when that line is nothing
-// BUT the sentinel once markdown decoration is peeled off. The gate itself is
-// looser — a `Contains` on the last line — but the gate is deciding whether to
-// let a run stop, where a false positive costs one early finish. Here a false
-// positive silently deletes a sentence the user was meant to read ("I can't write
-// STATUS: DONE yet — two tests fail"), so this side errs the other way: worst
-// case an oddly-formatted answer keeps a visible marker.
-//
-// A blocked run loses only the marker; the blocker is stated in the prose above
-// it, which is what the reader needs.
-func stripGoalSentinel(final string) string {
-	lines := strings.Split(final, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if line == "" {
-			continue
-		}
-		bare := strings.ToUpper(strings.Trim(line, "*_`# \t"))
-		if bare != goalgate.Done && bare != goalgate.Blocked {
-			return final
-		}
-		// Drop the sentinel line and any blank lines that were separating it.
-		return strings.TrimRight(strings.Join(lines[:i], "\n"), " \t\n")
-	}
-	return final
 }
 
 // helpText is the /help reply. Written as the answer to "what can I type here",

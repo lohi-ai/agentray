@@ -11,11 +11,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai/protocol"
 )
 
-func strictTestTool(mode agentcore.ToolStrictness) agentcore.ToolSchema {
-	return agentcore.ToolSchema{
+func strictTestTool(mode protocol.ToolStrictness) protocol.ToolSchema {
+	return protocol.ToolSchema{
 		Name: "read", Strict: mode,
 		Parameters: map[string]any{
 			"type": "object",
@@ -29,7 +29,7 @@ func strictTestTool(mode agentcore.ToolStrictness) agentcore.ToolSchema {
 }
 
 func TestProjectedToolParametersStrictIsSemanticAndCopyOnWrite(t *testing.T) {
-	tool := strictTestTool(agentcore.ToolStrictEnabled)
+	tool := strictTestTool(protocol.ToolStrictEnabled)
 	original := tool.Parameters["properties"].(map[string]any)["path"].(map[string]any)
 	parameters, strict := projectedToolParameters(tool, toolSchemaOpenAIResponses)
 	if strict == nil || !*strict {
@@ -46,26 +46,26 @@ func TestProjectedToolParametersStrictIsSemanticAndCopyOnWrite(t *testing.T) {
 		t.Fatalf("canonical schema mutated: %#v", tool.Parameters)
 	}
 
-	optional := strictTestTool(agentcore.ToolStrictEnabled)
+	optional := strictTestTool(protocol.ToolStrictEnabled)
 	delete(optional.Parameters, "required")
 	_, strict = projectedToolParameters(optional, toolSchemaOpenAIResponses)
 	if strict != nil {
 		t.Fatalf("optional schema changed semantics under strict: %v", *strict)
 	}
-	openMap := strictTestTool(agentcore.ToolStrictEnabled)
+	openMap := strictTestTool(protocol.ToolStrictEnabled)
 	openMap.Parameters["additionalProperties"] = true
 	_, strict = projectedToolParameters(openMap, toolSchemaOpenAIResponses)
 	if strict != nil {
 		t.Fatalf("open-map schema was narrowed under strict: %v", *strict)
 	}
-	implicitOpen := strictTestTool(agentcore.ToolStrictEnabled)
+	implicitOpen := strictTestTool(protocol.ToolStrictEnabled)
 	delete(implicitOpen.Parameters, "additionalProperties")
 	_, strict = projectedToolParameters(implicitOpen, toolSchemaOpenAIResponses)
 	if strict != nil {
 		t.Fatalf("implicit-open schema was narrowed under strict: %v", *strict)
 	}
 
-	disabled := strictTestTool(agentcore.ToolStrictDisabled)
+	disabled := strictTestTool(protocol.ToolStrictDisabled)
 	parameters, strict = projectedToolParameters(disabled, toolSchemaGeneric)
 	if strict == nil || *strict || !reflect.DeepEqual(parameters, toolParameters(disabled.Parameters, toolSchemaGeneric)) {
 		t.Fatalf("explicit loose projection = strict %v parameters %#v", strict, parameters)
@@ -73,7 +73,7 @@ func TestProjectedToolParametersStrictIsSemanticAndCopyOnWrite(t *testing.T) {
 }
 
 func TestOpenAIFamilyEncodersCarryPerToolStrictness(t *testing.T) {
-	req := agentcore.ChatRequest{Model: "m", Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)}}
+	req := protocol.ChatRequest{Model: "m", Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)}}
 	chat := NewOpenAIProvider("k", "", DefaultCompat()).encode(req)
 	responses := NewOpenAIResponsesProvider("k", "").encode(req)
 	codex := NewCodexProvider().encode(req)
@@ -117,8 +117,8 @@ func TestOpenAIChatRetriesStrictRejectionOnceAndRemembersSession(t *testing.T) {
 
 	provider := NewOpenAIProvider("k", srv.URL, DefaultCompat())
 	provider.HTTP = srv.Client()
-	session := agentcore.NewProviderSession()
-	req := agentcore.ChatRequest{Model: "m", ProviderSession: session, Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)}}
+	session := protocol.NewProviderSession()
+	req := protocol.ChatRequest{Model: "m", ProviderSession: session, Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)}}
 	for i := 0; i < 2; i++ {
 		response, err := provider.Chat(context.Background(), req)
 		if err != nil || response.Message.Content != "ok" {
@@ -161,9 +161,9 @@ func TestOpenAIStreamRetriesInBandStrictRejectionOnlyBeforeOutput(t *testing.T) 
 
 			provider := NewOpenAIProvider("k", srv.URL, DefaultCompat())
 			provider.StreamHTTP = srv.Client()
-			stream, err := provider.Stream(context.Background(), agentcore.ChatRequest{
-				Model: "m", ProviderSession: agentcore.NewProviderSession(),
-				Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)},
+			stream, err := provider.Stream(context.Background(), protocol.ChatRequest{
+				Model: "m", ProviderSession: protocol.NewProviderSession(),
+				Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -213,9 +213,9 @@ func TestOpenAIResponsesRetriesStrictRejectionBeforeOutput(t *testing.T) {
 
 	provider := NewOpenAIResponsesProvider("k", srv.URL)
 	provider.StreamHTTP = srv.Client()
-	req := agentcore.ChatRequest{
-		Model: "m", SessionID: "s", ProviderSession: agentcore.NewProviderSession(),
-		Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)},
+	req := protocol.ChatRequest{
+		Model: "m", SessionID: "s", ProviderSession: protocol.NewProviderSession(),
+		Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)},
 	}
 	response, err := provider.Chat(context.Background(), req)
 	if err != nil || response.Message.Content != "ok" {
@@ -260,8 +260,8 @@ func TestCodexRetriesStrictRejectionOnceAndRemembersSession(t *testing.T) {
 	provider := NewCodexProvider()
 	provider.BaseURL = srv.URL
 	provider.StreamHTTP = srv.Client()
-	session := agentcore.NewProviderSession()
-	req := agentcore.ChatRequest{Model: "m", ProviderSession: session, Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)}}
+	session := protocol.NewProviderSession()
+	req := protocol.ChatRequest{Model: "m", ProviderSession: session, Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)}}
 	for i := 0; i < 2; i++ {
 		stream, err := provider.Stream(context.Background(), req)
 		if err != nil {
@@ -280,20 +280,20 @@ func TestCodexRetriesStrictRejectionOnceAndRemembersSession(t *testing.T) {
 }
 
 func TestStrictFallbackDetectorIsNarrow(t *testing.T) {
-	req := agentcore.ChatRequest{Tools: []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)}}
-	if shouldRetryWithoutStrictTools(req, toolSchemaGeneric, agentcore.NewProviderError("openai", &http.Response{StatusCode: http.StatusUnauthorized}, "strict tool unsupported")) {
+	req := protocol.ChatRequest{Tools: []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)}}
+	if shouldRetryWithoutStrictTools(req, toolSchemaGeneric, protocol.NewProviderError("openai", &http.Response{StatusCode: http.StatusUnauthorized}, "strict tool unsupported")) {
 		t.Fatal("authentication error must not retry")
 	}
-	if shouldRetryWithoutStrictTools(req, toolSchemaGeneric, agentcore.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid request")) {
+	if shouldRetryWithoutStrictTools(req, toolSchemaGeneric, protocol.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid request")) {
 		t.Fatal("unrelated bad request must not retry")
 	}
-	if !shouldRetryWithoutStrictTools(req, toolSchemaGeneric, agentcore.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid schema for function")) {
+	if !shouldRetryWithoutStrictTools(req, toolSchemaGeneric, protocol.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid schema for function")) {
 		t.Fatal("strict function schema rejection should retry")
 	}
 	optional := req
-	optional.Tools = []agentcore.ToolSchema{strictTestTool(agentcore.ToolStrictEnabled)}
+	optional.Tools = []protocol.ToolSchema{strictTestTool(protocol.ToolStrictEnabled)}
 	delete(optional.Tools[0].Parameters, "required")
-	if shouldRetryWithoutStrictTools(optional, toolSchemaGeneric, agentcore.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid schema for function")) {
+	if shouldRetryWithoutStrictTools(optional, toolSchemaGeneric, protocol.NewProviderError("openai", &http.Response{StatusCode: http.StatusBadRequest}, "invalid schema for function")) {
 		t.Fatal("projection omitted strict, so the detector must not retry")
 	}
 }

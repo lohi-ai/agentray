@@ -83,6 +83,7 @@ func (r *Registry) ApplyConfig(cfg Config) error {
 	for _, p := range []Plugin{
 		ModelPlugin{
 			Provider:          cfg.Provider,
+			NativeProvider:    cfg.NativeProvider,
 			Model:             cfg.Model,
 			Capabilities:      cfg.ModelCapabilities,
 			ContextWindow:     cfg.ContextWindow,
@@ -183,13 +184,7 @@ func toolsOf(ts *ToolSet) []Tool {
 
 // build turns the composed registry into a runnable Agent.
 func (r *Registry) build() (*Agent, error) {
-	if r.driver == nil {
-		// The loop is a seam, but an agent without one is not an agent. Default
-		// rather than fail: every composition wants a driver, and only the rare
-		// one wants a different driver.
-		r.driver = DefaultDriver()
-	}
-	if r.provider == nil {
+	if r.provider == nil && r.nativeProvider == nil {
 		return nil, errors.New("agentcore: provider is required")
 	}
 	if r.model == "" {
@@ -208,13 +203,10 @@ func (r *Registry) build() (*Agent, error) {
 		parallelToolCalls = &value
 	}
 
-	// Provider decorators are applied once, here, over every rung the run can
-	// reach. Doing it at compose time rather than in the loop is what keeps the
-	// loop unaware that decoration exists at all.
 	a := &Agent{
 		extensions:         r.extensions,
-		driver:             r.driver,
-		provider:           wrapProvider(r.providerWrappers, r.provider),
+		nativeProvider:     r.nativeProvider,
+		provider:           r.provider,
 		model:              r.model,
 		tools:              r.tools,
 		policy:             r.policy,
@@ -222,13 +214,13 @@ func (r *Registry) build() (*Agent, error) {
 		memory:             r.memory,
 		def:                r.definition,
 		limits:             r.limits,
-		env:                r.resolvedEnv(),
+		env:                r.env,
 		compaction:         r.compaction,
 		compactor:          r.compactor,
-		compactionProvider: wrapProvider(r.providerWrappers, r.compactionRung.Provider),
+		compactionProvider: r.compactionRung.Provider,
 		compactionModel:    r.compactionRung.Model,
 		refreshKey:         r.refreshKey,
-		escalation:         wrapRungs(r.providerWrappers, r.escalation),
+		escalation:         append([]ModelRung(nil), r.escalation...),
 		contextWindow:      r.contextWindow,
 		modelCapabilities:  r.modelCapabilities,
 		getSteering:        r.getSteering,
@@ -254,34 +246,6 @@ func (r *Registry) build() (*Agent, error) {
 		parallelToolCalls:  parallelToolCalls,
 	}
 	return a, nil
-}
-
-// wrapProvider applies every contributed decorator to one provider, in
-// registration order: the first-registered wrapper ends up innermost.
-func wrapProvider(ws []ProviderWrapper, p LLMProvider) LLMProvider {
-	if p == nil {
-		return nil
-	}
-	for _, w := range ws {
-		if w != nil {
-			p = w(p)
-		}
-	}
-	return p
-}
-
-// wrapRungs decorates the escalation ladder, so a run that escalates does not
-// silently stop being traced, priced, or rate limited.
-func wrapRungs(ws []ProviderWrapper, rungs []ModelRung) []ModelRung {
-	if len(ws) == 0 || len(rungs) == 0 {
-		return rungs
-	}
-	out := make([]ModelRung, len(rungs))
-	copy(out, rungs)
-	for i := range out {
-		out[i].Provider = wrapProvider(ws, out[i].Provider)
-	}
-	return out
 }
 
 // The bounds of one run.

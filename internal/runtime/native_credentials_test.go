@@ -147,7 +147,7 @@ func TestNativeCredentialRefreshAcrossHTTPRetryFallbackAndResume(t *testing.T) {
 			fallback := records[1]
 			fallback.Model = "fallback"
 			tier.Fallback = &fallback
-			ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{}, func(rung ModelTier) (PiModelOptions, error) {
+			ladder, err := newNativeModelLadder(tier, NativeAgentConfig{}, func(rung ModelTier) (PiModelOptions, error) {
 				return params.nativeModelOptions(rung, PiModelOptions{RefreshKey: params.RefreshKey}), nil
 			})
 			if err != nil {

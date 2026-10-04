@@ -116,7 +116,8 @@ type Plugin struct {
 }
 
 // Local installs the in-process job store — the right default for a single
-// server. Supply a Store to survive a restart or to share work across nodes.
+// server. A custom store must preserve run ownership and cancellation; durable
+// host tasks belong on the consumer's existing task queue.
 func Local() Plugin { return Plugin{} }
 
 // Name identifies the plugin and the extension it installs.
@@ -180,15 +181,52 @@ func (*jobsRun) SelfGated() bool { return true }
 // it. The context is the run's, not the calling tool's, so work survives the
 // call that started it and still dies with the run.
 func (p *jobsRun) RunContext(ctx context.Context) context.Context {
-	return withJobs(ctx, Launcher{store: p.store, owner: p.owner, base: ctx, maxBytes: p.maxBytes})
+	launcher := Launcher{store: p.store, owner: p.owner, base: ctx, maxBytes: p.maxBytes}
+	ctx = withJobs(ctx, launcher)
+	return agentcore.WithBackgroundLauncher(ctx, func(tool, label string, run func(context.Context) (string, error)) (json.RawMessage, error) {
+		job, err := launcher.Start(tool, label, run)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(job)
+	})
 }
 
 // CloseRun cancels everything this run started. A job outliving its run would
 // be unobservable and uncancellable — nothing left to look at it.
 func (p *jobsRun) CloseRun() {
-	if c, ok := p.store.(interface{ CancelAll(owner string) }); ok {
-		c.CancelAll(p.owner)
+	p.store.CancelAll(p.owner)
+	// Cooperative workers (including native model streams) settle before usage
+	// is folded. An arbitrary host job cannot hold shutdown forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, job := range p.store.List(p.owner) {
+		if !job.State.Done() {
+			_, _ = p.store.Wait(ctx, p.owner, job.ID)
+		}
 	}
+}
+
+// A normal final answer must account for the work the run launched. Wait here
+// instead of allowing a confident finish to silently cancel pending children.
+func (p *jobsRun) TurnStopping(ctx context.Context, _ agentcore.StopInfo) agentcore.StopDecision {
+	waitCtx, cancel := context.WithTimeout(ctx, min(p.maxWait, 5*time.Second))
+	defer cancel()
+	for _, job := range p.store.List(p.owner) {
+		if !job.State.Done() {
+			if settled, err := p.store.Wait(waitCtx, p.owner, job.ID); err != nil || !settled.State.Done() {
+				if ctx.Err() != nil {
+					return agentcore.StopDecision{StopReason: "aborted"}
+				}
+				return agentcore.StopDecision{Continue: true, Inject: []agentcore.Message{{Role: agentcore.RoleUser, Content: "Background work is still pending. Use job_wait/status to collect it, or job_cancel if it is no longer needed; do not claim it completed."}}}
+			}
+		}
+	}
+	completed := p.store.DrainCompleted(p.owner)
+	if len(completed) == 0 {
+		return agentcore.StopDecision{}
+	}
+	return agentcore.StopDecision{Continue: true, Inject: []agentcore.Message{{Role: agentcore.RoleUser, Content: completionNotice(completed, p.maxBytes)}}}
 }
 
 // BeforeStep announces jobs that finished since the last turn.
@@ -325,7 +363,20 @@ func (s *LocalJobStore) Start(ctx context.Context, owner string, spec JobSpec) (
 	if spec.Run == nil {
 		return Job{}, errors.New("agentcore: job spec has no work to run")
 	}
+	if err := ctx.Err(); err != nil {
+		return Job{}, err
+	}
 	s.mu.Lock()
+	active := 0
+	for _, job := range s.jobs {
+		if job.owner == owner && !job.job.State.Done() {
+			active++
+		}
+	}
+	if active >= 15 {
+		s.mu.Unlock()
+		return Job{}, errors.New("agentcore: concurrent job capacity reached (15)")
+	}
 	s.seq++
 	id := fmt.Sprintf("job_%d", s.seq)
 	jobCtx, cancel := context.WithCancel(ctx)

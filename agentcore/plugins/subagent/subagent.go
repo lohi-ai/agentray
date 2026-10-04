@@ -73,6 +73,9 @@ const (
 // widen access — and runs with isolated history, so only its final answer
 // (truncated to MaxOutputBytes) returns to the parent.
 type Plugin struct {
+	// AllowAsync offers run-owned jobs for ephemeral forks. Durable delegation
+	// must continue using its host journal and reattachment protocol.
+	AllowAsync bool
 	// MaxDepth is how many nesting levels may spawn: 1 (the default) lets the
 	// top-level agent spawn children but forbids grandchildren.
 	MaxDepth int
@@ -89,7 +92,8 @@ type Plugin struct {
 	Delegates []Delegate
 	// RunFork selects the consumer's runtime for self-delegation. The child is
 	// always created by Agent.Fork first, so runtime selection cannot widen its
-	// inherited capabilities. Nil uses the legacy Go driver.
+	// inherited capabilities. Nil uses the native engine with consumer checkpoints
+	// for ephemeral runs; durable self-forks require a native session host.
 	RunFork ForkRunner
 }
 
@@ -195,8 +199,8 @@ func (t *subagentTool) Name() string { return ToolSpawnSubagent }
 func (t *subagentTool) Parallel() bool { return true }
 
 // RetrySafeCall marks a spawn call safe to re-issue after a crash only when it
-// self-forks: the child session ID is deterministic in (parent session, tool
-// call ID), so a replayed self-fork reattaches — returning a completed child's
+// self-forks through a durable native host: the child session ID is tied to
+// the recorded physical invocation, so a replayed self-fork reattaches — returning a completed child's
 // recorded answer, or resuming an interrupted child from its own durable log —
 // instead of running a duplicate child. A delegate-routed spawn has no such
 // wiring (Delegate.Run is an opaque closure under the target agent's identity),
@@ -204,12 +208,15 @@ func (t *subagentTool) Parallel() bool { return true }
 // dangling for the model to decide. (On a storeless run recovery never happens,
 // so the declaration is moot.)
 func (t *subagentTool) RetrySafeCall(call agentcore.ToolCall) bool {
+	if !t.durable || t.settings.RunFork == nil {
+		return false
+	}
 	var in subagentArgs
 	if err := json.Unmarshal([]byte(call.Arguments), &in); err != nil {
 		return false
 	}
 	who := strings.TrimSpace(in.Agent)
-	return who == "" || strings.EqualFold(who, "self")
+	return strings.TrimSpace(in.Task) != "" && !in.Async && (who == "" || strings.EqualFold(who, "self"))
 }
 
 func (t *subagentTool) Schema() agentcore.ToolSchema {
@@ -226,6 +233,9 @@ func (t *subagentTool) Schema() agentcore.ToolSchema {
 			"type":        "object",
 			"description": "Optional JSON Schema the sub-agent's final answer must satisfy. When set, the sub-agent is instructed to end with a bare JSON value, the answer is validated against the schema, and on a violation the sub-agent is re-opened once with the error. You receive the validated JSON — or the raw answer marked as validation-failed if the retry also fails.",
 		},
+	}
+	if t.settings.AllowAsync && !t.parent.IsDurable() {
+		props["async"] = map[string]any{"type": "boolean", "description": "Return a job id immediately. Use job_wait/status/cancel to manage it; the job is cancelled when this run ends."}
 	}
 	desc := "Delegate one self-contained task to an ephemeral sub-agent and get back only its final answer. " +
 		"The sub-agent has the same tools and permissions as you but a fresh, isolated context — its intermediate work never enters yours. " +
@@ -264,6 +274,7 @@ func (t *subagentTool) Schema() agentcore.ToolSchema {
 // subagentArgs is the decoded argument shape.
 type subagentArgs struct {
 	Task         string          `json:"task"`
+	Async        bool            `json:"async"`
 	Context      string          `json:"context"`
 	Agent        string          `json:"agent"`
 	OutputSchema json.RawMessage `json:"output_schema"`
@@ -306,7 +317,33 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	if n := atomic.AddInt32(&t.spawned, 1); int(n) > t.settings.MaxPerRun {
 		return "", fmt.Errorf("sub-agent budget exhausted (%d per run) — finish the remaining work yourself", t.settings.MaxPerRun)
 	}
+	if in.Async {
+		if !t.settings.AllowAsync || t.parent.IsDurable() {
+			return "", errors.New("async delegation is not available for this run")
+		}
+		values := context.WithoutCancel(ctx)
+		receipt, err := agentcore.LaunchBackground(ctx, ToolSpawnSubagent, task, func(runCtx context.Context) (string, error) {
+			childCtx := agentcore.WithDelegationDepth(asyncContext{Context: runCtx, values: values}, depth+1)
+			return t.execute(childCtx, in, task, schema, nil)
+		})
+		if err != nil {
+			return "", err
+		}
+		return string(receipt), nil
+	}
 	ctx = agentcore.WithDelegationDepth(ctx, depth+1)
+	return t.execute(ctx, in, task, schema, emit)
+}
+
+type asyncContext struct {
+	context.Context
+	values context.Context
+}
+
+func (c asyncContext) Value(key any) any { return c.values.Value(key) }
+
+func (t *subagentTool) execute(ctx context.Context, in subagentArgs, task string, schema *jsonschema.Schema, emit func(string)) (string, error) {
+	var err error
 
 	prompt := task
 	if c := strings.TrimSpace(in.Context); c != "" {
@@ -352,6 +389,7 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 	if delegate != nil {
 		var usage agentcore.Usage
 		final, usage, err = delegate.Run(ctx, prompt, sink)
+		res.Final = final
 		// Fold the delegate's spend into the parent run before handling the
 		// error, so even a failed delegate's tokens/cost are accounted.
 		t.parent.AddChildUsage(usage)
@@ -360,23 +398,26 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 		}
 	} else {
 		// A durable parent gives the child a durable session of its own, with an
-		// ID derived deterministically from (parent session, tool call): the same
+		// ID derived deterministically from the recorded invocation: the same
 		// logical spawn always maps to the same child session (pi's deterministic
 		// child-session IDs). A replayed spawn call therefore REATTACHES instead
 		// of duplicating: a child that already completed returns its recorded
 		// answer without re-running (no duplicate spend or side effects), and a
 		// child that crashed mid-run resumes from its own log. This is what makes
 		// spawn_subagent safe to declare RetrySafe.
-		childSession := t.childSession(ctx)
+		childSession, sessionErr := t.childSession(ctx)
+		if sessionErr != nil {
+			return "", sessionErr
+		}
 		child := t.parent.Fork(childSession)
 		if t.settings.RunFork != nil {
 			res, err = t.settings.RunFork(ctx, child, ForkRequest{SessionID: childSession, Prompt: prompt, Task: task}, sink)
 		} else {
 			seed := []agentcore.Message{{Role: agentcore.RoleUser, Content: prompt}}
-			res, err = child.ContinueStream(ctx, seed, task, sink)
+			res, err = child.RunNative(ctx, agentcore.NativeRun{Input: seed, Task: task, Sink: sink})
 		}
 		// Fold the child's spend before handling the error (a child's own
-		// children are already folded into res.Usage by its runLoop, recursively).
+		// children are already folded into res.Usage by its native run, recursively).
 		t.parent.AddChildUsage(res.Usage)
 		if err != nil {
 			return "", fmt.Errorf("sub-agent failed: %w", err)
@@ -420,11 +461,9 @@ func (t *subagentTool) RunStreaming(ctx context.Context, args string, emit func(
 // validation-failed rather than erroring the spawn — the parent's model can
 // still read the answer, and the note tells it the JSON is not trustworthy.
 //
-// The retry is a SECOND run, not a resume of the first: a durable child whose
-// log already reached its leaf reattaches and returns the recorded (invalid)
-// answer without re-running, so the retry forks a fresh child at the
-// deterministic "<childSession>/retry" session seeded with the prior
-// transcript plus the error. The deterministic id keeps the whole spawn
+// An ephemeral correction resumes the native checkpoint. A durable correction
+// uses a separate "<childSession>/retry" session seeded from that checkpoint;
+// the original completed child remains immutable. The deterministic id keeps the whole spawn
 // replay-safe: a re-issued spawn reattaches to whichever child log completed.
 // A delegate has no transcript to re-open — Run is an opaque closure — so its
 // retry is a single re-invocation carrying the error in the task.
@@ -460,48 +499,43 @@ func (t *subagentTool) validateWithRetry(ctx context.Context, final string, res 
 func (t *subagentTool) retryOnce(ctx context.Context, delegate *Delegate, prompt string, res agentcore.RunResult, validationErr error, sink agentcore.StreamSink) (string, agentcore.RunResult, error) {
 	if delegate != nil {
 		retryTask := prompt + "\n\nYour previous answer failed output_schema validation: " + validationErr.Error() +
-			"\nRejected answer:\n" + lastAssistantText(res.Messages) +
+			"\nRejected answer:\n" + res.Final +
 			"\nProduce ONLY a corrected JSON value matching the schema — no prose, no markdown fence."
 		final, usage, err := delegate.Run(ctx, retryTask, sink)
 		return final, agentcore.RunResult{Usage: usage}, err
 	}
-	retrySession := t.childSession(ctx)
+	retrySession, sessionErr := t.childSession(ctx)
+	if sessionErr != nil {
+		return "", agentcore.RunResult{}, sessionErr
+	}
 	if retrySession != "" {
 		retrySession += "/retry"
 	}
 	child := t.parent.Fork(retrySession)
 	if t.settings.RunFork != nil {
-		correction := retrySeed(nil, validationErr)[0].Content
+		correction := correctionMessage(validationErr).Content
 		r, err := t.settings.RunFork(ctx, child, ForkRequest{SessionID: retrySession, Prompt: correction, Task: "correct the invalid final answer", Previous: &res}, sink)
 		return r.Final, r, err
 	}
-	r, err := child.ContinueStream(ctx, retrySeed(res.Messages, validationErr), "correct the invalid final answer", sink)
-	return r.Final, r, err
+	if len(res.NativeState) > 0 {
+		r, err := child.RunNative(ctx, agentcore.NativeRun{State: res.NativeState, Input: []agentcore.Message{correctionMessage(validationErr)}, Task: "correct the invalid final answer", Sink: sink})
+		return r.Final, r, err
+	}
+	return "", agentcore.RunResult{}, errors.New("native sub-agent correction requires its checkpoint")
 }
 
-// Native invocations carry a persisted physical-effect key: provider call IDs
-// can repeat in later turns. Legacy forks retain their existing session IDs.
-func (t *subagentTool) childSession(ctx context.Context) string {
+// Durable child identity comes from the recorded physical invocation. Provider
+// call IDs can repeat on later turns and cannot identify a durable child.
+func (t *subagentTool) childSession(ctx context.Context) (string, error) {
 	if !t.durable {
-		return ""
+		return "", nil
 	}
-	if t.settings.RunFork != nil {
-		if key, ok := agentcore.IdempotencyKey(ctx); ok {
-			return t.parent.SessionID() + "/" + key
-		}
+	if t.settings.RunFork == nil {
+		return "", errors.New("durable sub-agent requires a native session host")
 	}
-	if id, ok := agentcore.ToolCallID(ctx); ok {
-		return t.parent.SessionID() + "/" + id
+	key, ok := agentcore.IdempotencyKey(ctx)
+	if !ok {
+		return "", errors.New("durable sub-agent requires a recorded native invocation")
 	}
-	return ""
-}
-
-// lastAssistantText returns the final assistant text in a transcript.
-func lastAssistantText(msgs []agentcore.Message) string {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == agentcore.RoleAssistant && msgs[i].Content != "" {
-			return msgs[i].Content
-		}
-	}
-	return ""
+	return t.parent.SessionID() + "/" + key, nil
 }

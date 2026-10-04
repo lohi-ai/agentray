@@ -18,6 +18,8 @@ type RunResult struct {
 	Usage      Usage       `json:"usage"`
 	Turns      int         `json:"turns"`
 	StopReason string      `json:"stop_reason"`
+	// CommandResults contains structured receipts from explicit host controls.
+	CommandResults map[string]json.RawMessage `json:"command_results,omitempty"`
 	// NativeState and NativeTelemetry retain the original Pi artifacts. When
 	// present, Messages is only a display projection and must not seed a run.
 	NativeState     json.RawMessage `json:"native_state,omitempty"`
@@ -109,6 +111,6 @@ type StreamEvent struct {
 	Turn     int
 }
 
-// StreamSink receives StreamEvents during a streamed run. A nil sink runs the
-// loop in non-streaming mode (one Chat call per turn).
+// StreamSink receives display events during a run. A nil sink suppresses
+// these notifications; native provider execution still consumes its stream.
 type StreamSink func(StreamEvent)

@@ -1002,7 +1002,7 @@ func truncateResultWithRef(content, ref string, maxBytes int) string {
 // call at all, keep a domain-specific span pinned — so they belong behind an
 // interface rather than inside loop.go.
 //
-// This is the same shape as Driver: DefaultCompactor is the built-in provider,
+// DefaultCompactor is the built-in provider,
 // and a composition that wants different behaviour registers its own through
 // Registry.SetCompactor without touching the package.
 type Compactor interface {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/ai"
@@ -78,7 +79,7 @@ func testNativeParkedBatch(t *testing.T, localOnly bool) {
 			var mu sync.Mutex
 			parents := 0
 			children := map[string]int{}
-			runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
+			runtime := PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
 			runtime.Pi.Callback = func(ctx context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected method %s", method)
@@ -286,7 +287,7 @@ func checkPiBatchCorruption(t *testing.T, entries []agentcore.SessionEntry, stat
 		func() { native.Messages = append(native.Messages, receipt.Messages[0]) },
 		func() {
 			for i, raw := range native.Messages {
-				if samePiJSON(raw, receipt.Messages[0]) {
+				if nativehost.SameJSON(raw, receipt.Messages[0]) {
 					native.Messages[i] = json.RawMessage(strings.Replace(string(raw), "child final", "changed final", 1))
 					break
 				}
@@ -317,7 +318,7 @@ func checkPiBatchCorruption(t *testing.T, entries []agentcore.SessionEntry, stat
 			t.Fatalf("delivery prefix %d: pending=%d err=%v", delivered, len(pending), err)
 		}
 		for i, raw := range pending {
-			if !samePiJSON(raw, receipt.Messages[delivered+i]) {
+			if !nativehost.SameJSON(raw, receipt.Messages[delivered+i]) {
 				t.Fatal("pending batch message changed during recovery")
 			}
 		}

@@ -13,7 +13,7 @@ import (
 func TestNativeAttemptOptionsOwnCredentialCapAndPayload(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", ProviderID: "a", Model: "primary", APIKey: "a", Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: 100}, Fallback: &TierConfig{Provider: "openai", ProviderID: "b", Model: "fallback", APIKey: "b", Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: 500}}}}
 	refreshes := map[string]int{}
-	ladder, err := newNativeModelLadder(tier, agentcore.PiConfig{Options: json.RawMessage(`{"streamOptions":{"temperature":0.1}}`)}, func(rung ModelTier) (PiModelOptions, error) {
+	ladder, err := newNativeModelLadder(tier, NativeAgentConfig{Options: json.RawMessage(`{"streamOptions":{"temperature":0.1}}`)}, func(rung ModelTier) (PiModelOptions, error) {
 		return PiModelOptions{MaxTokens: 1000, ToolChoice: agentcore.ToolChoice{Mode: agentcore.ToolChoiceNone}, RefreshKey: func(context.Context, string) (string, error) {
 			refreshes[rung.ProviderID]++
 			return rung.APIKey + "-fresh", nil

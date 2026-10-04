@@ -12,12 +12,17 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 // Plugin installs the memory store. A nil Store leaves the agent memoryless,
 // which disables recall and persistence rather than failing.
 type Plugin struct {
-	Store agentcore.MemoryStore
+	Store        agentcore.MemoryStore
+	Consolidator Consolidator
+	// NativeProvider binds consolidation to the owning agent with accounted usage.
+	NativeProvider       *ai.FallbackProvider
+	OnConsolidationError func(context.Context, error)
 }
 
 // Name identifies the plugin.
@@ -43,14 +48,25 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 	}
 	ext := &curation{store: p.Store, scopeID: info.ScopeID}
 	ext.curator, _ = p.Store.(agentcore.MemoryCurator)
+	ext.consolidation, _ = p.Store.(ConsolidationStore)
+	if info.Depth == 0 {
+		ext.consolidator = p.Consolidator
+		if ext.consolidator == nil && p.NativeProvider != nil {
+			ext.consolidator = nativeConsolidator(p.NativeProvider, info)
+		}
+	}
+	ext.onConsolidationError = p.OnConsolidationError
 	return ext, nil
 }
 
 // curation is one run's memory-curation capability.
 type curation struct {
-	store   agentcore.MemoryStore
-	curator agentcore.MemoryCurator // nil when the store cannot revise entries
-	scopeID string
+	consolidation        ConsolidationStore
+	consolidator         Consolidator
+	onConsolidationError func(context.Context, error)
+	store                agentcore.MemoryStore
+	curator              agentcore.MemoryCurator // nil when the store cannot revise entries
+	scopeID              string
 }
 
 // Name identifies the extension in composition diagnostics.
@@ -60,7 +76,7 @@ func (*curation) Name() string { return "memory" }
 // is offered only when the store implements MemoryCurator — a store that can
 // recall but not revise gets the capture tool without the edit tool.
 func (c *curation) Tools() []agentcore.Tool {
-	tools := []agentcore.Tool{&learnTool{store: c.store, scopeID: c.scopeID}}
+	tools := []agentcore.Tool{&learnTool{store: c.store, scopeID: c.scopeID}, &recallTool{store: c.store, scopeID: c.scopeID}}
 	if c.curator != nil {
 		tools = append(tools, &memoryEditTool{curator: c.curator, scopeID: c.scopeID})
 	}

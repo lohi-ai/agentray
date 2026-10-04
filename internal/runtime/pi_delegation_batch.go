@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 // A batch decision is host metadata, not a second native turn. Its identity is
@@ -96,7 +97,7 @@ func piDelegationBatches(entries []agentcore.SessionEntry, state json.RawMessage
 		if header.Role != "assistant" {
 			continue
 		}
-		message, err := projectPiMessage(raw)
+		message, err := nativehost.ProjectMessage(raw)
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +137,7 @@ func piDelegationBatches(entries []agentcore.SessionEntry, state json.RawMessage
 				if d != nil {
 					actual, _ := json.Marshal(audit)
 					original, _ := json.Marshal(d.Original)
-					if seen[d.OriginID] || !samePiJSON(actual, original) {
+					if seen[d.OriginID] || !nativehost.SameJSON(actual, original) {
 						return nil, errors.New("delegation batch has repeated or changed original outcome")
 					}
 					seen[d.OriginID] = true
@@ -151,7 +152,7 @@ func piDelegationBatches(entries []agentcore.SessionEntry, state json.RawMessage
 						audit = final.Details
 					}
 				} else if original, valid := localQuestions[audit.QuestionID]; audit.Parked && valid {
-					if localSeen[audit.QuestionID] || !samePiJSON(passiveNativeJSON(audit), passiveNativeJSON(original)) {
+					if localSeen[audit.QuestionID] || !nativehost.SameJSON(passiveNativeJSON(audit), passiveNativeJSON(original)) {
 						return nil, errors.New("parked batch has repeated or changed original outcome")
 					}
 					localSeen[audit.QuestionID] = true
@@ -198,7 +199,7 @@ func piDelegationBatches(entries []agentcore.SessionEntry, state json.RawMessage
 			}
 			digestCalls = append(digestCalls, encoded)
 		}
-		b.Digest = piPrefixDigest(digestCalls)
+		b.Digest = nativehost.PrefixDigest(digestCalls)
 		batches = append(batches, b)
 	}
 	if len(seen) != len(byOrigin) {
@@ -231,7 +232,7 @@ func piDelegationBatches(entries []agentcore.SessionEntry, state json.RawMessage
 			return nil, errors.New("terminal delegation batch retains extra context")
 		}
 		expected, err := b.messages(r)
-		if err != nil || !samePiJSON(passiveNativeJSON(expected), passiveNativeJSON(r.Messages)) {
+		if err != nil || !nativehost.SameJSON(passiveNativeJSON(expected), passiveNativeJSON(r.Messages)) {
 			return nil, errors.New("delegation batch deliveries differ from their receipt")
 		}
 		b.Receipt = &r
@@ -279,7 +280,7 @@ func (b *piDelegationBatch) messages(r piDelegationBatchReceipt) ([]json.RawMess
 }
 
 func piBatchContexts(id string, extra []agentcore.Message, timestamp int64) ([]json.RawMessage, error) {
-	messages, err := piHostMessages(extra)
+	messages, err := nativehost.InputMessages(extra)
 	if err != nil {
 		return nil, err
 	}

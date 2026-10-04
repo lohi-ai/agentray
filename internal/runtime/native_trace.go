@@ -71,6 +71,19 @@ func (a *NativeAgent) traceNow() int64 {
 // The request result never waits for the trace sink. Run completion flushes the
 // serial delivery queue while the run span is still open, as in the worker.
 func (a *NativeAgent) observeRequest(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, run func(*telemetry.Span) (*ai.Message, error)) (*ai.Message, error) {
+	if a.config.OnRequest != nil {
+		err := func() (err error) {
+			defer func() {
+				if value := recover(); value != nil {
+					err = fmt.Errorf("native request observer panic: %v", value)
+				}
+			}()
+			return a.config.OnRequest(ctx, transcript)
+		}()
+		if err != nil {
+			return nil, &ai.PreparationError{Cause: err}
+		}
+	}
 	a.requests.Add(1)
 	defer a.requests.Done()
 	requestID := a.nextRequestID.Add(1)

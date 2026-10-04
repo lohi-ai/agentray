@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,8 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
@@ -31,7 +32,7 @@ func (t piLargeEvidenceTool) Run(context.Context, string) (string, error) {
 }
 
 func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T) {
-	ctx := observe.WithTraceID(piSessionContext(t), "request-compaction")
+	ctx := llm.WithTraceID(piSessionContext(t), "request-compaction")
 	const native = true
 	var mainCalls, summaryCalls, effects, compactedCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +125,7 @@ func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T
 	for _, entry := range entries {
 		if entry.Kind == agentcore.EntryPiContextSummary {
 			receipts++
-			if _, err := parsePiContextSummary(entry.Content); err != nil {
+			if _, err := nativehost.ParseSummary(entry.Content); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -139,7 +140,7 @@ func TestPiRunnerCompactsSinglePromptToolLoopUsingNativeSummaryTier(t *testing.T
 	var original, restored struct{ Messages json.RawMessage }
 	_ = json.Unmarshal(result.NativeState, &original)
 	_ = json.Unmarshal(recovered, &restored)
-	if !samePiJSON(original.Messages, restored.Messages) {
+	if !nativehost.SameJSON(original.Messages, restored.Messages) {
 		t.Fatal("summary metadata changed session recovery")
 	}
 	traces.mu.Lock()
@@ -190,7 +191,7 @@ func checkPiRequestCompactionResume(t *testing.T, store agentcore.SessionStore, 
 	ctx := piSessionContext(t)
 	seed := piLongRequest()
 	var summaries, requests atomic.Int32
-	worker := agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": seed}}), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := NativeAgentConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": seed}}), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected callback %s", method)
 		}
@@ -206,7 +207,7 @@ func checkPiRequestCompactionResume(t *testing.T, store agentcore.SessionStore, 
 		}
 		return piSessionReply(false), nil
 	}}
-	compaction := &PiContextCompaction{Budget: 1500, KeepRecent: 500, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
+	compaction := &nativehost.CompactionPolicy{Budget: 1500, KeepRecent: 500, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
 		summaries.Add(1)
 		return "saved facts", agentcore.Usage{InputTokens: 17, OutputTokens: 2}, nil
 	}}
@@ -218,7 +219,7 @@ func checkPiRequestCompactionResume(t *testing.T, store agentcore.SessionStore, 
 	cfg.Session.Resume = true
 	cfg.Input = piRequestJSON("continue")
 	// A larger current budget should still reuse the already-paid valid view.
-	cfg.Compaction = &PiContextCompaction{Budget: 100000, KeepRecent: 500, Summarize: compaction.Summarize}
+	cfg.Compaction = &nativehost.CompactionPolicy{Budget: 100000, KeepRecent: 500, Summarize: compaction.Summarize}
 	second, err := RunPi(ctx, cfg)
 	if err != nil || second.Projection.Usage.InputTokens != 1 || summaries.Load() != 1 || requests.Load() != 2 {
 		t.Fatalf("resume charged/regenerated old summary: %+v %v summaries=%d", second, err, summaries.Load())
@@ -226,7 +227,7 @@ func checkPiRequestCompactionResume(t *testing.T, store agentcore.SessionStore, 
 	var state struct{ Messages []json.RawMessage }
 	_ = json.Unmarshal(second.State, &state)
 	for i, raw := range seed {
-		if !samePiJSON(raw, state.Messages[i]) {
+		if !nativehost.SameJSON(raw, state.Messages[i]) {
 			t.Fatal("resumed native transcript lost original prefix")
 		}
 	}
@@ -239,9 +240,9 @@ func TestPiRequestCompactionStorageFailurePreventsUnrecordedView(t *testing.T) {
 	ctx := piSessionContext(t)
 	store := &piFailStore{MemorySessionStore: agentcore.NewMemorySessionStore(), kind: agentcore.EntryPiContextSummary}
 	var calls atomic.Int32
-	result, err := RunPi(ctx, PiRunConfig{Input: piRequestJSON("finish"), Compaction: &PiContextCompaction{Budget: 1500, KeepRecent: 500, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
+	result, err := RunPi(ctx, PiRunConfig{Input: piRequestJSON("finish"), Compaction: &nativehost.CompactionPolicy{Budget: 1500, KeepRecent: 500, Summarize: func(context.Context, json.RawMessage, string) (string, agentcore.Usage, error) {
 		return "summary", agentcore.Usage{InputTokens: 11}, nil
-	}}, Session: PiSessionConfig{Store: store, SessionID: "failed-summary", Pi: agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	}}, Session: PiSessionConfig{Store: store, SessionID: "failed-summary", Pi: NativeAgentConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		calls.Add(1)
 		return piSessionReply(false), nil
 	}}}})
@@ -269,11 +270,11 @@ func TestPiRequestCompactionCancellationSettlesWithoutProviderCall(t *testing.T)
 		err    error
 	}, 1)
 	go func() {
-		result, err := RunPi(ctx, PiRunConfig{Input: piRequestJSON("finish"), Compaction: &PiContextCompaction{Budget: 1500, KeepRecent: 500, Summarize: func(ctx context.Context, _ json.RawMessage, _ string) (string, agentcore.Usage, error) {
+		result, err := RunPi(ctx, PiRunConfig{Input: piRequestJSON("finish"), Compaction: &nativehost.CompactionPolicy{Budget: 1500, KeepRecent: 500, Summarize: func(ctx context.Context, _ json.RawMessage, _ string) (string, agentcore.Usage, error) {
 			close(started)
 			<-ctx.Done()
 			return "", agentcore.Usage{InputTokens: 9}, ctx.Err()
-		}}, Session: PiSessionConfig{Pi: agentcore.PiConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+		}}, Session: PiSessionConfig{Pi: NativeAgentConfig{Options: piRequestJSON(map[string]any{"initialState": map[string]any{"messages": piLongRequest()}}), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 			calls.Add(1)
 			return piSessionReply(false), nil
 		}}}})
@@ -299,7 +300,7 @@ func TestPiRequestCompactionCancellationSettlesWithoutProviderCall(t *testing.T)
 }
 
 func TestPiChildRequestCompactionKeepsIndependentViewAndUsage(t *testing.T) {
-	ctx := observe.WithTraceID(piSessionContext(t), "child-compaction")
+	ctx := llm.WithTraceID(piSessionContext(t), "child-compaction")
 	var parents, children, summaries, effects atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {

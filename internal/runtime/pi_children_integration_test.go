@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -120,7 +121,7 @@ func TestPiRunnerForksUseNativeProviderIsolationAndGovernance(t *testing.T) {
 	}
 	// Reattach through the same consumer callback: no process/provider/tool is
 	// needed, no historical spend is charged, and the request must match.
-	worker, known, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{MaxTokens: p.MaxTokens})
+	worker, known, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{MaxTokens: p.MaxTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,6 +229,7 @@ func TestPiRunnerChildSchemaRetryKeepsOriginalNativeTranscript(t *testing.T) {
 	}
 	memory := p.Session.(*agentcore.MemorySessionStore)
 	var original, retry agentcore.RunResult
+	var retryRequest subagent.ForkRequest
 	for _, id := range memory.Sessions() {
 		if id == p.SessionID {
 			continue
@@ -242,6 +244,14 @@ func TestPiRunnerChildSchemaRetryKeepsOriginalNativeTranscript(t *testing.T) {
 		}
 		if strings.HasSuffix(id, "/retry") {
 			retry = child
+			invocation, err := piStoredInvocation(entries)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(invocation, &retryRequest); err != nil {
+				t.Fatal(err)
+			}
+			retryRequest.SessionID = id
 		} else {
 			original = child
 		}
@@ -254,6 +264,22 @@ func TestPiRunnerChildSchemaRetryKeepsOriginalNativeTranscript(t *testing.T) {
 	if _, err := piConversationSuffix(seed.Messages, retry.NativeState); err != nil {
 		t.Fatalf("corrective fork reconstructed native messages: %v", err)
 	}
+	// Replaying the completed corrective child must reattach without new model
+	// calls, effects or billing. Its identity includes the original checkpoint.
+	worker, known, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{MaxTokens: p.MaxTokens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryRequest.Previous = &original
+	attached, err := piForkRunner(PiSessionConfig{Pi: worker}, known, memory, p.ToolChoice, nil)(agentcore.WithDelegationDepth(ctx, 1), parent.Fork(retryRequest.SessionID), retryRequest, nil)
+	if err != nil || attached.StopReason != "reattached" || attached.Final != retry.Final || attached.Usage.InputTokens != 0 || parents.Load() != 2 || children.Load() != 2 {
+		t.Fatalf("corrective child repeated work: %+v err=%v requests=%d/%d", attached, err, parents.Load(), children.Load())
+	}
+
 }
 
 func TestPiRunnerRepeatedProviderCallIDsCreateDistinctChildren(t *testing.T) {
@@ -372,7 +398,7 @@ func TestPiForkKeepsInheritedPermissionHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := agentcore.PiConfig{Options: piSessionOptions(), Callback: func(_ context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := NativeAgentConfig{Options: piSessionOptions(), Callback: func(_ context.Context, _ string, _ json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		return piSessionReply(requests.Add(1) == 1), nil
 	}}
 	result, err := piForkRunner(PiSessionConfig{Pi: worker}, true, nil, agentcore.ToolChoice{}, nil)(ctx, parent.Fork(""), subagent.ForkRequest{Prompt: "try write", Task: "try write"}, nil)
@@ -469,7 +495,7 @@ func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id strin
 		t.Fatal(err)
 	}
 	var requests atomic.Int32
-	worker := agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	worker := NativeAgentConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected %s", method)
 		}
@@ -514,7 +540,7 @@ func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id strin
 	}}
 	fork := piForkRunner(PiSessionConfig{Pi: worker}, true, store, agentcore.ToolChoice{}, nil)
 	// A parked/completed reattach must not even need a worker installation.
-	reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{}}, true, store, agentcore.ToolChoice{}, nil)
+	reattach := piForkRunner(PiSessionConfig{Pi: NativeAgentConfig{}}, true, store, agentcore.ToolChoice{}, nil)
 	req := subagent.ForkRequest{SessionID: id, Prompt: "child task", Task: "child task"}
 	previousID := ""
 	for n := 1; n <= 2; n++ {
@@ -540,7 +566,7 @@ func checkPiChildParkResume(t *testing.T, store agentcore.SessionStore, id strin
 		var again *PiChildQuestionError
 		originalDigest, _ := piMessagesDigest(result.NativeState)
 		attachedDigest, _ := piMessagesDigest(attached.NativeState)
-		if !errors.As(err, &again) || again.QuestionID != question.QuestionID || attached.Usage != (agentcore.Usage{}) || requests.Load() != int32(n) || !samePiJSON(surfaced, question.Question) || originalDigest != attachedDigest || result.NativeRevision != attached.NativeRevision {
+		if !errors.As(err, &again) || again.QuestionID != question.QuestionID || attached.Usage != (agentcore.Usage{}) || requests.Load() != int32(n) || !nativehost.SameJSON(surfaced, question.Question) || originalDigest != attachedDigest || result.NativeRevision != attached.NativeRevision {
 			t.Fatalf("parked reattach changed state or performed work: usage=%+v requests=%d digest=%s/%s error=%v", attached.Usage, requests.Load(), originalDigest, attachedDigest, err)
 		}
 		after, _ := store.Log(ctx, id)

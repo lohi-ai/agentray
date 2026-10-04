@@ -29,9 +29,8 @@ const pluginsPrefix = modulePath + "/agentcore/plugins/"
 // the likely shape of the first violation, because it is the one that compiles.
 //
 // It checks the package's DIRECT imports, which is sufficient rather than
-// sloppy: TestKernelIsAModuleLeaf below proves the kernel imports nothing else
-// in this module at all, so there is no in-repo package a plugin could be
-// smuggled in behind.
+// sloppy: the runtime dependency checks below keep provider and host modules
+// free of application policy and plugin registration.
 func TestKernelNamesNoPlugin(t *testing.T) {
 	pkg, err := build.ImportDir(".", 0)
 	if err != nil {
@@ -46,23 +45,26 @@ func TestKernelNamesNoPlugin(t *testing.T) {
 	}
 }
 
-// TestKernelIsAModuleLeaf is the stronger property the rule rests on: agentcore
-// depends on NOTHING else in this module — not the plugins, not ai, not
-// internal/. That is what makes it publishable on its own, and what makes the
-// direct-import check above a complete one.
-//
-// Third-party and stdlib imports are fine; the leaf property is about this
-// module's own packages, since those are the ones that could depend back on the
-// kernel and close a cycle the plugin split exists to prevent.
-func TestKernelIsAModuleLeaf(t *testing.T) {
+// TestKernelRuntimeDependencies keeps composition above the native runtime
+// modules. Providers depend on ai/protocol, never back on the agent facade.
+func TestKernelRuntimeDependencies(t *testing.T) {
 	pkg, err := build.ImportDir(".", 0)
 	if err != nil {
 		t.Fatalf("reading the agentcore package: %v", err)
 	}
 	for _, imp := range pkg.Imports {
-		if imp == modulePath || strings.HasPrefix(imp, modulePath+"/") {
-			t.Errorf("package agentcore imports %s — the kernel must stay a leaf of this module.\n"+
-				"Whatever it needs belongs behind a seam or an interface the host fills in.", imp)
+		if strings.HasPrefix(imp, modulePath+"/") {
+			allowed := map[string]bool{
+				modulePath + "/ai/protocol":      true,
+				modulePath + "/ai":               true,
+				modulePath + "/agentcore/engine": true,
+				modulePath + "/agentcore/host":   true,
+				modulePath + "/telemetry":        true,
+				modulePath + "/internal/jsonjs":  true,
+			}
+			if !allowed[imp] {
+				t.Errorf("agentcore imports application/plugin package %s", imp)
+			}
 		}
 	}
 
@@ -80,6 +82,7 @@ func TestKernelIsAModuleLeaf(t *testing.T) {
 // the runtime is one flat package, plugins are ejectable capabilities, and
 // integration is a black-box test suite. engine is the native Pi port, with
 // its own dependency boundary while callers migrate from the flat kernel.
+// host exposes reusable native policy/checkpoint utilities to external consumers.
 //
 // The rule matters more than tidiness. "The kernel" has to name a tree a reader
 // can enumerate, or the boundary tests above are checking one package while the
@@ -89,7 +92,7 @@ func TestKernelIsAModuleLeaf(t *testing.T) {
 // integration/. Production packages that merely import agentcore belong beside
 // it (authoring/, ai/, sandbox/).
 func TestKernelTreeHoldsOnlyDeclaredBoundaries(t *testing.T) {
-	allowed := map[string]bool{"plugins": true, "integration": true, "engine": true}
+	allowed := map[string]bool{"plugins": true, "integration": true, "engine": true, "host": true}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading the agentcore directory: %v", err)
@@ -127,6 +130,27 @@ func TestNativeEngineNamesNoHost(t *testing.T) {
 		}
 		if imp == "os/exec" {
 			t.Error("native engine must not launch a runtime subprocess")
+		}
+	}
+}
+
+// Shared host utilities must be importable by the root facade and by Soot,
+// without importing either application's runtime or the facade itself.
+func TestNativeHostNamesNoApplication(t *testing.T) {
+	pkg, err := build.ImportDir("host", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{
+		modulePath + "/ai/protocol":      true,
+		modulePath + "/ai":               true,
+		modulePath + "/agentcore/engine": true,
+		modulePath + "/telemetry":        true,
+		modulePath + "/internal/jsonjs":  true,
+	}
+	for _, imported := range pkg.Imports {
+		if strings.HasPrefix(imported, modulePath+"/") && !allowed[imported] {
+			t.Errorf("native host utility imports facade/application package %s", imported)
 		}
 	}
 }

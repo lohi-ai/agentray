@@ -13,8 +13,9 @@ import (
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	"github.com/lohi-ai/agentray/telemetry/llm"
 	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
 	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/telemetry"
@@ -63,12 +64,12 @@ func TestNativeRunnerChildrenUseGoIsolationReceiptsAndTrace(t *testing.T) {
 			bothStarted := make(chan struct{})
 			var mu sync.Mutex
 			perChild := map[string]int{}
-			traces := []observe.TraceRecord{}
+			traces := []llm.TraceRecord{}
 			p := representativeBuildParams()
 			p.Sandbox, p.HTTPTool = nil, nil
 			p.Goal, p.PrepareNextTurn, p.RefreshKey = "", nil, nil
 			p.Tools = []agentcore.Tool{nativeChildWrite{&effects}}
-			p.Tracer = observe.SinkFunc(func(record observe.TraceRecord) { mu.Lock(); defer mu.Unlock(); traces = append(traces, record) })
+			p.Tracer = llm.SinkFunc(func(record llm.TraceRecord) { mu.Lock(); defer mu.Unlock(); traces = append(traces, record) })
 			provider := func(ctx context.Context, _ json.RawMessage, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
 				raw := string(passiveNativeJSON(transcript))
 				spawn := false
@@ -148,7 +149,7 @@ func TestNativeRunnerChildrenUseGoIsolationReceiptsAndTrace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reattach := piForkRunner(PiSessionConfig{Pi: agentcore.PiConfig{}}, true, store, p.ToolChoice, nil)
+			reattach := piForkRunner(PiSessionConfig{Pi: NativeAgentConfig{}}, true, store, p.ToolChoice, nil)
 			for _, id := range store.Sessions() {
 				if id == p.SessionID {
 					continue
@@ -201,7 +202,7 @@ func TestNativeChildParkReattachAndAnswerResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	var requests atomic.Int32
-	runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+	runtime := PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`{"initialState":{}}`), Callback: func(_ context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 		if method != "stream" {
 			return nil, fmt.Errorf("unexpected callback: %s", method)
 		}
@@ -315,11 +316,11 @@ func TestNativeParentReceiptRetainsChildQuestionRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, question, pending := agentcore.PendingQuestion(childEntries)
-	if !pending || id != route.QuestionID || !samePiJSON(question, route.Question) {
+	if !pending || id != route.QuestionID || !nativehost.SameJSON(question, route.Question) {
 		t.Fatalf("parent receipt does not address the durable child question: %+v id=%s question=%s", route, id, question)
 	}
 	parentID, parentQuestion, pending := agentcore.PendingQuestion(entries)
-	if !pending || parentID == id || !samePiJSON(parentQuestion, question) {
+	if !pending || parentID == id || !nativehost.SameJSON(parentQuestion, question) {
 		t.Fatalf("parent waiting on wrong question: id=%s question=%s", parentID, parentQuestion)
 	}
 	p.ResumeSession = true
@@ -736,7 +737,7 @@ func TestNativeParallelChildQuestionsCompleteBeforeParentContinues(t *testing.T)
 			t.Fatal(err)
 		}
 		id, question, pending := agentcore.PendingQuestion(entries)
-		if !pending || !samePiJSON(question, result.Question) {
+		if !pending || !nativehost.SameJSON(question, result.Question) {
 			t.Fatalf("displayed question differs from the pending workflow: %s %s", question, result.Question)
 		}
 		lease, release, err := agentcore.AcquireSessionLease(ctx, p.Session, p.SessionID)
@@ -797,7 +798,7 @@ func TestNativeDelegationContinuationHonorsToolContextsAndTermination(t *testing
 			}
 			var parents, children int
 			var hooks atomic.Int32
-			runtime := PiSessionConfig{Pi: agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
+			runtime := PiSessionConfig{Pi: NativeAgentConfig{Options: json.RawMessage(`{"initialState":{}}`)}}
 			runtime.Pi.Callback = func(ctx context.Context, method string, params json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
 				if method != "stream" {
 					return nil, fmt.Errorf("unexpected callback %s", method)
@@ -915,7 +916,7 @@ func TestNativeDelegationContinuationHonorsToolContextsAndTermination(t *testing
 
 func TestNativeAuxiliarySummaryUsesGoAndPreservesSource(t *testing.T) {
 	var calls int
-	var traces []observe.TraceRecord
+	var traces []llm.TraceRecord
 	provider := engine.StreamFn(func(ctx context.Context, model json.RawMessage, transcript ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
 		calls++
 		if len(ai.GetCurrentTools(transcript.Messages())) != 0 {
@@ -938,7 +939,7 @@ func TestNativeAuxiliarySummaryUsesGoAndPreservesSource(t *testing.T) {
 	runtime := PiRuntimeConfig{NativeStream: provider}
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "test", APIKey: "stale"}}
 	history := json.RawMessage(`[{"role":"system","content":"historical policy","timestamp":1},{"role":"user","content":"question","timestamp":2},{"role":"assistant","content":[{"type":"thinking","thinking":"private","thinkingSignature":"source-opaque-signature"},{"type":"text","text":"answer"}],"stopReason":"stop","timestamp":3}]`)
-	result, usage, err := summarizePiHistoryWithUsage(context.Background(), runtime, tier, history, nativeAgentRevision, func(context.Context, string) (string, error) { return "refreshed", nil }, observe.SinkFunc(func(record observe.TraceRecord) { traces = append(traces, record) }))
+	result, usage, err := summarizePiHistoryWithUsage(context.Background(), runtime, tier, history, nativeAgentRevision, func(context.Context, string) (string, error) { return "refreshed", nil }, llm.SinkFunc(func(record llm.TraceRecord) { traces = append(traces, record) }))
 	if err != nil || result != "summary" || calls != 1 || usage.InputTokens != 1 || len(traces) != 1 {
 		t.Fatalf("Go summary failed: %q %+v calls=%d traces=%d %v", result, usage, calls, len(traces), err)
 	}
@@ -949,7 +950,7 @@ func nativeChildThinking(signature string) ai.ContentBlock {
 }
 
 func TestNativeProviderRejectsUnportedAPIWithoutWorkerFallback(t *testing.T) {
-	_, err := NativeProviderStream(context.Background(), json.RawMessage(`{"id":"test","api":"google-generative-ai","provider":"google"}`), ai.NormalizeContext(ai.Context{}), nil)
+	_, err := (ai.NativeProvider{}).Stream(context.Background(), json.RawMessage(`{"id":"test","api":"google-generative-ai","provider":"google"}`), ai.NormalizeContext(ai.Context{}), nil)
 	if err == nil || err.Error() != `native Go provider for API "google-generative-ai" is not ported` {
 		t.Fatalf("unexpected native dispatch: %v", err)
 	}

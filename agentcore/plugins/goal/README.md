@@ -5,12 +5,11 @@ completion contract, the sentinel match, the nudge, and the stall breaker are al
 in `goal.go`, reaching the loop through `PromptContributor` and
 `StopInterceptor`. Delete this folder and a run stops whenever the model likes.
 
-The one half that stays in core is the goal as **durable state**: the loop writes
-`EntryGoal` and recovers it on resume, then hands it back as `RunInfo.Goal`. Only
-the loop may write the durable log — a plugin that persisted its own gate
-condition would be a second writer to the record resume depends on. This is
-deepseek-harness's split: `dsh-goal` is an event-sourced service, and
-continuation is a separate consumer package (`goal-round-driver`).
+Core owns the checkpoint's current goal and revision trail. `RunNative` restores
+these before constructing the plugin and supplies the current condition through
+`RunInfo.Goal`. A tool commits a revision through the native run owner before
+changing its store; durable session hosts supply their journal recorder at that
+same boundary. The plugin owns the completion policy, not persistence.
 
 Claude Code's `/goal` analog.
 
@@ -105,8 +104,8 @@ than written through.
   the most common way a weaker model misses a contract it is trying to follow.
   Repeating identical prose to a model that already ignored it is the one
   approach known not to work.
-- The goal is persisted (`EntryGoal`) by the loop, so a resumed run is still
-  gated even when the resuming caller could not re-supply the condition.
+- The native checkpoint retains the goal, so a resumed run is still gated
+  even when the caller cannot re-supply the condition.
 - **`UntilRevisable` transfers real authority, and should be read as one.** The
   gate exists to stop a model ending a run it has not finished; a tool that
   rewrites the gate's condition can end any run by redefining success. It is
@@ -116,17 +115,16 @@ than written through.
   declare BLOCKED and hand back nothing.
 
   What keeps it accountable is the record, not a restriction. Every revision
-  requires a `reason`, lands in the durable log as an `EntryGoal` the moment the
-  loop drains it, and stays in the store's trail beside the ones before it — so
+  requires a `reason` and is recorded with its previous condition before the
+  store changes. It stays in the checkpoint and the store's trail — so
   "the agent narrowed its goal until it could pass" is something you can see
   afterwards, in order, with the model's own justification on each step. The
   pinned user requirement is **not** touched: a revision changes what finishing
   means, never what was asked for.
 
-  The mechanism is `GoalReviser`, an optional extension interface the loop drains
-  once per turn. The loop still owns the log and the system prompt; the plugin
-  only offers a pending value. Same rule as everywhere else — only the loop
-  writes the record.
+  `GoalReviser` publishes a committed condition between turns. The native host
+  verifies it matches the recorded condition before rebuilding the prompt.
+  Restoring a checkpoint does not append another revision.
 
 ## Known limitations and deferred work
 
@@ -143,3 +141,25 @@ than written through.
 - **Ordering is a convention, not a constraint.** Nothing rejects a composition
   that registers a verify guard ahead of the gate; it would merely verify
   answers the gate is about to throw away.
+
+## Structured lifecycle (opt-in)
+
+`Plugin{Lifecycle: true, TokenBudget: ..., TimeBudget: ...}` retains active,
+paused, budget_limited, complete or dropped state in the native checkpoint.
+Accounting includes provider, cache, child and secondary-model tokens, plus
+active wall time; paused/offline time is excluded. Budgets are checked at settled
+turn boundaries, so one in-flight turn can overshoot a cap.
+
+The host sends `goal.Command` JSON in `NativeRun.Commands["goal"]`:
+`get`, `pause`, `resume`, `drop`, or `create` (a new task after a terminal goal).
+`ControlOnly: true` applies controls without requesting the model; the result is
+in `RunResult.CommandResults`. Resume retains usage; exhausted absolute caps
+must be raised via `token_budget` / `time_budget_ms`. `Store.ApplyCommand` also
+supports concurrent host pause of a live run. Current tool effects settle before
+pause takes effect; pause does not roll them back.
+
+`get_goal` is the model-facing inspection tool. Lifecycle authority stays with
+the host; model revision still requires `Revisable`. Only accepted final work
+with `STATUS: DONE` marks complete. `NewTaskOnInput` lets conversation hosts
+start fresh accounting when new input follows a complete/dropped task; it never
+implicitly resumes paused/budget-limited work. Forks get independent stores.

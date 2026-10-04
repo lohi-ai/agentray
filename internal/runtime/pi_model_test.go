@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
 	"github.com/lohi-ai/agentray/ai"
 )
 
@@ -28,7 +27,7 @@ func TestPiModelBindingPreservesResolvedWireAndEndpoint(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tier := ModelTier{TierConfig: TierConfig{Provider: tc.provider, Model: "test-model", BaseURL: tc.base, APIKey: "keep-out-of-model", ContextWindow: 12345, Capabilities: tc.caps}}
-			cfg, known, err := tier.BindPi(agentcore.PiConfig{}, PiModelOptions{MaxTokens: 234, Pricing: observe.Pricing{"test-model": {InputPerM: 2, OutputPerM: 8, CacheReadPerM: 0.25, CacheWritePerM: 3}}})
+			cfg, known, err := tier.BindPi(NativeAgentConfig{}, PiModelOptions{MaxTokens: 234, Pricing: ai.Pricing{"test-model": {InputPerM: 2, OutputPerM: 8, CacheReadPerM: 0.25, CacheWritePerM: 3}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +71,7 @@ func piModelJSON(value any) json.RawMessage {
 func TestPiModelBindingHonorsLimitsAndFailingCredentialRefresh(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "unknown", APIKey: "stale-key", BaseURL: "https://example.test/v1", Capabilities: agentcore.ModelCapabilities{MaxOutputTokens: 100, Tools: agentcore.CapabilityUnsupported, ImageInput: agentcore.CapabilityUnsupported}}}
 	var refreshes int
-	cfg, known, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(`{"initialState":{"systemPrompt":"keep","tools":[{"name":"write"}]},"streamOptions":{"temperature":0.25}}`)}, PiModelOptions{MaxTokens: 500, RefreshKey: func(context.Context, string) (string, error) { refreshes++; return "", errors.New("key unavailable") }})
+	cfg, known, err := tier.BindPi(NativeAgentConfig{Options: json.RawMessage(`{"initialState":{"systemPrompt":"keep","tools":[{"name":"write"}]},"streamOptions":{"temperature":0.25}}`)}, PiModelOptions{MaxTokens: 500, RefreshKey: func(context.Context, string) (string, error) { refreshes++; return "", errors.New("key unavailable") }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +115,7 @@ func TestPiModelBindingFederationAdmissionAndRefreshAuthority(t *testing.T) {
 				t.Setenv("ANTHROPIC_IDENTITY_TOKEN_FILE", "/not-read-during-admission")
 			}
 			tier := ModelTier{TierConfig: TierConfig{Provider: tc.provider, Model: "test", APIKey: tc.key}}
-			cfg, _, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(tc.options)}, PiModelOptions{RefreshKey: tc.refresh})
+			cfg, _, err := tier.BindPi(NativeAgentConfig{Options: json.RawMessage(tc.options)}, PiModelOptions{RefreshKey: tc.refresh})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -138,7 +137,7 @@ func TestPiModelBindingRejectsUnsupportedLifecycle(t *testing.T) {
 		{Provider: ai.VendorOpenAICodex, Model: "test", APIKey: ai.OAuthPoolKey},
 		{Provider: "openai", Model: "test", BaseURL: "https://user:password@example.test/v1"},
 	} {
-		if _, _, err := (ModelTier{config}).BindPi(agentcore.PiConfig{}, PiModelOptions{}); err == nil {
+		if _, _, err := (ModelTier{config}).BindPi(NativeAgentConfig{}, PiModelOptions{}); err == nil {
 			t.Fatalf("accepted unsupported model binding for %s", config.Provider)
 		}
 	}
@@ -148,7 +147,7 @@ func TestPiModelBindingGuardsRequestAndHookModel(t *testing.T) {
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openai", Model: "bound", APIKey: "secret", BaseURL: "https://bound.test/v1"}}
 	var calls int
 	var update json.RawMessage
-	cfg, _, err := tier.BindPi(agentcore.PiConfig{Options: json.RawMessage(`{"callbacks":["prepareRequest"]}`), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
+	cfg, _, err := tier.BindPi(NativeAgentConfig{Options: json.RawMessage(`{"callbacks":["prepareRequest"]}`), Callback: func(context.Context, string, json.RawMessage, func(json.RawMessage) error) (json.RawMessage, error) {
 		calls++
 		return update, nil
 	}}, PiModelOptions{})

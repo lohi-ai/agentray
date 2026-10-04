@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 
@@ -48,11 +49,11 @@ func TestPiCompactionPreservesNativeTailAndSystemState(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := piConvMessages(t, compacted)
-	if len(got) != 7 || !samePiJSON(got[0], []byte(fixture[0])) || !samePiJSON(got[1], []byte(fixture[3])) {
+	if len(got) != 7 || !nativehost.SameJSON(got[0], []byte(fixture[0])) || !nativehost.SameJSON(got[1], []byte(fixture[3])) {
 		t.Fatalf("system state changed: %s", compacted.Messages)
 	}
 	for i, raw := range fixture[4:] {
-		if !samePiJSON(got[i+3], []byte(raw)) {
+		if !nativehost.SameJSON(got[i+3], []byte(raw)) {
 			t.Fatalf("native tail changed: %s", got[i+3])
 		}
 	}
@@ -61,9 +62,6 @@ func TestPiCompactionPreservesNativeTailAndSystemState(t *testing.T) {
 	}
 	if plan, err := planPiCompaction(compacted, 1, true); err != nil || plan.cut != 0 {
 		t.Fatalf("immediate re-compaction: %+v %v", plan, err)
-	}
-	if err := requireLegacyConversation(entries); err == nil {
-		t.Fatal("native compaction entered legacy reducer")
 	}
 	// The next native delta is anchored to the compacted branch, not its
 	// superseded pre-compaction transcript. Future summaries retain the old one.
@@ -155,7 +153,7 @@ func TestPiCompactionRetainsOpaqueToolDetails(t *testing.T) {
 		t.Fatalf("opaque native metadata blocked compaction: %+v %v", plan, err)
 	}
 	compacted, err := foldPiHistory(append(entries, piCompactionEntry("c", "native", "r", plan.cut, "old summary")))
-	if err != nil || !samePiJSON(piConvMessages(t, compacted)[5], []byte(fixture[6])) {
+	if err != nil || !nativehost.SameJSON(piConvMessages(t, compacted)[5], []byte(fixture[6])) {
 		t.Fatalf("opaque native details changed: %s %v", compacted.Messages, err)
 	}
 }

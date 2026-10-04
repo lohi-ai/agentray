@@ -41,16 +41,6 @@ type ProviderRequestHook func(ctx context.Context, req ChatRequest) ChatRequest
 // audit, or surfacing the turn to an external sink.
 type MessageEndHook func(ctx context.Context, msg Message)
 
-// ProviderResponseHook observes a completed provider response at the raw call
-// boundary (pi's `after_provider_response`), before its usage is folded into the
-// run total. Read-only: use it to meter tokens/cost or inspect the stop reason
-// per provider call — earlier and more granular than MessageEnd, which fires
-// once the assistant message is assembled and appended. A payload-rewrite seam
-// already exists as ProviderRequestHook (our ChatRequest is the assembled
-// payload), so there is deliberately no separate before_provider_payload hook;
-// rewriting the outgoing request is what BeforeProviderRequest is for.
-type ProviderResponseHook func(ctx context.Context, resp ChatResponse)
-
 // RunStart is the assembled starting state of a run, handed to the
 // BeforeAgentStart hooks after the system prompt is built (definition + recalled
 // memory + skill headers + any goal contract) and before the first turn. It is
@@ -184,9 +174,6 @@ type Hooks struct {
 	BeforeProviderRequest []ProviderRequestHook
 	// MessageEnd observers run in order after each assistant message completes.
 	MessageEnd []MessageEndHook
-	// AfterProviderResponse observers run in order on each successful provider
-	// response, at the raw call boundary (before usage accumulation).
-	AfterProviderResponse []ProviderResponseHook
 
 	// ErrorPolicy governs handler panics/errors. Zero value == HookContinue.
 	ErrorPolicy HookErrorPolicy
@@ -387,18 +374,4 @@ func (h Hooks) runAgentEnd(ctx context.Context, res RunResult) {
 			_ = h.emitErr(fmt.Sprintf("agent_end[%d]", i), perr)
 		}
 	}
-}
-
-// runAfterProviderResponse dispatches the read-only after_provider_response
-// observers in order, mirroring runMessageEnd's panic/error policy.
-func (h Hooks) runAfterProviderResponse(ctx context.Context, resp ChatResponse) error {
-	for i, hook := range h.AfterProviderResponse {
-		source := fmt.Sprintf("after_provider_response[%d]", i)
-		if perr := safe(func() { hook(ctx, resp) }); perr != nil {
-			if e := h.emitErr(source, perr); e != nil {
-				return e
-			}
-		}
-	}
-	return nil
 }

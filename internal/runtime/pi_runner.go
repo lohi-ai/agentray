@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/lohi-ai/agentray/ai"
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/engine"
-	"github.com/lohi-ai/agentray/agentcore/plugins/observe"
+	nativehost "github.com/lohi-ai/agentray/agentcore/host"
 )
 
 // PiRuntimeConfig configures the native Go engine for parents, children and summaries.
@@ -21,30 +21,13 @@ type PiRuntimeConfig struct {
 }
 
 func WithPiRuntime(cfg PiRuntimeConfig) RunnerOption {
-	return func(r *Runner) { copy := cfg; r.Pi = &copy }
+	return func(r *Runner) { r.Pi = cfg }
 }
 
 // runModelLoop is the runner's single execution dispatch, after resolution and
 // admission and before its common trace/terminal persistence path.
 func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOptions, tier ModelTier, sink agentcore.StreamSink) (agentcore.RunResult, error) {
-	if r.Pi == nil {
-		if len(opts.NativeHistory) > 0 {
-			return agentcore.RunResult{}, errors.New("native history requires the Pi runtime")
-		}
-		a, err := Build(p)
-		if err != nil {
-			return agentcore.RunResult{}, err
-		}
-		messages := append([]agentcore.Message{}, opts.History...)
-		if opts.Prompt != "" || opts.ResumeFromRunID == "" {
-			messages = append(messages, agentcore.Message{Role: agentcore.RoleUser, Content: opts.Prompt})
-		}
-		if sink != nil {
-			return a.ContinueStream(ctx, messages, opts.Prompt, sink)
-		}
-		return a.Continue(ctx, messages, opts.Prompt)
-	}
-	runtime := *r.Pi
+	runtime := r.Pi
 	// Auxiliary calls bind their own tier; never inherit the parent's bound
 	// dispatcher or account pool. Preserve an explicit host stream override.
 	summaryRuntime := runtime
@@ -110,9 +93,9 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 	if err != nil {
 		return agentcore.RunResult{}, err
 	}
-	modelOptions := PiModelOptions{MaxTokens: p.MaxTokens, Pricing: observe.DefaultPricing(), RefreshKey: p.RefreshKey, ToolChoice: p.ToolChoice, ParallelToolCalls: p.ParallelToolCalls, OutputSchema: p.OutputSchema}
-	baseBinding := agentcore.PiConfig{Options: options}
-	var binding agentcore.PiConfig
+	modelOptions := PiModelOptions{MaxTokens: p.MaxTokens, Pricing: ai.DefaultPricing(), RefreshKey: p.RefreshKey, ToolChoice: p.ToolChoice, ParallelToolCalls: p.ParallelToolCalls, OutputSchema: p.OutputSchema}
+	baseBinding := NativeAgentConfig{Options: options}
+	var binding NativeAgentConfig
 	var known bool
 	var ladder *nativeModelLadder
 	if runtime.NativeStream == nil {
@@ -145,7 +128,7 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 	if err != nil {
 		return agentcore.RunResult{}, err
 	}
-	compaction := &PiContextCompaction{Summarize: func(ctx context.Context, messages json.RawMessage, revision string) (string, agentcore.Usage, error) {
+	compaction := &nativehost.CompactionPolicy{Summarize: func(ctx context.Context, messages json.RawMessage, revision string) (string, agentcore.Usage, error) {
 		// A separate trace session prevents auxiliary model calls from becoming
 		// the apparent next conversational turn in the parent/child inspector.
 		ctx = agentcore.WithRunSession(ctx, agentcore.RunSessionFrom(ctx)+"/summary-"+uuid.NewString())
@@ -169,7 +152,7 @@ func (r *Runner) runModelLoop(ctx context.Context, p BuildParams, opts RunOption
 	if err != nil {
 		return agentcore.RunResult{}, err
 	}
-	if err := piValidateToolChoice(p.ToolChoice, names); err != nil {
+	if err := ai.ValidateNativeToolChoice(p.ToolChoice, names); err != nil {
 		return agentcore.RunResult{}, err
 	}
 	// The native session admits only advertised names. Physical calls still
