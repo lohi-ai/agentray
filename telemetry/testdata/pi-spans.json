@@ -182,17 +182,21 @@
             {
               "op": "attributes",
               "attributes": {
-                "count": null,
                 "overwrite": "end"
-              }
+              },
+              "undefinedAttributes": [
+                "count"
+              ]
             },
             {
               "op": "event",
               "name": "first",
               "attributes": {
-                "index": 1,
-                "ignored": null
-              }
+                "index": 1
+              },
+              "undefinedAttributes": [
+                "ignored"
+              ]
             },
             {
               "op": "event",
@@ -204,9 +208,11 @@
           ],
           "attributes": {
             "start": "value",
-            "overwrite": "start",
-            "ignored": null
-          }
+            "overwrite": "start"
+          },
+          "undefinedAttributes": [
+            "ignored"
+          ]
         }
       ],
       "expected": {
@@ -980,6 +986,1727 @@
           "settled",
           "late-child",
           "late-grandchild"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/missing status/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {}
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/missing status/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {}
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/missing status/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {}
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty status/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": ""
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty status/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": ""
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty status/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": ""
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "invalid"
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "invalid"
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "invalid"
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/case sensitive status/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "OK"
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/case sensitive status/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "OK"
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/case sensitive status/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "OK"
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status with details/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "pending",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Explicit",
+                "message": "kept"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status with details/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "pending",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Explicit",
+                "message": "kept"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/unknown status with details/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "pending",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "Explicit",
+                "message": "kept"
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "Explicit",
+                  "message": "kept"
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/ok ignores details/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "ok",
+                "error": {
+                  "name": "Ignored",
+                  "message": "ignored"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "ok"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/ok ignores details/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "ok",
+                "error": {
+                  "name": "Ignored",
+                  "message": "ignored"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "ok"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/ok ignores details/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "ok",
+                "error": {
+                  "name": "Ignored",
+                  "message": "ignored"
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "ok"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "ok"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty error details/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "",
+                "message": ""
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty error details/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "",
+                "message": ""
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/empty error details/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error",
+              "error": {
+                "name": "",
+                "message": ""
+              }
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error",
+                "error": {
+                  "name": "",
+                  "message": ""
+                }
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/null error details/none",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": null
+              }
+            },
+            {
+              "op": "snapshot"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/null error details/ordinary",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": null
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed"
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
+        ]
+      }
+    },
+    {
+      "name": "status normalization/null error details/unreadable",
+      "actions": [
+        {
+          "op": "span",
+          "name": "explicit",
+          "actions": [
+            {
+              "op": "status",
+              "status": {
+                "status": "ok"
+              }
+            },
+            {
+              "op": "status",
+              "status": {
+                "status": "error",
+                "error": null
+              }
+            },
+            {
+              "op": "snapshot"
+            },
+            {
+              "op": "failure",
+              "message": "callback failed",
+              "inspection": [
+                {
+                  "op": "event",
+                  "name": "must not inspect"
+                },
+                {
+                  "op": "failure",
+                  "message": "unreadable"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expected": {
+        "spans": [
+          {
+            "id": 1,
+            "parentId": null,
+            "name": "explicit",
+            "attributes": {},
+            "events": [],
+            "status": {
+              "status": "error"
+            },
+            "settled": true,
+            "endSequence": 1
+          }
+        ],
+        "snapshots": [
+          [
+            {
+              "id": 1,
+              "parentId": null,
+              "name": "explicit",
+              "attributes": {},
+              "events": [],
+              "status": {
+                "status": "error"
+              },
+              "settled": false
+            }
+          ]
+        ],
+        "failures": [
+          "callback failed"
+        ],
+        "admitted": [
+          "explicit"
         ]
       }
     }

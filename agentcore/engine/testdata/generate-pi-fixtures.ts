@@ -81,17 +81,118 @@ const cases: any[] = [
   { name: "after context result replacement keeps executed object", ...base, retainAfterResults: true, tools: [{ ...echo, result: result("original"), afterMutation: { content: [text("mutated")], terminate: true }, afterContextResult: result("ignored") }], responses: [assistant([call("one", "echo", { value: "x" })], "toolUse")], recordHooks: true },
 ];
 
+for (const mode of ["sequential", "parallel"]) {
+  const tool = {...echo, result: result("original")};
+  const turn = assistant([call("one", "echo", {value: "x"})], "toolUse");
+  const common = {...base, mode, tools: [tool], responses: [turn, assistant()]};
+  for (const [name, changes] of [
+    ["content and metadata", {endMutation: {content: [text("redacted")], details: {redacted: true}, structuredContent: {answer: 9}, usage: {...usage, input: 7}}}],
+    ["termination", {endMutation: {terminate: true}}],
+    ["remove termination", {tools: [{...tool, result: result("original", {terminate: true})}], endDeleteResult: ["terminate"]}],
+    ["error flags keep computed outcome", {endMutation: {isError: true}, endIsError: true}],
+    ["event result replacement is local", {endReplacement: result("ignored", {terminate: true})}],
+    ["immediate blocked result", {recordHooks: true, tools: [{...tool, before: {block: true, reason: "blocked", terminate: true}}], endMutation: {content: [text("redacted")], terminate: false}}],
+    ["retained after result", {recordHooks: true, retainAfterResults: true, endMutation: {content: [text("redacted")], terminate: true}}],
+    ["after override detaches result", {recordHooks: true, retainAfterResults: true, tools: [{...tool, after: {details: {overridden: true}}}], endMutation: {content: [text("redacted")], terminate: true}}],
+    ["truncated result", {responses: [assistant([call("one", "echo", {value: "x"})], "length"), assistant()], endMutation: {content: [text("redacted")], terminate: true}}],
+  ] as [string, any][]) cases.push({name: `tool end mutation/${mode}/${name}`, ...common, ...changes});
+}
+for (const [i, name] of ["quote\"", "slash\\", "line\n", "tab\t", "nul\0", "雪", "😀", "line\u2028separator"].entries()) {
+  for (const kind of ["validation", "truncated", "unknown"]) cases.push({
+    name: `tool name diagnostic/${i}/${kind}`, ...base,
+    tools: kind === "unknown" ? [] : [{...echo, name}],
+    responses: [assistant([call("one", name, {})], kind === "truncated" ? "length" : "toolUse"), assistant()],
+  });
+}
+
+for (const mode of ["sequential", "parallel"]) {
+  for (const [name, mutation, deleted] of [
+    ["content and metadata", {content: [text("later callback")], details: {later: true}, usage: {...usage, input: 9}}, []],
+    ["clear termination", {terminate: false}, []],
+    ["delete termination and usage", {}, ["terminate", "usage"]],
+    ["error flag keeps outcome", {isError: true}, []],
+  ] as [string, any, string[]][]) cases.push({
+    name: `retained tool result/${mode}/${name}`, ...base, mode,
+    tools: [{...echo, result: result("original", {usage})}],
+    responses: [assistant([call("one", "echo", {value: "a"}), call("two", "echo", {value: "b"})], "toolUse"), assistant()],
+    waitForSecond: mode === "parallel", endMutation: {terminate: true},
+    retainedEndAt: "tool_execution_end", retainedEndTrigger: mode === "parallel" ? "one" : "two",
+    retainedEndTarget: mode === "parallel" ? "two" : "one", retainedEndMutation: mutation, retainedEndDelete: deleted,
+  });
+}
+for (const event of ["message_start", "message_end"]) cases.push({
+  name: `retained tool result/parallel/${event}`, ...base, mode: "parallel", waitForSecond: true,
+  tools: [{...echo}], responses: [assistant([call("one", "echo", {value: "a"}), call("two", "echo", {value: "b"})], "toolUse"), assistant()],
+  endMutation: {terminate: true}, retainedEndAt: event, retainedEndTrigger: "one", retainedEndTarget: "two",
+  retainedEndMutation: {content: [text("changed before publication")], terminate: false},
+});
+
+for (const mode of ["sequential", "parallel"]) cases.push({
+  name: `retained tool result/${mode}/immediate unknown tool`, ...base, mode,
+  tools: [{...echo}], responses: [assistant([call("one", "missing"), call("two", "echo", {value: "b"})], "toolUse"), assistant()],
+  endMutation: {terminate: true}, retainedEndAt: "tool_execution_end", retainedEndTrigger: "two", retainedEndTarget: "one",
+  retainedEndMutation: {content: [text("revised missing tool")], terminate: false},
+});
+
+// Lifecycle callbacks may mutate a message object, while assistant start/update
+// events deliberately expose a shallow top-level copy in the source.
+for (const at of ["message_start", "message_end"]) {
+  for (const source of ["prompt", "system", "steering", "prepared"]) cases.push({
+    name: `message mutation/${source}/${at}`, ...base,
+    ...(source === "system" ? {prompts: [{role: "system", content: "policy", timestamp: now}, user("go")]} : {}),
+    ...(source === "steering" ? {prompts: [], steering: [[user("steered")]]} : {}),
+    ...(source === "prepared" ? {prompts: [], responses: [assistant(), assistant()], decisions: ["continue", "end"], nextUpdates: [{messages: [user("prepared")]}]} : {}),
+    messageMutationAt: at, messageMutationRole: source === "system" ? "system" : "user",
+    messageMutation: {content: "callback revision", timestamp: now + 9},
+  });
+  for (const mode of ["sequential", "parallel"]) cases.push({
+    name: `message mutation/tool result/${mode}/${at}`, ...base, mode, tools: [echo],
+    responses: [assistant([call("one", "echo", {value: "x"})], "toolUse"), assistant()],
+    messageMutationAt: at, messageMutationRole: "toolResult",
+    messageMutation: {content: [text("callback revision")], timestamp: now + 9},
+  });
+}
+for (const variant of ["terminal", "partial", "result-only"]) {
+  for (const at of ["message_start", "message_update", "message_end"]) {
+    if (at === "message_update" && variant !== "partial") continue;
+    cases.push({
+      name: `message mutation/assistant/${variant}/${at}`, ...base,
+      responses: [assistant(), assistant()], decisions: ["continue", "end"],
+      streamPartial: variant === "partial", omitTerminal: variant === "result-only",
+      messageMutationAt: at, messageMutationRole: "assistant",
+      messageMutation: {content: [text("callback revision")], timestamp: now + 9},
+    });
+  }
+}
+for (const stopReason of ["error", "aborted"]) cases.push({
+  name: `message mutation/assistant/${stopReason}`, ...base,
+  messageMutationAt: "message_end", messageMutationRole: "assistant",
+  messageMutation: {stopReason, errorMessage: "callback failure"},
+});
+
+for (const [name, previous, current] of [
+ ["distinct surrogate titles",String.raw`{"type":"object","title":"\ud800"}`,String.raw`{"type":"object","title":"\udc00"}`],
+ ["distinct surrogate property names",String.raw`{"type":"object","properties":{"\ud800":{"type":"string"}}}`,String.raw`{"type":"object","properties":{"\udc00":{"type":"string"}}}`],
+ ["same rounded number",'{"type":"object","x-scale":9007199254740992}','{"type":"object","x-scale":9007199254740993}'],
+ ["same duplicate key value",'{"type":"object","title":"last"}','{"type":"object","title":"first","title":"last"}'],
+]) cases.push({
+ name: `tool declaration JSON/${name}`, ...base,
+ messages: [{role:"system",content:"policy",timestamp:now,toolsAdded:[{...echo,parameters:JSON.parse(previous)}]}],
+ tools: [{...echo,rawParameters:current}],
+});
+
 const clone = (value: any) => JSON.parse(JSON.stringify(value));
 const output = [];
 for (const input of cases) {
   const events: any[] = [], requests: any[] = [], hooks: any[] = [], executed: string[] = [], late: (() => void)[] = [];
   const afterResults: any[] = [];
+  const endResults = new Map<string, any>();
   let responseIndex = 0, steeringIndex = 0, followIndex = 0, finishIndex = 0, nextIndex = 0, requestIndex = 0, keyIndex = 0;
   const controller = new AbortController();
   let secondDone!: () => void;
   const second = new Promise<void>(resolve => secondDone = resolve);
   const tools = input.tools.map((spec: any) => ({
-    name: spec.name, description: spec.description, parameters: spec.parameters, executionMode: spec.executionMode,
+    name: spec.name, description: spec.description, parameters: spec.rawParameters ? JSON.parse(spec.rawParameters) : spec.parameters, executionMode: spec.executionMode,
     ...(spec.prepare ? { prepareArguments: () => clone(spec.prepare) } : {}),
     execute: async (id: string, args: any, _signal: any, update: any) => {
       executed.push(id);
@@ -157,9 +258,27 @@ for (const input of cases) {
     return events;
   };
   let messages: any[] | undefined, error: string | undefined;
+  let messageMutated = false;
   const sink = async (event: any) => {
     events.push(clone(event));
+    if (!messageMutated && event.type === input.messageMutationAt && event.message?.role === input.messageMutationRole) {
+      Object.assign(event.message, clone(input.messageMutation));
+      messageMutated = true;
+    }
     if (event.type === input.failEvent) throw new Error("sink failed");
+    if (event.type === "tool_execution_end") {
+      if (input.endMutation) Object.assign(event.result, clone(input.endMutation));
+      for (const key of input.endDeleteResult ?? []) delete event.result[key];
+      if (input.endReplacement) event.result = clone(input.endReplacement);
+      if (input.endIsError !== undefined) event.isError = input.endIsError;
+      endResults.set(event.toolCallId, event.result);
+    }
+    if (event.type === input.retainedEndAt && (event.toolCallId ?? event.message?.toolCallId) === input.retainedEndTrigger) {
+      const retained = endResults.get(input.retainedEndTarget);
+      if (!retained) throw new Error("missing retained tool result");
+      Object.assign(retained, clone(input.retainedEndMutation ?? {}));
+      for (const key of input.retainedEndDelete ?? []) delete retained[key];
+    }
     if (event.type === "tool_execution_end" && event.toolCallId === "two") secondDone();
   };
   try {

@@ -16,7 +16,7 @@ import (
 // cancellable context when waiting for events/results that may never arrive.
 // Provider error/aborted messages are normal terminal results, not failures.
 type AgentEventStream struct {
-	*ai.EventStream[Event, []ai.Message]
+	*ai.EventStream[Event, []*ai.Message]
 	finished chan struct{}
 	failure  error
 }
@@ -38,8 +38,8 @@ func (s *AgentEventStream) Wait(ctx context.Context) error {
 // AgentLoop starts the low-level loop asynchronously. It queues agent_start
 // before returning, as the original wrapper does before its first await.
 // Cancelling a reader does not abort the run; ctx controls the provider/tools.
-func AgentLoop(ctx context.Context, prompts []ai.Message, initial Context, config Config, provider StreamFn) *AgentEventStream {
-	return startAgentStream(func(emit EventSink) ([]ai.Message, error) { return Run(ctx, prompts, initial, config, emit, provider) })
+func AgentLoop(ctx context.Context, prompts []*ai.Message, initial Context, config Config, provider StreamFn) *AgentEventStream {
+	return startAgentStream(func(emit EventSink) ([]*ai.Message, error) { return Run(ctx, prompts, initial, config, emit, provider) })
 }
 
 // AgentLoopContinue validates the existing tail synchronously, then continues
@@ -49,12 +49,12 @@ func AgentLoopContinue(ctx context.Context, initial Context, config Config, prov
 	if err := validateContinuation(initial); err != nil {
 		return nil, err
 	}
-	return startAgentStream(func(emit EventSink) ([]ai.Message, error) { return Continue(ctx, initial, config, emit, provider) }), nil
+	return startAgentStream(func(emit EventSink) ([]*ai.Message, error) { return Continue(ctx, initial, config, emit, provider) }), nil
 }
 
-func startAgentStream(run func(EventSink) ([]ai.Message, error)) *AgentEventStream {
+func startAgentStream(run func(EventSink) ([]*ai.Message, error)) *AgentEventStream {
 	stream := &AgentEventStream{
-		EventStream: ai.NewEventStream(func(event Event) bool { return event.Type == "agent_end" }, func(event Event) []ai.Message { return event.Messages }),
+		EventStream: ai.NewEventStream(func(event Event) bool { return event.Type == "agent_end" }, func(event Event) []*ai.Message { return event.Messages }),
 		finished:    make(chan struct{}),
 	}
 	admitted := make(chan struct{})

@@ -233,9 +233,18 @@ func TestAnthropicStreamConcurrentSnapshots(t *testing.T) {
 		}
 		if event.ToolCall != nil {
 			ends[event.ContentIndex] = event.ToolCall
+			stream.Synchronize(func() {
+				if event.Partial.Content.Blocks[event.ContentIndex] != event.ToolCall {
+					t.Fatal("toolcall_end and transcript do not share the block")
+				}
+			})
 		}
-		if _, err := stream.SnapshotEvent(event); err != nil {
+		snapshot, err := stream.SnapshotEvent(event)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if snapshot.ToolCall != nil && snapshot.Partial.Content.Blocks[snapshot.ContentIndex] != snapshot.ToolCall {
+			t.Fatal("snapshot separated toolcall_end from its transcript block")
 		}
 	}
 	if err := <-producer; err != nil {

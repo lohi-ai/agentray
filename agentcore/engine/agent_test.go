@@ -26,9 +26,31 @@ type agentAction struct {
 	Model    json.RawMessage   `json:"model"`
 }
 
+// These older oracles explicitly spread pendingToolCalls into an array.
+// Keep that observation adapter separate from direct engine state JSON.
+func agentFixtureState(state engine.State) map[string]json.RawMessage {
+	raw, err := json.Marshal(state)
+	if err != nil {
+		panic(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		panic(err)
+	}
+	fields["pendingToolCalls"], err = json.Marshal(state.PendingToolCalls.Values())
+	if err != nil {
+		panic(err)
+	}
+	return fields
+}
+
 type agentInput struct {
-	Name    string `json:"name"`
-	Initial struct {
+	MessageMutationRole string  `json:"messageMutationRole"`
+	MessageMutationAt   string  `json:"messageMutationAt"`
+	ToolEndContent      *string `json:"toolEndContent"`
+	ToolEndTerminate    bool    `json:"toolEndTerminate"`
+	Name                string  `json:"name"`
+	Initial             struct {
 		SystemPrompt  string          `json:"systemPrompt"`
 		Model         json.RawMessage `json:"model"`
 		ThinkingLevel string          `json:"thinkingLevel"`
@@ -79,7 +101,7 @@ func TestPiAgentOracle(t *testing.T) {
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) < 38 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 52 {
 		t.Fatal("unexpected Agent oracle revision or coverage")
 	}
 	for _, tc := range fixture.Cases {
@@ -159,12 +181,12 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		*target = append(*target, raw)
 		mu.Unlock()
 	}
-	makeTools := func(specs []toolSpec) []engine.Tool {
-		result := []engine.Tool{}
+	makeTools := func(specs []toolSpec) []*engine.Tool {
+		result := []*engine.Tool{}
 		for _, spec := range specs {
-			result = append(result, engine.Tool{Tool: ai.Tool{Name: spec.Name, Description: spec.Description, Parameters: spec.Parameters}, Label: spec.Label,
-				Execute: func(context.Context, string, json.RawMessage, func(engine.ToolResult)) (engine.ToolResult, error) {
-					return engine.ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: spec.Name}}, Details: json.RawMessage(`{}`)}, nil
+			result = append(result, &engine.Tool{Tool: ai.Tool{Name: spec.Name, Description: spec.Description, Parameters: spec.Parameters}, Label: spec.Label,
+				Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
+					return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: spec.Name}}, Details: argumentRef(`{}`)}, nil
 				},
 			})
 		}
@@ -173,7 +195,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 	var agent *engine.Agent
 	responseIndex, finishIndex, prepareIndex, requestIndex := 0, 0, 0, 0
 	options := engine.AgentOptions{InitialState: engine.InitialState{SystemPrompt: input.Initial.SystemPrompt, Model: input.Initial.Model,
-		ThinkingLevel: input.Initial.ThinkingLevel, Tools: makeTools(input.Initial.Tools), Messages: input.Initial.Messages},
+		ThinkingLevel: input.Initial.ThinkingLevel, Tools: makeTools(input.Initial.Tools), Messages: engine.MessagePointers(input.Initial.Messages)},
 		AgentConfig: engine.AgentConfig{Config: engine.Config{Now: func() int64 { return 1700000000123 }}, SteeringMode: input.Options.SteeringMode,
 			FollowUpMode: input.Options.FollowUpMode, SessionID: input.Options.SessionID, ThinkingBudgets: input.Options.ThinkingBudgets,
 			Transport: input.Options.Transport, MaxRetryDelayMS: input.Options.MaxRetryDelayMS},
@@ -204,11 +226,11 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		return stream, nil
 	}
 	if input.ConvertCustom || input.ConvertFailure != "" {
-		options.ConvertToLLM = func(messages []ai.Message) ([]ai.Message, error) {
+		options.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
 			if input.ConvertFailure != "" {
 				return nil, errors.New(input.ConvertFailure)
 			}
-			result := slices.Clone(messages)
+			result := engine.MessagePointers(engine.MessageValues(messages))
 			for i := range result {
 				if result[i].Role == "custom" {
 					result[i].Role = "user"
@@ -267,7 +289,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		t.Fatal(err)
 	}
 	checkpoint := func(op string, err error) {
-		value := map[string]any{"op": op, "state": agent.State(), "queued": agent.HasQueuedMessages(), "peek": agent.PeekQueuedMessages(),
+		value := map[string]any{"op": op, "state": agentFixtureState(agent.State()), "queued": agent.HasQueuedMessages(), "peek": agent.PeekQueuedMessages(),
 			"steeringMode": agent.SteeringMode(), "followUpMode": agent.FollowUpMode(), "signalPresent": agent.Signal() != nil}
 		if err != nil {
 			value["error"] = err.Error()
@@ -304,9 +326,9 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		case "abort":
 			agent.Abort()
 		case "steer":
-			agent.Steer(action.Message)
+			agent.Steer(&action.Message)
 		case "followUp":
-			agent.FollowUp(action.Message)
+			agent.FollowUp(&action.Message)
 		case "steeringMode":
 			agent.SetSteeringMode(action.Value)
 		case "followUpMode":
@@ -324,7 +346,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		case "tools":
 			agent.SetTools(makeTools(action.Tools))
 		case "messages":
-			agent.SetMessages(action.Messages)
+			agent.SetMessages(engine.MessagePointers(action.Messages))
 		case "throw":
 			return errors.New(action.Value)
 		default:
@@ -338,8 +360,31 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		return nil
 	}
 	fired := map[int]bool{}
+	var retainedMessage *ai.Message
+	messageMutated := false
 	agent.Subscribe(&engine.Listener{Handle: func(ctx context.Context, event engine.Event) error {
-		add(&events, map[string]any{"event": event, "state": agent.State(), "signalMatches": ctx == agent.Signal(), "aborted": ctx.Err() != nil})
+		add(&events, map[string]any{"event": event, "state": agentFixtureState(agent.State()), "signalMatches": ctx == agent.Signal(), "aborted": ctx.Err() != nil})
+		if event.Type == "message_end" && event.Message.Role == input.MessageMutationRole && retainedMessage == nil {
+			retainedMessage = event.Message
+		}
+		if !messageMutated && event.Type == input.MessageMutationAt && (event.Type == "agent_end" || (event.Message != nil && event.Message.Role == input.MessageMutationRole)) {
+			message := event.Message
+			if event.Type == "agent_end" {
+				message = retainedMessage
+			}
+			if message.Role == "user" {
+				message.Content = ai.TextContent("callback revision")
+			} else {
+				message.Content = ai.BlockContent(ai.ContentBlock{Type: "text", Text: "callback revision"})
+			}
+			message.Timestamp = 1700000000123 + 9
+			messageMutated = true
+			checkpoint("message mutation", nil)
+		}
+		if event.Type == "tool_execution_end" && input.ToolEndContent != nil {
+			event.Result.Content = []*ai.ContentBlock{{Type: "text", Text: *input.ToolEndContent}}
+			event.Result.Terminate = &input.ToolEndTerminate
+		}
 		for i, reaction := range input.Reactions {
 			if event.Type != reaction.Event || (reaction.Role != "" && (event.Message == nil || event.Message.Role != reaction.Role)) || (fired[i] && !reaction.Always) {
 				continue

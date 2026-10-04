@@ -13,6 +13,7 @@ import (
 	"time"
 
 	duckdb "github.com/duckdb/duckdb-go/v2"
+	"github.com/google/uuid"
 )
 
 // DuckDB is the embedded analytics engine: one process-local database file
@@ -27,11 +28,12 @@ import (
 // *sql.DB accessor: every caller goes through Read/Write so admission stays
 // bounded and the file is never touched outside this type.
 type DuckDB struct {
-	db      *sql.DB
-	path    string
-	writeCh chan struct{}
-	readCh  chan struct{}
-	closed  atomic.Bool
+	db          *sql.DB
+	path        string
+	writeCh     chan struct{}
+	readCh      chan struct{}
+	closed      atomic.Bool
+	diskReserve *DiskReserve
 }
 
 // maxDuckDBReaders bounds concurrent snapshot readers. Four is enough for the
@@ -41,7 +43,7 @@ const maxDuckDBReaders = 4
 // DuckDBSchemaVersion is the schema generation OpenDuckDB stamps into
 // schema_meta. Bump it when the DDL below changes so a boot can tell a
 // foundation-era file from a later one.
-const DuckDBSchemaVersion = 3
+const DuckDBSchemaVersion = 7
 
 // Table and view names exposed for the query-parity ticket (007): reads are
 // ported against these names so the DDL and its consumers cannot drift.
@@ -82,8 +84,22 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	// database-global and cannot be set again after the first spill, even to
 	// the same path: doing so prevents the pool from opening new connections.
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
-		_, err := execer.ExecContext(context.Background(), "SET TimeZone = 'UTC'", nil)
-		return err
+		for _, stmt := range []string{
+			"SET TimeZone = 'UTC'",
+			// Serving tables have explicit keys and all ordered reads use ORDER BY.
+			// Avoid retaining irrelevant insertion-order metadata so atomic snapshot
+			// promotion and its readiness receipts fit the fixed engine memory bound.
+			"SET preserve_insertion_order = false",
+			// Keep each operator's working set bounded as well. The process admits
+			// concurrent readers separately; intra-query parallelism only multiplies
+			// memory during the million-row promotion copy.
+			"SET threads = 1",
+		} {
+			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("duckdb: connector: %w", err)
@@ -171,6 +187,43 @@ func (d *DuckDB) Read(ctx context.Context, fn func(conn *sql.Conn) error) error 
 	return fn(conn)
 }
 
+// duckDBSnapshot deliberately exposes only reads. Both *sql.Tx and the
+// ordinary *sql.Conn satisfy it, but snapshot callers cannot accidentally
+// mutate the serving file while holding the long-lived sandbox-copy view.
+type duckDBSnapshot interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// ReadSnapshot runs every query in fn against one explicit MVCC transaction.
+// Unlike Write it does not take the single-writer gate: DuckDB readers retain
+// their snapshot while ingest continues committing newer versions.
+func (d *DuckDB) ReadSnapshot(ctx context.Context, fn func(duckDBSnapshot) error) error {
+	if d.closed.Load() {
+		return errDuckDBClosed
+	}
+	select {
+	case d.readCh <- struct{}{}:
+		defer func() { <-d.readCh }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // Close checkpoints the WAL into the database file and closes the pool. It
 // waits for the writer slot so an in-flight ingest transaction commits before
 // the file closes; readers already admitted finish on their own connections.
@@ -223,6 +276,9 @@ func (d *DuckDB) migrate(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("duckdb schema: %w", err)
 			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO data_store_identity(slot,store_id) VALUES(1,?)`, uuid.NewString()); err != nil {
+			return fmt.Errorf("duckdb store identity: %w", err)
 		}
 		// utm_* columns are NOT NULL in the schema but arrive via ADD COLUMN,
 		// which DuckDB cannot do with the constraint attached. Tighten only the
@@ -279,6 +335,11 @@ var duckDBSchema = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		name VARCHAR PRIMARY KEY,
 		version INTEGER NOT NULL
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_store_identity (
+		slot UTINYINT PRIMARY KEY,
+		store_id UUID NOT NULL,
+		CHECK (slot = 1)
 	)`,
 	`CREATE TABLE IF NOT EXISTS events (
 		project_id UUID NOT NULL,
@@ -376,6 +437,73 @@ var duckDBSchema = []string{
 		synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (project_id, connector_id, table_name, row_key)
 	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_batches (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		batch_index BIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		row_count BIGINT NOT NULL,
+		capture_started_at TIMESTAMPTZ NOT NULL,
+		run_id UUID NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation, batch_id),
+		UNIQUE (project_id, connector_id, table_name, generation, batch_index)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_rows (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		generation UUID NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		row_key VARCHAR NOT NULL,
+		data VARCHAR NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation, batch_id, row_key),
+		UNIQUE (project_id, connector_id, table_name, generation, row_key)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_completions (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		expected_batches BIGINT NOT NULL,
+		expected_rows BIGINT NOT NULL,
+		batch_manifest_sha256 VARCHAR NOT NULL,
+		capture_started_at TIMESTAMPTZ NOT NULL,
+		capture_finished_at TIMESTAMPTZ NOT NULL,
+		run_id UUID NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation)
+	)`,
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_promotions (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID NOT NULL,
+		generation UUID NOT NULL,
+		generation_seq BIGINT NOT NULL,
+		binding_digest VARCHAR NOT NULL,
+		expected_batches BIGINT NOT NULL,
+		expected_rows BIGINT NOT NULL,
+		batch_manifest_sha256 VARCHAR NOT NULL,
+			capture_started_at TIMESTAMPTZ NOT NULL,
+			capture_finished_at TIMESTAMPTZ NOT NULL,
+			promoted_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (project_id, connector_id, table_name)
+		)`,
+	// Cleanup completion is deliberately local to the serving file. PostgreSQL
+	// retains the terminal generation as shared authority; each colour records
+	// independently when its own staging copy is gone.
+	`CREATE TABLE IF NOT EXISTS connector_snapshot_cleanup_receipts (
+		generation UUID PRIMARY KEY,
+		cleaned_at TIMESTAMPTZ NOT NULL
+	)`,
 	// ingest_position is the store-side half of the readiness contract: how far
 	// this file's own writes have carried it along the durable stream, and the
 	// gap a boot proved the file can never fill. It lives INSIDE the file the
@@ -386,6 +514,73 @@ var duckDBSchema = []string{
 		applied_seq UBIGINT NOT NULL DEFAULT 0,
 		refused_missing UBIGINT NOT NULL DEFAULT 0,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	)`,
+	// data_receipt_* is deliberately separate from ingest_position. The latter
+	// is a deploy replay high-water mark; these tables are hole-aware evidence
+	// about the data this exact serving file can expose to a query.
+	`CREATE TABLE IF NOT EXISTS data_receipt_sources (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		sync_id UUID,
+		run_id UUID,
+		generation UUID,
+		generation_key VARCHAR NOT NULL,
+		generation_seq UBIGINT NOT NULL DEFAULT 0,
+		binding_digest VARCHAR NOT NULL DEFAULT '',
+		capture_started_at TIMESTAMPTZ,
+		capture_finished_at TIMESTAMPTZ,
+		published_at TIMESTAMPTZ,
+		landed_at TIMESTAMPTZ,
+		landed_generation_key VARCHAR,
+		last_complete_at TIMESTAMPTZ,
+		expected_batches UBIGINT,
+		expected_rows UBIGINT,
+		completion_seen BOOLEAN NOT NULL DEFAULT false,
+		ordering_ambiguous BOOLEAN NOT NULL DEFAULT false,
+		mutation_seq UBIGINT NOT NULL DEFAULT 0,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (project_id, connector_id, table_name)
+	)`,
+	// Existing serving files need the same durable uncertainty bit. It is kept
+	// on the source receipt rather than in process memory so restart, sandbox
+	// refresh and a blue-green read cannot turn unknown ordering into ready.
+	`ALTER TABLE data_receipt_sources ADD COLUMN IF NOT EXISTS ordering_ambiguous BOOLEAN DEFAULT false`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_batches (
+		project_id UUID NOT NULL,
+		connector_id UUID NOT NULL,
+		table_name VARCHAR NOT NULL,
+		generation_key VARCHAR NOT NULL,
+		batch_id VARCHAR NOT NULL,
+		batch_index UBIGINT,
+		payload_sha256 VARCHAR NOT NULL,
+		landed_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (project_id, connector_id, table_name, generation_key, batch_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_deliveries (
+		stream_id VARCHAR NOT NULL,
+		subject VARCHAR NOT NULL,
+		stream_seq UBIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		project_id UUID,
+		connector_id UUID,
+		table_name VARCHAR,
+		generation_key VARCHAR,
+		applied_at TIMESTAMPTZ NOT NULL,
+		PRIMARY KEY (stream_id, subject, stream_seq, payload_sha256)
+	)`,
+	`CREATE TABLE IF NOT EXISTS data_receipt_holes (
+		stream_id VARCHAR NOT NULL,
+		subject VARCHAR NOT NULL,
+		stream_seq UBIGINT NOT NULL,
+		payload_sha256 VARCHAR NOT NULL,
+		project_id UUID,
+		connector_id UUID,
+		table_name VARCHAR,
+		unverifiable BOOLEAN NOT NULL DEFAULT false,
+		recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+		cleared_at TIMESTAMPTZ,
+		PRIMARY KEY (stream_id, subject, stream_seq, payload_sha256)
 	)`,
 	// resolved_events is the canonical-identity view every person-scoped read
 	// uses: raw distinct_id plus its stitched canonical id (self when no alias

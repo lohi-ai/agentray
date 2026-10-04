@@ -58,6 +58,29 @@ const cases: any[] = [
   { name: "provider controls forwarded", initial: { thinkingLevel: "medium" }, options: { sessionId: "session-1", thinkingBudgets: { medium: 2000 }, transport: "sse", maxRetryDelayMs: 3000 }, actions: [prompt()], responses: [response()] },
 ];
 
+for (const terminate of [false, true]) cases.push({
+  name: `tool end subscriber mutation/${terminate ? "terminate" : "continue"}`,
+  initial: {tools: [tool("first")]}, actions: [prompt()],
+  toolEndContent: "redacted", toolEndTerminate: terminate,
+  responses: [response(assistant([{type: "toolCall", id: "one", name: "first", arguments: {}}], "toolUse")), response()],
+});
+
+for (const role of ["user", "assistant", "toolResult"]) {
+  for (const at of ["message_start", "message_end", "agent_end"]) cases.push({
+    name: `message subscriber mutation/${role}/${at}`,
+    initial: {tools: role === "toolResult" ? [tool("first")] : []},
+    actions: [prompt(), prompt("next")],
+    messageMutationRole: role, messageMutationAt: at,
+    responses: role === "toolResult"
+      ? [response(assistant([{type: "toolCall", id: "one", name: "first", arguments: {}}], "toolUse")), response(), response()]
+      : [response(), response()],
+  });
+}
+for (const at of ["message_start", "message_end", "turn_end"]) cases.push({
+  name: `failure message subscriber mutation/${at}`, initial: {model},
+  actions: [prompt(), prompt("next")], responses: [{failure: "provider failed"}, response()],
+  messageMutationRole: "assistant", messageMutationAt: at,
+});
 const results = [];
 for (const input of cases) {
   const events: any[] = [], requests: any[] = [], checks: any[] = [], hooks: any[] = [];
@@ -131,8 +154,21 @@ for (const input of cases) {
     } catch (failure) { error = (failure as Error).message; if (action.op === "throw") throw failure; }
     checkpoint((nested ? "listener:" : "") + action.op, error);
   }
+  let retainedMessage: any, messageMutated = false;
   agent.subscribe(async (event: any, signal: any) => {
     events.push(clone({ event, state: state(), signalMatches: signal === agent.signal, aborted: signal.aborted }));
+    if (event.type === "message_end" && event.message.role === input.messageMutationRole && !retainedMessage) retainedMessage = event.message;
+    if (!messageMutated && event.type === input.messageMutationAt && (event.type === "agent_end" || event.message?.role === input.messageMutationRole)) {
+      const message = event.type === "agent_end" ? retainedMessage : event.message;
+      message.content = message.role === "user" ? "callback revision" : [text("callback revision")];
+      message.timestamp = now + 9;
+      messageMutated = true;
+      checkpoint("message mutation");
+    }
+    if (event.type === "tool_execution_end" && input.toolEndContent !== undefined) {
+      event.result.content = [text(input.toolEndContent)];
+      event.result.terminate = input.toolEndTerminate;
+    }
     for (let i = 0; i < (input.reactions?.length ?? 0); i++) {
       const reaction = input.reactions[i];
       if (event.type !== reaction.event || (reaction.role && event.message?.role !== reaction.role) || (fired.has(i) && !reaction.always)) continue;

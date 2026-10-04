@@ -27,23 +27,23 @@ func TestPiToolArgumentsOracle(t *testing.T) {
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 323 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 1812 {
 		t.Fatal("unexpected argument oracle coverage")
 	}
 	for _, tc := range fixture.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			executed := false
 			var prepared *string
-			tool := engine.Tool{Tool: ai.Tool{Name: "number", Parameters: tc.Parameters}}
-			tool.Execute = func(_ context.Context, _ string, args json.RawMessage, _ func(engine.ToolResult)) (engine.ToolResult, error) {
+			tool := &engine.Tool{Tool: ai.Tool{Name: "number", Parameters: tc.Parameters}}
+			tool.Execute = func(_ context.Context, _ string, args any, _ func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				executed = true
-				return engine.ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: string(args)}}, Details: json.RawMessage(`{}`)}, nil
+				return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: argumentJSON(t, args)}}, Details: argumentRef(`{}`)}, nil
 			}
 			before := append([]byte(nil), tc.Args...)
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "number", Arguments: tc.Args}
-			outcome, err := engine.RunToolCall(context.Background(), call, []engine.Tool{tool}, &ai.Message{}, &engine.Context{Tools: []engine.Tool{tool}}, engine.ToolHooks{
+			outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{}, &engine.Context{Tools: []*engine.Tool{tool}}, engine.ToolHooks{
 				Before: func(_ context.Context, hook *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
-					text := string(hook.Args)
+					text := argumentJSON(t, hook.Args)
 					prepared = &text
 					return nil, nil
 				},

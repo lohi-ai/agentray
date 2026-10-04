@@ -284,9 +284,9 @@ func TestNativeTraceProviderStreamIdentityAndSnapshot(t *testing.T) {
 		parent := options["telemetryContext"].(telemetry.Context)
 		go func() {
 			defer close(childEnded)
-			_ = parent.StartSpan(telemetry.SpanOptions{Name: "provider.active", Attributes: telemetry.Attributes{
-				"nonfinite": math.NaN(), "bytes": []byte{0, 255}, "numbers": []any{int8(1), float64(2.5)},
-			}}, func(*telemetry.Span) error { close(childStarted); <-childRelease; return nil })
+			_ = parent.StartSpan(telemetry.SpanOptions{Name: "provider.active", Attributes: telemetry.NewAttributes(
+				telemetry.Property{Name: "nonfinite", Value: math.NaN()}, telemetry.Property{Name: "bytes", Value: []byte{0, 255}}, telemetry.Property{Name: "numbers", Value: []any{int8(1), float64(2.5)}},
+			)}, func(*telemetry.Span) error { close(childStarted); <-childRelease; return nil })
 		}()
 		<-childStarted
 		original.Push(ai.AssistantMessageEvent{Type: "done", Reason: "stop", Message: &message})
@@ -318,7 +318,7 @@ func TestNativeTraceProviderStreamIdentityAndSnapshot(t *testing.T) {
 		t.Fatalf("active descendant snapshot lost: %s", trace)
 	}
 	attrs := packet.Spans[1].Attributes
-	if value, exists := attrs["nonfinite"]; !exists || value != nil || !reflect.DeepEqual(attrs["bytes"], []any{float64(0), float64(255)}) || !reflect.DeepEqual(attrs["numbers"], []any{float64(1), float64(2.5)}) {
+	if value, exists := attrs.Lookup("nonfinite"); !exists || value != nil || !reflect.DeepEqual(attrs.Get("bytes").(*telemetry.Array).Values(), []any{float64(0), float64(255)}) || !reflect.DeepEqual(attrs.Get("numbers").(*telemetry.Array).Values(), []any{float64(1), float64(2.5)}) {
 		t.Fatalf("numeric attributes lost or changed in delivered trace: %s", trace)
 	}
 	saved := append([]byte(nil), trace...)

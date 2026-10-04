@@ -31,7 +31,7 @@ func nativeCallbackStream(callback agentcore.PiCallback, parent func() telemetry
 		if err := json.Unmarshal(model, &identity); err != nil {
 			return nil, err
 		}
-		return telemetry.StartSpan(parent(), telemetry.SpanOptions{Name: "agentray.ai.request", Attributes: telemetry.Attributes{"model.id": identity.ID, "agentray.request.id": nextRequestID.Add(1)}}, run)
+		return telemetry.StartSpan(parent(), telemetry.SpanOptions{Name: "agentray.ai.request", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "model.id", Value: identity.ID}, telemetry.Property{Name: "agentray.request.id", Value: nextRequestID.Add(1)})}, run)
 	})
 }
 

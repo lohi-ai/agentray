@@ -122,7 +122,7 @@ func TestNativeAgentMigrationOracle(t *testing.T) {
 				if tc.Input.StreamFailure != "" {
 					return nil, errors.New(tc.Input.StreamFailure)
 				}
-				_ = parent.StartSpan(telemetry.SpanOptions{Name: "provider.request", Attributes: telemetry.Attributes{"transport": "test"}}, func(*telemetry.Span) error { return nil })
+				_ = parent.StartSpan(telemetry.SpanOptions{Name: "provider.request", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "transport", Value: "test"})}, func(*telemetry.Span) error { return nil })
 				var message ai.Message
 				if err := json.Unmarshal(tc.Input.Responses[index], &message); err != nil {
 					return nil, err

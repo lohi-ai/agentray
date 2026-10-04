@@ -260,3 +260,55 @@ func TestAssistantStreamSnapshotAndProducerSettlement(t *testing.T) {
 		t.Fatal("snapshot/live payload semantics changed")
 	}
 }
+
+func TestAssistantStreamSnapshotPreservesObjectGraph(t *testing.T) {
+	stream := NewAssistantMessageEventStream()
+	shared := &ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}
+	distinct := *shared
+	usage := &Usage{Input: 3}
+	partial := &Message{Role: "assistant", Content: BlockReferences(shared, shared, &distinct), Usage: usage}
+	other := &Message{Role: "assistant", Content: BlockReferences(shared), Usage: usage}
+	source := AssistantMessageEvent{Type: "toolcall_end", ToolCall: shared, Partial: partial, Message: other, Error: partial}
+	snapshot, err := stream.SnapshotEvent(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Partial == partial || snapshot.Message == other || snapshot.ToolCall == shared || snapshot.Partial.Usage == usage {
+		t.Fatal("snapshot retained a mutable producer object")
+	}
+	if snapshot.Partial != snapshot.Error || snapshot.Message == snapshot.Partial || snapshot.Message.Usage != snapshot.Partial.Usage {
+		t.Fatal("message or usage aliases were lost or unrelated objects merged")
+	}
+	blocks := snapshot.Partial.Content.Blocks
+	if blocks[0] != blocks[1] || blocks[0] != snapshot.ToolCall || blocks[0] != snapshot.Message.Content.Blocks[0] || blocks[0] == blocks[2] {
+		t.Fatal("block aliases were lost or equal but distinct blocks merged")
+	}
+	before, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("snapshot changed wire data: %s", after)
+	}
+	snapshot.ToolCall.Name = "snapshot"
+	snapshot.Partial.Usage.Input = 9
+	if blocks[1].Name != "snapshot" || snapshot.Message.Content.Blocks[0].Name != "snapshot" || snapshot.Message.Usage.Input != 9 || shared.Name != "echo" || usage.Input != 3 {
+		t.Fatal("snapshot edits did not follow the detached object graph")
+	}
+	stream.Push(AssistantMessageEvent{Type: "done", Message: partial})
+	stream.End()
+	result, err := stream.SnapshotResult(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == partial || result.Content.Blocks[0] == shared || result.Content.Blocks[0] != result.Content.Blocks[1] || result.Content.Blocks[0] == result.Content.Blocks[2] {
+		t.Fatal("result snapshot lost repeated block identity")
+	}
+	if result.Content.Blocks[0].Name != "echo" || result.Usage.Input != 3 {
+		t.Fatal("snapshots share mutable objects with each other")
+	}
+}

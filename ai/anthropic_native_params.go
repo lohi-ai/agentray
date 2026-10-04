@@ -146,7 +146,7 @@ func BuildAnthropicParams(rawModel json.RawMessage, context TranscriptContext, o
 		system = GetSystemMessageText(*initial)
 		initialTools = initial.ToolsAdded
 	}
-	transformed := TransformMessages(context.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ Model, _ Message) string { return normalizeAnthropicToolID(id) })
+	transformed := TransformMessages(context.Messages(), Model{ID: model.ID, API: model.API, Provider: model.Provider, Input: model.Input}, func(id string, _ *Model, _ *Message) string { return normalizeAnthropicToolID(id) })
 	if initial != nil {
 		transformed = transformed[1:]
 	}

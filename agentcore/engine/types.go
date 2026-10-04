@@ -8,13 +8,20 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
+// Context retains message and tool objects shared with lifecycle events and hooks.
+// Replacing a slice entry does not replace an object already selected for execution.
 type Context struct {
-	Messages []ai.Message `json:"messages"`
-	Tools    []Tool       `json:"-"`
+	Messages []*ai.Message `json:"messages"`
+	Tools    []*Tool       `json:"-"`
 }
 
+// Tool is shared by pointer. Preparation selects the object before invoking
+// argument and lifecycle hooks; later field edits affect that selected tool,
+// while replacing its entry in Context.Tools only affects future selection.
+// Callers must synchronize concurrent mutation of tool definitions/callbacks.
 type Tool struct {
 	ai.Tool
 	Label            string
@@ -22,7 +29,11 @@ type Tool struct {
 	Replay           string
 	ExecutionMode    string
 	PrepareArguments func(json.RawMessage) (json.RawMessage, error)
-	Execute          func(context.Context, string, json.RawMessage, func(ToolResult)) (ToolResult, error)
+	// Execute shares validated *Object/*Array values with hooks; primitives
+	// are passed by value. Nested edits are shared, local reassignment is not.
+	// Updates share result objects with hooks and events.
+	// Tools must synchronize access when retaining or sharing these pointers.
+	Execute func(context.Context, string, any, func(*ToolResult)) (*ToolResult, error)
 }
 
 func (t Tool) MarshalJSON() ([]byte, error) {
@@ -47,14 +58,17 @@ func (t Tool) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
+// ToolResult shares Details and StructuredContent graphs with hooks/events.
+// Values use *Object, *Array or primitives. nil/Undefined omit an optional
+// field; Null retains explicit JSON null. Concurrent access needs synchronization.
 type ToolResult struct {
 	preserved         map[string]json.RawMessage
-	Content           []ai.ContentBlock `json:"content"`
-	Details           json.RawMessage   `json:"details,omitempty"`
-	StructuredContent json.RawMessage   `json:"structuredContent,omitempty"`
-	Usage             *ai.Usage         `json:"usage,omitempty"`
-	IsError           *bool             `json:"isError,omitempty"`
-	Terminate         *bool             `json:"terminate,omitempty"`
+	Content           []*ai.ContentBlock `json:"content"`
+	Details           any                `json:"-"`
+	StructuredContent any                `json:"-"`
+	Usage             *ai.Usage          `json:"usage,omitempty"`
+	IsError           *bool              `json:"isError,omitempty"`
+	Terminate         *bool              `json:"terminate,omitempty"`
 }
 
 func (r ToolResult) MarshalJSON() ([]byte, error) {
@@ -63,15 +77,21 @@ func (r ToolResult) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.Content != nil && len(r.preserved) == 0 {
-		return encoded, nil
-	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil, err
 	}
 	if r.Content == nil {
 		delete(fields, "content")
+	}
+	for name, value := range map[string]any{"details": r.Details, "structuredContent": r.StructuredContent} {
+		raw, err := jsonjs.MarshalOptional(value)
+		if err != nil {
+			return nil, err
+		}
+		if raw != nil {
+			fields[name] = raw
+		}
 	}
 	for name, value := range r.preserved {
 		if _, exists := fields[name]; !exists {
@@ -82,13 +102,26 @@ func (r ToolResult) MarshalJSON() ([]byte, error) {
 }
 
 // JS tools can return additional result metadata and explicit nulls. Keep only
-// fields the typed projection would omit; content/details/usage that already
-// round-trip do not need another retained copy. Native field updates take
+// fields the typed projection would omit. Dynamic value fields decode into
+// the shared live graph and do not need another retained raw copy. Native field updates take
 // precedence, and copies of a result share only immutable source metadata.
 func (r *ToolResult) UnmarshalJSON(raw []byte) error {
 	type plain ToolResult
 	*r = ToolResult{}
 	if err := json.Unmarshal(raw, (*plain)(r)); err != nil {
+		return err
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return err
+	}
+	var err error
+	r.Details, err = jsonjs.DecodeOptional(values["details"])
+	if err != nil {
+		return err
+	}
+	r.StructuredContent, err = jsonjs.DecodeOptional(values["structuredContent"])
+	if err != nil {
 		return err
 	}
 	normalized, err := json.Marshal(r)
@@ -115,11 +148,14 @@ func (r *ToolResult) UnmarshalJSON(raw []byte) error {
 
 type BeforeToolCall struct {
 	AssistantMessage *ai.Message
-	ToolCall         ai.ContentBlock
-	// Args is validated input. Before may replace it; execution and After
-	// receive the replacement without revalidation. ToolCall.Arguments keeps
-	// the provider's original arguments for lifecycle events and tracing.
-	Args    json.RawMessage
+	// ToolCall is the original block. Field edits survive into execution and
+	// lifecycle events; replacing this hook's pointer does not replace it.
+	ToolCall *ai.ContentBlock
+	// Args contains the validated *Object, *Array or primitive value. Nested
+	// edits are shared with execution and After without revalidation. Assigning
+	// a different value only replaces this hook context's field, as in Pi.
+	// ToolCall.Arguments remains the separate raw input.
+	Args    any
 	Context *Context
 }
 
@@ -146,21 +182,21 @@ type ToolHooks struct {
 }
 
 type ToolOutcome struct {
-	ToolCall ai.ContentBlock `json:"toolCall"`
-	Result   ToolResult      `json:"result"`
-	IsError  bool            `json:"isError"`
+	ToolCall *ai.ContentBlock `json:"toolCall"`
+	Result   *ToolResult      `json:"result"`
+	IsError  bool             `json:"isError"`
 }
 
 type Turn struct {
 	Message     *ai.Message
-	ToolResults []ai.Message
+	ToolResults []*ai.Message
 	Context     *Context
-	NewMessages []ai.Message
+	NewMessages []*ai.Message
 }
 
 type TurnUpdate struct {
 	Context       *Context
-	Messages      []ai.Message
+	Messages      []*ai.Message
 	Model         json.RawMessage
 	ThinkingLevel *string
 }
@@ -192,8 +228,8 @@ type Config struct {
 	Options       map[string]any
 	ToolExecution string
 	ToolHooks
-	ConvertToLLM     func([]ai.Message) ([]ai.Message, error)
-	TransformContext func(context.Context, []ai.Message) ([]ai.Message, error)
+	ConvertToLLM     func([]*ai.Message) ([]*ai.Message, error)
+	TransformContext func(context.Context, []*ai.Message) ([]*ai.Message, error)
 	GetAPIKey        func(string) (string, error)
 	FinishTurn       func(context.Context, Turn) (string, error)
 	PrepareRequest   func(context.Context, Request) (*TurnUpdate, error)
@@ -202,8 +238,8 @@ type Config struct {
 	// It must return the selected request before any of its events are consumed.
 	AdmitRequest        AdmitRequestFn
 	PrepareNextTurn     func(Turn) (*TurnUpdate, error)
-	GetSteeringMessages func() ([]ai.Message, error)
-	GetFollowUpMessages func() ([]ai.Message, error)
+	GetSteeringMessages func() ([]*ai.Message, error)
+	GetFollowUpMessages func() ([]*ai.Message, error)
 	// Now supplies Date.now for deterministic replay and differential testing.
 	Now func() int64
 }
@@ -218,8 +254,8 @@ func (c Config) now() int64 {
 type Event struct {
 	Type                  string
 	Message               *ai.Message
-	Messages              []ai.Message
-	ToolResults           []ai.Message
+	Messages              []*ai.Message
+	ToolResults           []*ai.Message
 	AssistantMessageEvent *ai.AssistantMessageEvent
 	ToolCallID            string
 	ToolName              string

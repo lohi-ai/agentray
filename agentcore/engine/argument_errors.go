@@ -38,6 +38,8 @@ func validationLines(err *jsonschema.ValidationError) []string {
 		message = fmt.Sprintf("must not have more than %d characters", k.Want)
 	case *kind.Pattern:
 		message = "must match pattern \"" + k.Want + "\""
+	case *kind.Format:
+		message = "must match format \"" + k.Want + "\""
 	case *kind.MinItems:
 		message = fmt.Sprintf("must not have fewer than %d items", k.Want)
 	case *kind.MaxItems:

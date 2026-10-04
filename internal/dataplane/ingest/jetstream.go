@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -81,7 +82,7 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 	if err != nil {
 		return nil, fmt.Errorf("jetstream context: %w", err)
 	}
-	ingest, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+	ingestConfig := jetstream.StreamConfig{
 		Name:      cfg.IngestStreamName,
 		Subjects:  []string{cfg.IngestSubject, cfg.IngestConnectorSubject},
 		Storage:   jetstream.FileStorage,
@@ -94,7 +95,23 @@ func EnsureStreams(ctx context.Context, nc *nats.Conn, cfg config.Config) (*Stre
 		// a week, so a long incident degrades to backlog, not data loss.
 		MaxAge:     30 * 24 * time.Hour,
 		Duplicates: 2 * time.Minute,
-	})
+	}
+	if cfg.IngestStreamMaxBytes > 0 {
+		ingestConfig.MaxBytes = cfg.IngestStreamMaxBytes
+		ingestConfig.Discard = jetstream.DiscardNew
+	} else if existing, lookupErr := js.Stream(ctx, cfg.IngestStreamName); lookupErr == nil {
+		info, infoErr := existing.Info(ctx)
+		if infoErr != nil {
+			return nil, fmt.Errorf("read existing ingest stream %q: %w", cfg.IngestStreamName, infoErr)
+		}
+		// Zero is explicitly "leave the operator's byte policy alone", not
+		// "replace it with unlimited" during the ordinary startup reconcile.
+		ingestConfig.MaxBytes = info.Config.MaxBytes
+		ingestConfig.Discard = info.Config.Discard
+	} else if !errors.Is(lookupErr, jetstream.ErrStreamNotFound) {
+		return nil, fmt.Errorf("inspect existing ingest stream %q: %w", cfg.IngestStreamName, lookupErr)
+	}
+	ingest, err := js.CreateOrUpdateStream(ctx, ingestConfig)
 	if err != nil {
 		return nil, fmt.Errorf("ensure ingest stream %q: %w", cfg.IngestStreamName, err)
 	}

@@ -22,7 +22,7 @@ import (
 
 func openAppTestStore(t *testing.T) *storage.Store {
 	t.Helper()
-	return openAppTestStoreWith(t, nil)
+	return openAppTestStoreWithMode(t, nil, false)
 }
 
 // openAppTestStoreWith is openAppTestStore plus a config tweak — the demo
@@ -30,6 +30,19 @@ func openAppTestStore(t *testing.T) *storage.Store {
 // already exists, so callers create the account on a default store first and
 // reopen with the id.
 func openAppTestStoreWith(t *testing.T, tweak func(*config.Config)) *storage.Store {
+	t.Helper()
+	return openAppTestStoreWithMode(t, tweak, false)
+}
+
+// openRequiredAppTestStore is for explicitly selected acceptance suites. A
+// missing PostgreSQL prerequisite must fail those suites rather than turn a
+// green exit code into evidence even though every integration test skipped.
+func openRequiredAppTestStore(t *testing.T) *storage.Store {
+	t.Helper()
+	return openAppTestStoreWithMode(t, nil, true)
+}
+
+func openAppTestStoreWithMode(t *testing.T, tweak func(*config.Config), required bool) *storage.Store {
 	t.Helper()
 	pgURL := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
 	if pgURL == "" {
@@ -48,6 +61,9 @@ func openAppTestStoreWith(t *testing.T, tweak func(*config.Config)) *storage.Sto
 	}
 	s, err := storage.Open(ctx, cfg)
 	if err != nil {
+		if required {
+			t.Fatalf("required query acceptance PostgreSQL unavailable (%v); set AGENTRAY_TEST_DATABASE_URL to a disposable database", err)
+		}
 		t.Skipf("test store unavailable (%v)", err)
 	}
 	t.Cleanup(s.Close)

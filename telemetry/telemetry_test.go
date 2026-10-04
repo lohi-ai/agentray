@@ -14,14 +14,15 @@ import (
 )
 
 type action struct {
-	Op         string               `json:"op"`
-	Name       string               `json:"name"`
-	Attributes telemetry.Attributes `json:"attributes"`
-	Status     telemetry.SpanStatus `json:"status"`
-	Actions    []action             `json:"actions"`
-	Inspection []action             `json:"inspection"`
-	Target     string               `json:"target"`
-	Message    string               `json:"message"`
+	Op                  string               `json:"op"`
+	Name                string               `json:"name"`
+	Attributes          telemetry.Attributes `json:"attributes"`
+	UndefinedAttributes []string             `json:"undefinedAttributes"`
+	Status              telemetry.SpanStatus `json:"status"`
+	Actions             []action             `json:"actions"`
+	Inspection          []action             `json:"inspection"`
+	Target              string               `json:"target"`
+	Message             string               `json:"message"`
 }
 
 type oracleInspectedError struct {
@@ -50,7 +51,7 @@ func TestPiTelemetryOracle(t *testing.T) {
 	if err := json.Unmarshal(data, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 15 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 39 {
 		t.Fatal("unexpected oracle revision or coverage")
 	}
 	for _, tc := range fixture.Cases {
@@ -62,6 +63,14 @@ func TestPiTelemetryOracle(t *testing.T) {
 			var run func([]action, telemetry.Context, *telemetry.Span) error
 			run = func(actions []action, parent telemetry.Context, current *telemetry.Span) error {
 				for _, a := range actions {
+					if len(a.UndefinedAttributes) > 0 {
+						if a.Attributes.IsZero() {
+							a.Attributes = telemetry.NewAttributes()
+						}
+						for _, key := range a.UndefinedAttributes {
+							a.Attributes.Set(key, telemetry.Undefined)
+						}
+					}
 					target, targetSpan := parent, current
 					if a.Target != "" {
 						targetSpan = retained[a.Target]
@@ -240,7 +249,7 @@ func TestDetachedSnapshotsAndInputs(t *testing.T) {
 	strings := []string{"original"}
 	numbers := []float64{1}
 	bools := []bool{true}
-	attrs := telemetry.Attributes{"strings": strings, "numbers": numbers, "bools": bools}
+	attrs := telemetry.NewAttributes(telemetry.Property{Name: "strings", Value: strings}, telemetry.Property{Name: "numbers", Value: numbers}, telemetry.Property{Name: "bools", Value: bools})
 	details := &telemetry.ErrorDetails{Name: "Expected", Message: "original"}
 	_ = recorder.StartSpan(telemetry.SpanOptions{Name: "parent", Attributes: attrs}, func(parent *telemetry.Span) error {
 		return parent.StartSpan(telemetry.SpanOptions{Name: "child", Attributes: attrs}, func(child *telemetry.Span) error {
@@ -248,19 +257,19 @@ func TestDetachedSnapshotsAndInputs(t *testing.T) {
 			child.SetStatus(telemetry.SpanStatus{Status: "error", Error: details})
 			strings[0], numbers[0], bools[0] = "mutated", 2, false
 			details.Message = "mutated"
-			attrs["new"] = true
+			attrs.Set("new", true)
 			return nil
 		})
 	})
 	before := recorder.GetSpans()
-	if before[1].Attributes["strings"].([]string)[0] != "original" || before[1].Status.Error.Message != "original" {
+	if before[1].Attributes.Get("strings").([]string)[0] != "original" || before[1].Status.Error.Message != "original" {
 		t.Fatal("retained input references")
 	}
 	mutated := recorder.GetSpans()
-	mutated[1].Attributes["strings"].([]string)[0] = "changed snapshot"
-	mutated[1].Attributes["numbers"].([]float64)[0] = 100
-	mutated[1].Attributes["bools"].([]bool)[0] = false
-	mutated[1].Events[0].Attributes["strings"].([]string)[0] = "changed event"
+	mutated[1].Attributes.Get("strings").([]string)[0] = "changed snapshot"
+	mutated[1].Attributes.Get("numbers").([]float64)[0] = 100
+	mutated[1].Attributes.Get("bools").([]bool)[0] = false
+	mutated[1].Events[0].Attributes.Get("strings").([]string)[0] = "changed event"
 	mutated[1].Status.Error.Message = "changed status"
 	*mutated[1].ParentID, *mutated[1].EndSequence = 100, 100
 	if !reflect.DeepEqual(before, recorder.GetSpans()) {
@@ -333,8 +342,8 @@ func TestErrorInspectionSettlementAllowsConcurrentRecorderAccess(t *testing.T) {
 	}
 	span := <-spanReady
 	span.SetStatus(telemetry.SpanStatus{Status: "ok"})
-	span.SetAttributes(telemetry.Attributes{"duringInspection": true})
-	span.AddEvent("duringInspection", nil)
+	span.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "duringInspection", Value: true}))
+	span.AddEvent("duringInspection", telemetry.Attributes{})
 	active := recorder.GetSpans()[0]
 	if active.Settled || active.Status.Status != "ok" || active.EndSequence != nil {
 		t.Fatalf("inspection prematurely settled its span: %+v", active)
@@ -350,7 +359,7 @@ func TestErrorInspectionSettlementAllowsConcurrentRecorderAccess(t *testing.T) {
 	}
 	span.SetStatus(telemetry.SpanStatus{Status: "ok"}) // Inert after settlement.
 	settled := recorder.GetSpans()[0]
-	if !settled.Settled || settled.EndSequence == nil || *settled.EndSequence != 1 || settled.Status.Status != "error" || settled.Status.Error == nil || settled.Status.Error.Message != "original failure" || settled.Attributes["duringInspection"] != true || len(settled.Events) != 1 {
+	if !settled.Settled || settled.EndSequence == nil || *settled.EndSequence != 1 || settled.Status.Status != "error" || settled.Status.Error == nil || settled.Status.Error.Message != "original failure" || settled.Attributes.Get("duringInspection") != true || len(settled.Events) != 1 {
 		t.Fatalf("automatic assignment lost status or reentrant mutations: %+v", settled)
 	}
 }
@@ -358,21 +367,20 @@ func TestErrorInspectionSettlementAllowsConcurrentRecorderAccess(t *testing.T) {
 func TestPassiveRecording(t *testing.T) {
 	recorder := telemetry.NewInMemory()
 	failure := &unreadableError{}
-	err := recorder.StartSpan(telemetry.SpanOptions{Name: "passive", Attributes: telemetry.Attributes{"kept": true}}, func(span *telemetry.Span) error {
-		span.SetAttributes(telemetry.Attributes{"partial": true, "invalid": func() {}})
-		span.AddEvent("invalid", telemetry.Attributes{"invalid": map[string]any{}})
-		span.SetStatus(telemetry.SpanStatus{Status: "invalid"})
+	err := recorder.StartSpan(telemetry.SpanOptions{Name: "passive", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "kept", Value: true})}, func(span *telemetry.Span) error {
+		span.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "partial", Value: true}, telemetry.Property{Name: "invalid", Value: make(chan int)}))
+		span.AddEvent("invalid", telemetry.NewAttributes(telemetry.Property{Name: "invalid", Value: make(chan int)}))
 		return failure
 	})
 	if err != failure {
 		t.Fatal("recording replaced callback error")
 	}
 	span := recorder.GetSpans()[0]
-	if !reflect.DeepEqual(span.Attributes, telemetry.Attributes{"kept": true}) || len(span.Events) != 0 || span.Status.Status != "error" || span.Status.Error != nil {
+	if !reflect.DeepEqual(span.Attributes, telemetry.NewAttributes(telemetry.Property{Name: "kept", Value: true})) || len(span.Events) != 0 || span.Status.Status != "error" || span.Status.Error != nil {
 		t.Fatalf("passive recording contract: %+v", span)
 	}
 	calls := 0
-	_ = recorder.StartSpan(telemetry.SpanOptions{Name: "invalid", Attributes: telemetry.Attributes{"invalid": func() {}}}, func(*telemetry.Span) error { calls++; return nil })
+	_ = recorder.StartSpan(telemetry.SpanOptions{Name: "invalid", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "invalid", Value: make(chan int)})}, func(*telemetry.Span) error { calls++; return nil })
 	if calls != 1 || len(recorder.GetSpans()) != 1 {
 		t.Fatal("invalid telemetry prevented callback or recorded partial span")
 	}
@@ -387,7 +395,7 @@ func TestConcurrentChildrenAndSettlement(t *testing.T) {
 			_ = parent.StartSpan(telemetry.SpanOptions{Name: "first"}, func(span *telemetry.Span) error {
 				close(firstEntered)
 				<-releaseFirst
-				span.AddEvent("finished", nil)
+				span.AddEvent("finished", telemetry.Attributes{})
 				return nil
 			})
 		}()
@@ -407,8 +415,8 @@ func TestConcurrentChildrenAndSettlement(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_ = recorder.StartSpan(telemetry.SpanOptions{Name: "concurrent"}, func(span *telemetry.Span) error {
-				span.AddEvent("event", nil)
-				span.SetAttributes(telemetry.Attributes{"value": 1})
+				span.AddEvent("event", telemetry.Attributes{})
+				span.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "value", Value: 1}))
 				_ = recorder.GetSpans()
 				return nil
 			})

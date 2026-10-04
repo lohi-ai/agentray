@@ -23,7 +23,7 @@ func TestAssistantStreamRelayPreservesLivePayloads(t *testing.T) {
 		t.Fatal("attempt terminal leaked into relay result", err)
 	}
 	source := NewAssistantMessageEventStreamFor(shared)
-	message := &Message{Role: "assistant", Content: MessageContent{Blocks: []ContentBlock{{Type: "text", Text: ""}}}, StopReason: "stop"}
+	message := &Message{Role: "assistant", Content: MessageContent{Blocks: []*ContentBlock{{Type: "text", Text: ""}}}, StopReason: "stop"}
 	go func() {
 		defer source.End()
 		source.Synchronize(func() { source.Push(AssistantMessageEvent{Type: "start", Partial: message}) })

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // RepairJSON ports Pi's repairJson: it only repairs control characters and
@@ -97,7 +99,7 @@ func parseCompleteJSON(input string) (json.RawMessage, error) {
 	}
 	// Pi parses numbers as IEEE-754 and JSON.stringify renders overflow as
 	// null. This also applies JS object-key and duplicate-key semantics.
-	return stringifyDeclarationJSON(value)
+	return StringifyJSON(value)
 }
 
 // ParseStreamingJSON ports Pi's parseStreamingJson, including the permissive
@@ -231,23 +233,10 @@ func jsSubstring(text string, start, end int) string {
 func (p *partialJSONParser) object() (json.RawMessage, error) {
 	p.index++
 	p.skipBlank()
-	keys := SystemSections{}
-	values := map[string]json.RawMessage{}
+	fields := jsonjs.ObjectFields{}
 	finish := func() (json.RawMessage, error) {
-		var out bytes.Buffer
-		out.WriteByte('{')
-		for i, key := range keys.ordered() {
-			if i > 0 {
-				out.WriteByte(',')
-			}
-			encoded, _ := json.Marshal(key.Name)
-			out.Write(encoded)
-			out.WriteByte(':')
-			out.Write(values[key.Name])
-		}
-		out.WriteByte('}')
 		p.nullValue = false
-		return out.Bytes(), nil
+		return fields.Marshal(), nil
 	}
 	for p.char() != '}' {
 		p.skipBlank()
@@ -258,8 +247,7 @@ func (p *partialJSONParser) object() (json.RawMessage, error) {
 		if err != nil {
 			return finish()
 		}
-		var name string
-		if json.Unmarshal(key, &name) != nil {
+		if len(key) < 2 || key[0] != '"' {
 			return finish()
 		}
 		p.skipBlank()
@@ -270,9 +258,8 @@ func (p *partialJSONParser) object() (json.RawMessage, error) {
 		}
 		// The JS dependency assigns onto {}, so __proto__ invokes its setter
 		// rather than becoming a JSON property. Complete JSON.parse does not.
-		if name != "__proto__" {
-			keys = append(keys, SystemSection{Name: name})
-			values[name] = value
+		if string(key) != `"__proto__"` {
+			fields.Set(key, value)
 		}
 		p.skipBlank()
 		if p.char() == ',' {

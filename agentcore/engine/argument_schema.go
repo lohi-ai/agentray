@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -17,7 +18,7 @@ type argumentValidator struct {
 
 func (v *argumentValidator) Validate(value any) error {
 	v.arguments, _ = marshalArguments(value, v.source)
-	err := v.schema.Validate(value)
+	err := v.schema.Validate(argumentValidationValue(value))
 	if failure, ok := err.(*jsonschema.ValidationError); ok {
 		v.restoreLocations(failure)
 	}
@@ -89,4 +90,32 @@ func compilerSchema(value any, path string, locations map[string]string) any {
 	default:
 		return value
 	}
+}
+
+// The Go validator rejects nonfinite float64 before visiting any schema.
+// Keep them distinct from finite numbers in its private validation view.
+// Concrete execution values are never replaced by this projection.
+func argumentValidationValue(value any) any {
+	switch value := value.(type) {
+	case float64:
+		if math.IsInf(value, 1) {
+			return json.Number("1e400")
+		}
+		if math.IsInf(value, -1) {
+			return json.Number("-1e400")
+		}
+	case map[string]any:
+		result := make(map[string]any, len(value))
+		for key, child := range value {
+			result[key] = argumentValidationValue(child)
+		}
+		return result
+	case []any:
+		result := make([]any, len(value))
+		for i, child := range value {
+			result[i] = argumentValidationValue(child)
+		}
+		return result
+	}
+	return value
 }

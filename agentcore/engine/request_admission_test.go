@@ -19,11 +19,11 @@ func TestRequestAdmissionOwnsPreparationAndStream(t *testing.T) {
 			t.Error("prepared twice")
 			return nil, nil
 		},
-		TransformContext: func(context.Context, []ai.Message) ([]ai.Message, error) {
+		TransformContext: func(context.Context, []*ai.Message) ([]*ai.Message, error) {
 			t.Error("transformed twice")
 			return nil, nil
 		},
-		ConvertToLLM: func([]ai.Message) ([]ai.Message, error) { t.Error("converted twice"); return nil, nil },
+		ConvertToLLM: func([]*ai.Message) ([]*ai.Message, error) { t.Error("converted twice"); return nil, nil },
 		GetAPIKey:    func(string) (string, error) { t.Error("acquired key twice"); return "", nil },
 		AdmitRequest: func(ctx context.Context, request engine.Request, options map[string]any) (*engine.RequestAdmission, error) {
 			if string(request.Model) != string(initial) || request.ThinkingLevel != "off" || options["temperature"] != 0.4 || options["toolExecution"] != "parallel" {
@@ -45,7 +45,7 @@ func TestRequestAdmissionOwnsPreparationAndStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := agent.State()
-	last := state.Messages[len(state.Messages)-1]
+	last := state.Messages.Get(state.Messages.Len() - 1)
 	if last.Model != "selected" || last.ThinkingLevel == nil || *last.ThinkingLevel != "high" || last.StopReason != "stop" {
 		t.Fatal("admitted reasoning not applied to final response", last)
 	}

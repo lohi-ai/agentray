@@ -45,6 +45,9 @@ func (s *Store) migrateSourceCredentials(ctx context.Context) error {
 		// contract dashboards and syncs have.
 		`ALTER TABLE data_connectors ADD COLUMN IF NOT EXISTS credential_id UUID REFERENCES source_credentials(id) ON DELETE RESTRICT`,
 		`ALTER TABLE data_connectors ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1`,
+		// Changes only when the credential/source identity changes. Display-name
+		// and lifecycle revisions must not invalidate a resumable generation.
+		`ALTER TABLE data_connectors ADD COLUMN IF NOT EXISTS source_config_revision BIGINT NOT NULL DEFAULT 1`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.pg.Exec(ctx, stmt); err != nil {
@@ -197,7 +200,6 @@ WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL`, credentialID, project
 	return nil
 }
 
-
 // sourceCredentialDSN decrypts a credential's secret for the run/probe path.
 // A revoked or foreign credential fails closed.
 func (s *Store) sourceCredentialDSN(ctx context.Context, q pgQuerier, projectID, credentialID string) (string, error) {
@@ -327,25 +329,7 @@ func (s *Store) UpdateDataConnectorIdempotent(ctx context.Context, projectID, co
 					return nil, fmt.Errorf("credential not found or revoked")
 				}
 			}
-			var c DataConnector
-			err := q.QueryRow(ctx, `
-UPDATE data_connectors
-SET name = CASE WHEN $3::text IS NULL THEN name WHEN $3 = '' THEN name ELSE $3 END,
-    credential_id = COALESCE($4::uuid, credential_id),
-    revision = revision + 1, updated_at = now()
-WHERE id = $1 AND project_id = $2 AND revision = $5
-RETURNING `+dataConnectorColumns,
-				connectorID, projectID, name, credentialID, expectedRevision).
-				Scan(dataConnectorScanDest(&c)...)
-			if errors.Is(err, pgx.ErrNoRows) {
-				var exists bool
-				if qerr := q.QueryRow(ctx,
-					`SELECT EXISTS(SELECT 1 FROM data_connectors WHERE id = $1 AND project_id = $2)`,
-					connectorID, projectID).Scan(&exists); qerr == nil && exists {
-					return nil, ErrRevisionConflict
-				}
-				return nil, pgx.ErrNoRows
-			}
+			c, err := updateDataConnectorRevision(ctx, q, projectID, connectorID, name, credentialID, expectedRevision)
 			if err != nil {
 				return nil, err
 			}
@@ -365,9 +349,14 @@ RETURNING `+dataConnectorColumns,
 // update. A nil credentialID preserves the current credential; a non-nil one
 // must be a live credential of the same project.
 func (s *Store) UpdateDataConnectorForProject(ctx context.Context, projectID, connectorID, name string, credentialID *string, expectedRevision int64) (DataConnector, error) {
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	defer tx.Rollback(ctx)
 	if credentialID != nil {
 		var live bool
-		if err := s.pg.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS(SELECT 1 FROM source_credentials WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL AND created_by IS NOT NULL)`,
 			*credentialID, projectID).Scan(&live); err != nil {
 			return DataConnector{}, err
@@ -376,24 +365,54 @@ func (s *Store) UpdateDataConnectorForProject(ctx context.Context, projectID, co
 			return DataConnector{}, fmt.Errorf("credential not found or revoked")
 		}
 	}
+	c, err := updateDataConnectorRevision(ctx, tx, projectID, connectorID, &name, credentialID, expectedRevision)
+	if err != nil {
+		return DataConnector{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DataConnector{}, err
+	}
+	return c, nil
+}
+
+// updateDataConnectorRevision runs inside the caller's transaction. Locking
+// the source row serializes credential-reference changes with snapshot claims,
+// which lock the same row and recheck the revision captured in their job.
+func updateDataConnectorRevision(ctx context.Context, q pgQuerier, projectID, connectorID string, name *string, credentialID *string, expectedRevision int64) (DataConnector, error) {
+	var storedCredential string
+	var revision int64
+	if err := q.QueryRow(ctx, `SELECT COALESCE(credential_id::text,''),revision FROM data_connectors
+WHERE id=$1 AND project_id=$2 FOR UPDATE`, connectorID, projectID).Scan(&storedCredential, &revision); err != nil {
+		return DataConnector{}, err
+	}
+	if revision != expectedRevision {
+		return DataConnector{}, ErrRevisionConflict
+	}
+	if credentialID != nil && *credentialID != storedCredential {
+		var live bool
+		if err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_generations WHERE connector_id=$1 AND
+		(state IN ('capturing','yielded') OR (state='sealed' AND EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=connector_snapshot_generations.generation AND NOT o.published))))`, connectorID).Scan(&live); err != nil {
+			return DataConnector{}, err
+		}
+		if live {
+			return DataConnector{}, fmt.Errorf("a snapshot generation is active; drain or cancel it before changing source credentials")
+		}
+	}
+	credentialChanged := credentialID != nil && *credentialID != storedCredential
 	var c DataConnector
-	err := s.pg.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 UPDATE data_connectors
-SET name = CASE WHEN $3 = '' THEN name ELSE $3 END,
+SET name = CASE WHEN $3::text IS NULL THEN name WHEN $3 = '' THEN name ELSE $3 END,
     credential_id = COALESCE($4::uuid, credential_id),
-    revision = revision + 1, updated_at = now()
+    revision = revision + 1,
+    source_config_revision = source_config_revision + CASE WHEN $6::boolean THEN 1 ELSE 0 END,
+    updated_at = now()
 WHERE id = $1 AND project_id = $2 AND revision = $5
 RETURNING `+dataConnectorColumns,
-		connectorID, projectID, name, credentialID, expectedRevision).
+		connectorID, projectID, name, credentialID, expectedRevision, credentialChanged).
 		Scan(dataConnectorScanDest(&c)...)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var exists bool
-		if qerr := s.pg.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM data_connectors WHERE id = $1 AND project_id = $2)`,
-			connectorID, projectID).Scan(&exists); qerr == nil && exists {
-			return DataConnector{}, ErrRevisionConflict
-		}
-		return DataConnector{}, pgx.ErrNoRows
+		return DataConnector{}, ErrRevisionConflict
 	}
 	return c, err
 }

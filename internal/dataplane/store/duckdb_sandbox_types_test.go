@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -93,6 +94,35 @@ func TestSandboxExoticResultTypes(t *testing.T) {
 
 	if got := pool.spawns.Load(); got != 1 {
 		t.Fatalf("spawns = %d, want 1: no case may have killed the child", got)
+	}
+}
+
+func TestSandboxRejectsNonFiniteResultValuesWithoutKillingChild(t *testing.T) {
+	d := openTestDuckDB(t)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	t.Cleanup(pool.closeAll)
+	projectID := uuid.NewString()
+	seedProject(t, d, projectID, 1)
+
+	for _, query := range []string{
+		`SELECT 'NaN'::DOUBLE AS n`,
+		`SELECT {'nested': 'Infinity'::DOUBLE} AS n`,
+		`SELECT ['-Infinity'::DOUBLE] AS n`,
+	} {
+		if _, err := pool.query(ctx, projectID, query, nil); err == nil || !strings.Contains(err.Error(), "non-finite number") {
+			t.Fatalf("%s error = %v, want actionable non-finite rejection", query, err)
+		}
+		rows, err := pool.query(ctx, projectID, `SELECT NULL::DOUBLE AS n`, nil)
+		if err != nil {
+			t.Fatalf("valid NULL after %s: %v", query, err)
+		}
+		if len(rows) != 1 || rows[0]["n"] != nil {
+			t.Fatalf("valid NULL after %s = %#v", query, rows)
+		}
+	}
+
+	if got := pool.spawns.Load(); got != 1 {
+		t.Fatalf("non-finite results respawned the tenant child %d times, want 1", got)
 	}
 }
 

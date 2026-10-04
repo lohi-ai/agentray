@@ -242,7 +242,7 @@ func TestNativeCallbackStreamErrorsReachGoAgent(t *testing.T) {
 				t.Fatal(err)
 			}
 			state := agent.State()
-			last := state.Messages[len(state.Messages)-1]
+			last := state.Messages.Get(state.Messages.Len() - 1)
 			if state.IsStreaming || last.StopReason != "error" || state.ErrorMessage == nil {
 				t.Fatalf("failure lifecycle missing: %+v", state)
 			}
@@ -297,7 +297,7 @@ func TestNativeCallbackStreamTelemetryAdmissionAndRequestIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	spans := recorder.GetSpans()
-	if len(spans) != 3 || spans[1].Attributes["agentray.request.id"] != uint64(1) || spans[2].Attributes["agentray.request.id"] != uint64(2) {
+	if len(spans) != 3 || spans[1].Attributes.Get("agentray.request.id") != uint64(1) || spans[2].Attributes.Get("agentray.request.id") != uint64(2) {
 		t.Fatalf("request IDs lost: %+v", spans)
 	}
 }
