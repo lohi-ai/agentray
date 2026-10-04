@@ -1046,11 +1046,7 @@ func observerTerminalFollowupSkills(skills []agentcore.Skill) map[string]string 
 		if !skill.Enabled || skill.Name != lohiRevenueObserverSkillName {
 			continue
 		}
-		id := skill.ID
-		if id == "" {
-			id = skill.Name
-		}
-		return map[string]string{"submit_recommendation": id}
+		return map[string]string{"submit_recommendation": canonicalSkillIdentity(skill)}
 	}
 	return nil
 }

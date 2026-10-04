@@ -63,9 +63,9 @@ type BuildParams struct {
 	// textual reply for the user instead of terminating silently.
 	Trigger string
 	// TerminalFollowupSkills opts a terminal operation into continued model
-	// execution, but only after the run successfully loads the named skill. The map is
-	// operation name -> advertised skill id. Empty preserves the terminal
-	// boundary for every ordinary agent.
+	// execution, but only after the run successfully loads the configured skill.
+	// The map is operation name -> canonical advertised skill ID. Empty preserves
+	// the terminal boundary for every ordinary agent.
 	TerminalFollowupSkills map[string]string
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
 	// to the agent's "compaction" task tier instead of borrowing the active rung.
@@ -668,9 +668,11 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 				ID string `json:"id"`
 			}
 			if json.Unmarshal([]byte(call.Arguments), &in) == nil {
-				loadedFollowupSkillsMu.Lock()
-				loadedFollowupSkills[in.ID] = true
-				loadedFollowupSkillsMu.Unlock()
+				if canonicalID, ok := canonicalSkillReadIdentity(p.Skills, in.ID); ok {
+					loadedFollowupSkillsMu.Lock()
+					loadedFollowupSkills[canonicalID] = true
+					loadedFollowupSkillsMu.Unlock()
+				}
 			}
 		}
 		if isChat || !terminal[call.Name] {
@@ -704,4 +706,32 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 		}
 	}
 	return ts, hooks
+}
+
+// canonicalSkillReadIdentity mirrors read_skill's accepted identifier rules:
+// trim the supplied token, match the advertised ID exactly, or match the skill
+// name case-insensitively. The returned token is always the installed skill's
+// canonical advertised identity, never the model-supplied alias.
+func canonicalSkillReadIdentity(skills []agentcore.Skill, supplied string) (string, bool) {
+	want := strings.TrimSpace(supplied)
+	if want == "" {
+		return "", false
+	}
+	for _, skill := range skills {
+		if !skill.Enabled {
+			continue
+		}
+		canonicalID := canonicalSkillIdentity(skill)
+		if canonicalID == want || strings.EqualFold(skill.Name, want) {
+			return canonicalID, true
+		}
+	}
+	return "", false
+}
+
+func canonicalSkillIdentity(skill agentcore.Skill) string {
+	if id := strings.TrimSpace(skill.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(skill.Name)
 }

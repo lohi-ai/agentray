@@ -25,11 +25,10 @@ const lohiObserverVersion = "lohi-revenue-observer-v1"
 func TestLohiObserverSubmitRecommendationAllowsScheduledFollowup(t *testing.T) {
 	for _, trigger := range []string{"scheduled", "manual"} {
 		t.Run(trigger, func(t *testing.T) {
+			observer := agentcore.Skill{ID: "observer-skill-id", Name: lohiObserverVersion, Enabled: true}
 			_, hooks := buildToolsAndHooks(BuildParams{
-				Trigger: trigger,
-				TerminalFollowupSkills: map[string]string{
-					"submit_recommendation": "observer-skill-id",
-				},
+				Trigger: trigger, Skills: []agentcore.Skill{observer},
+				TerminalFollowupSkills: map[string]string{"submit_recommendation": observer.ID},
 			}, "scope")
 			if _, stop := hooks.After[0](context.Background(), agentcore.ToolCall{
 				Name: "submit_recommendation",
@@ -62,6 +61,61 @@ func (t *submitBoundaryTool) Schema() agentcore.ToolSchema {
 func (t *submitBoundaryTool) Run(context.Context, string) (string, error) {
 	t.calls++
 	return "persisted finding", nil
+}
+
+func TestObserverSkillGateAcceptsEveryReadSkillIdentifier(t *testing.T) {
+	observer := agentcore.Skill{
+		ID: "observer-skill-id", Name: lohiObserverVersion,
+		Enabled: true, Body: "observer delivery contract",
+	}
+	unrelated := agentcore.Skill{
+		ID: "unrelated-skill-id", Name: "unrelated-skill",
+		Enabled: true, Body: "unrelated contract",
+	}
+	for _, tc := range []struct {
+		name   string
+		input  string
+		skills []agentcore.Skill
+		want   int
+	}{
+		{name: "advertised UUID", input: observer.ID, skills: []agentcore.Skill{observer}, want: 2},
+		{name: "accepted name", input: observer.Name, skills: []agentcore.Skill{observer}, want: 2},
+		{name: "case-folded name", input: strings.ToUpper(observer.Name), skills: []agentcore.Skill{observer}, want: 2},
+		{name: "whitespace-padded UUID", input: " \t" + observer.ID + "\n", skills: []agentcore.Skill{observer}, want: 2},
+		{name: "unrelated successful read", input: unrelated.Name, skills: []agentcore.Skill{observer, unrelated}, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, hooks := buildToolsAndHooks(BuildParams{
+				Trigger: "scheduled", Skills: tc.skills,
+				TerminalFollowupSkills: observerTerminalFollowupSkills(tc.skills),
+			}, "scope")
+			tool := &submitBoundaryTool{}
+			provider := agentcore.NewFauxProvider(
+				agentcore.AssistantToolCall("read", "read_skill", fmt.Sprintf(`{"id":%q}`, tc.input)),
+				agentcore.AssistantToolCall("one", tool.Name(), `{}`),
+				agentcore.AssistantToolCall("two", tool.Name(), `{}`),
+				agentcore.AssistantText("done"),
+			)
+			agent, err := agentcore.New(agentcore.Config{
+				Provider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
+				Definition: agentcore.AgentDefinition{Skills: tc.skills},
+				Policy:     agentcore.NewAllowList(tool.Name()), Hooks: hooks,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := agent.Prompt(context.Background(), "Read the contract, submit, then follow up")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Tools) == 0 || result.Tools[0].Tool != "read_skill" || result.Tools[0].Error != "" {
+				t.Fatalf("read_skill(%q) did not succeed: %+v", tc.input, result.Tools)
+			}
+			if tool.calls != tc.want {
+				t.Fatalf("writes after successful read_skill(%q) = %d, want %d", tc.input, tool.calls, tc.want)
+			}
+		})
+	}
 }
 
 func TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary(t *testing.T) {
@@ -106,6 +160,22 @@ func (n *lohiObserverRetryNotifier) Notify(_ context.Context, ch storage.AlertCh
 }
 
 func TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		identifier func(storage.AgentSkill) string
+	}{
+		{name: "advertised UUID", identifier: func(skill storage.AgentSkill) string { return skill.ID }},
+		{name: "accepted name", identifier: func(skill storage.AgentSkill) string { return skill.Name }},
+		{name: "case-folded name", identifier: func(skill storage.AgentSkill) string { return strings.ToUpper(skill.Name) }},
+		{name: "whitespace-padded UUID", identifier: func(skill storage.AgentSkill) string { return " \t" + skill.ID + "\n" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testLohiObserverScheduledDeliveryRecovery(t, tc.identifier)
+		})
+	}
+}
+
+func testLohiObserverScheduledDeliveryRecovery(t *testing.T, identifier func(storage.AgentSkill) string) {
 	databaseURL := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("set AGENTRAY_TEST_DATABASE_URL to run the scheduled observer integration")
@@ -253,7 +323,7 @@ func TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("install observer skill: %v", err)
 	}
-	skillID = installed.ID
+	skillID = identifier(installed)
 	if _, err := st.CreateAlertChannel(ctx, boot.User.ID, boot.Workspace.ID, storage.AlertChannel{
 		Kind: "webhook", Name: "ops", Config: json.RawMessage(`{"url":"https://unused.invalid"}`),
 	}); err != nil {
