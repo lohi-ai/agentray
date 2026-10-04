@@ -115,10 +115,10 @@ func ConvertAnthropicTools(tools []Tool, options AnthropicToolsOptions) (json.Ra
 	}
 	return json.Marshal(output)
 }
-func anthropicImage(block ContentBlock) map[string]any {
+func anthropicImage(block *ContentBlock) map[string]any {
 	return map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": block.MIMEType, "data": block.Data}}
 }
-func anthropicToolResultContent(content []ContentBlock) any {
+func anthropicToolResultContent(content []*ContentBlock) any {
 	images := false
 	for _, block := range content {
 		if block.Type == "image" {

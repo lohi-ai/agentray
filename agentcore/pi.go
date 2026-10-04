@@ -57,8 +57,8 @@ type piFrame struct {
 	Error  *PiError        `json:"error,omitempty"`
 }
 
-// PiAgent runs Pi itself across an explicit JSON process boundary. The native
-// TypeScript exports are in pi.ts; this bridge is for existing Go hosts. Unlike
+// PiAgent runs Pi itself across an explicit JSON process boundary. The reference
+// TypeScript bundles live under third_party/pi; this bridge is transitional. Unlike
 // Agent, it adds no retry, compaction, session, permission, or budget policy.
 // Such policies must be supplied through Pi's host callbacks.
 type PiAgent struct {

@@ -15,8 +15,8 @@ type InitialState struct {
 	SystemPrompt  string
 	Model         json.RawMessage
 	ThinkingLevel string
-	Tools         []Tool
-	Messages      []ai.Message
+	Tools         []*Tool
+	Messages      []*ai.Message
 }
 
 // AgentConfig configures the stateful wrapper. Config supplies the shared loop
@@ -41,18 +41,32 @@ type AgentOptions struct {
 	AgentConfig
 }
 
-// State is a snapshot of the wrapper's state. Top-level arrays are copied;
-// message payloads, tool declarations, and models should be treated as immutable.
+// State snapshots scalar fields while retaining live message/tool collections
+// and message objects. List operations are synchronized; callers synchronize
+// concurrent item edits. Use SetMessages/SetTools to replace a collection.
 type State struct {
-	SystemPrompt     string          `json:"systemPrompt"`
 	Model            json.RawMessage `json:"model"`
 	ThinkingLevel    string          `json:"thinkingLevel"`
-	Tools            []Tool          `json:"tools"`
-	Messages         []ai.Message    `json:"messages"`
+	Tools            *ToolList       `json:"tools"`
+	Messages         *MessageList    `json:"messages"`
 	IsStreaming      bool            `json:"isStreaming"`
 	StreamingMessage *ai.Message     `json:"streamingMessage,omitempty"`
-	PendingToolCalls []string        `json:"pendingToolCalls"`
+	PendingToolCalls *ToolCallSet    `json:"pendingToolCalls"`
 	ErrorMessage     *string         `json:"errorMessage,omitempty"`
+}
+
+// SystemPrompt replays the current collection lazily, like Pi's state getter.
+// Holding State retains that collection even when the agent later replaces it.
+func (s State) SystemPrompt() string {
+	return ai.GetCurrentSystemPrompt(MessageValues(s.Messages.Values()))
+}
+
+func (s State) MarshalJSON() ([]byte, error) {
+	type plain State
+	return json.Marshal(struct {
+		SystemPrompt string `json:"systemPrompt"`
+		plain
+	}{SystemPrompt: s.SystemPrompt(), plain: plain(s)})
 }
 
 // Listener has identity independently of its Go callback. Subscribing the same
@@ -70,18 +84,18 @@ type activeRun struct {
 
 type messageQueue struct {
 	mode     string
-	messages []ai.Message
+	messages []*ai.Message
 }
 
-func (q *messageQueue) peek() []ai.Message {
+func (q *messageQueue) peek() []*ai.Message {
 	count := len(q.messages)
 	if q.mode != "all" && count > 1 {
 		count = 1
 	}
-	return append([]ai.Message{}, q.messages[:count]...)
+	return append([]*ai.Message{}, q.messages[:count]...)
 }
 
-func (q *messageQueue) drain() []ai.Message {
+func (q *messageQueue) drain() []*ai.Message {
 	selected := q.peek()
 	q.messages = slices.Clone(q.messages[len(selected):])
 	return selected
@@ -92,6 +106,7 @@ func (q *messageQueue) drain() []ai.Message {
 type Agent struct {
 	mu             sync.Mutex
 	state          State
+	messages       *MessageList
 	options        AgentConfig
 	steering       messageQueue
 	followUp       messageQueue
@@ -109,22 +124,23 @@ func NewAgent(options AgentOptions) (*Agent, error) {
 	}
 	initial := options.InitialState
 	state := State{Model: slices.Clone(initial.Model), ThinkingLevel: initial.ThinkingLevel,
-		Tools: append([]Tool{}, initial.Tools...), Messages: append([]ai.Message{}, initial.Messages...), PendingToolCalls: []string{}}
+		Tools: NewList(initial.Tools...), PendingToolCalls: &ToolCallSet{}}
+	messages := append([]*ai.Message{}, initial.Messages...)
 	if state.Model == nil {
 		state.Model = json.RawMessage(defaultModel)
 	}
 	if state.ThinkingLevel == "" {
 		state.ThinkingLevel = "off"
 	}
-	declarations := make([]ai.Tool, len(state.Tools))
-	for i, tool := range state.Tools {
+	declarations := make([]ai.Tool, len(initial.Tools))
+	for i, tool := range initial.Tools {
 		declarations[i] = ai.ToToolDeclaration(tool.Tool)
 	}
 	baseline := ai.CreateInitialSystemMessage(initial.SystemPrompt, declarations)
-	if baseline != nil && (len(state.Messages) == 0 || state.Messages[0].Role != "system") {
-		state.Messages = append([]ai.Message{*baseline}, state.Messages...)
+	if baseline != nil && (len(messages) == 0 || messages[0].Role != "system") {
+		messages = append([]*ai.Message{baseline}, messages...)
 	}
-	return &Agent{state: state, options: configured, steering: messageQueue{mode: configured.SteeringMode},
+	return &Agent{state: state, messages: NewList(messages...), options: configured, steering: messageQueue{mode: configured.SteeringMode},
 		followUp: messageQueue{mode: configured.FollowUpMode}, listeners: map[*Listener]uint64{}}, nil
 }
 
@@ -154,8 +170,8 @@ func normalizeAgentConfig(options AgentConfig) (AgentConfig, error) {
 	return options, nil
 }
 
-func defaultConvertToLLM(messages []ai.Message) ([]ai.Message, error) {
-	result := []ai.Message{}
+func defaultConvertToLLM(messages []*ai.Message) ([]*ai.Message, error) {
+	result := []*ai.Message{}
 	for _, message := range messages {
 		switch message.Role {
 		case "system", "user", "assistant", "toolResult":
@@ -177,31 +193,44 @@ func (a *Agent) Configure(options AgentConfig) error {
 	return nil
 }
 
+// Caller holds mu. Replay helpers read a shallow projection of live entries.
+func (a *Agent) messageSnapshot() []ai.Message {
+	return MessageValues(a.messages.Values())
+}
+
 func (a *Agent) State() State {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	state := a.state
-	state.SystemPrompt = ai.GetCurrentSystemPrompt(state.Messages)
-	state.Tools = append([]Tool{}, state.Tools...)
-	state.Messages = append([]ai.Message{}, state.Messages...)
-	state.PendingToolCalls = append([]string{}, state.PendingToolCalls...)
-	if state.StreamingMessage != nil {
-		copy := *state.StreamingMessage
-		state.StreamingMessage = &copy
-	}
+	state.Messages = a.messages
 	return state
 }
 
-func (a *Agent) SetMessages(messages []ai.Message) {
+func (a *Agent) SetMessages(messages []*ai.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.state.Messages = append([]ai.Message{}, messages...)
+	a.messages = NewList(messages...)
 }
-func (a *Agent) SetTools(tools []Tool) {
+func (a *Agent) SetTools(tools []*Tool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.state.Tools = append([]Tool{}, tools...)
+	a.state.Tools = NewList(tools...)
 }
+
+// SetMessageList mirrors assigning a state array, including its sparse slots.
+// Assignment detaches the outer collection and retains message objects.
+func (a *Agent) SetMessageList(messages *MessageList) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.messages = messages.Clone()
+}
+
+func (a *Agent) SetToolList(tools *ToolList) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state.Tools = tools.Clone()
+}
+
 func (a *Agent) SetModel(model json.RawMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -224,12 +253,12 @@ func (a *Agent) SetFollowUpMode(mode string) {
 }
 func (a *Agent) SteeringMode() string { a.mu.Lock(); defer a.mu.Unlock(); return a.steering.mode }
 func (a *Agent) FollowUpMode() string { a.mu.Lock(); defer a.mu.Unlock(); return a.followUp.mode }
-func (a *Agent) Steer(message ai.Message) {
+func (a *Agent) Steer(message *ai.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.steering.messages = append(a.steering.messages, message)
 }
-func (a *Agent) FollowUp(message ai.Message) {
+func (a *Agent) FollowUp(message *ai.Message) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.followUp.messages = append(a.followUp.messages, message)
@@ -246,7 +275,7 @@ func (a *Agent) HasQueuedMessages() bool {
 	defer a.mu.Unlock()
 	return len(a.steering.messages)+len(a.followUp.messages) > 0
 }
-func (a *Agent) PeekQueuedMessages() []ai.Message {
+func (a *Agent) PeekQueuedMessages() []*ai.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.steering.messages) > 0 {
@@ -311,20 +340,22 @@ func (a *Agent) Reset() error {
 	if a.active != nil {
 		return errors.New("Agent is already processing. Wait for completion before resetting.")
 	}
-	baseline := ai.GetCurrentSystemMessage(a.state.Messages)
-	a.state.Messages = []ai.Message{}
+	baseline := ai.GetCurrentSystemMessage(a.messageSnapshot())
+	a.messages = NewList[*ai.Message]()
 	if baseline != nil {
-		a.state.Messages = append(a.state.Messages, *baseline)
+		a.messages.Append(baseline)
 	}
 	a.state.IsStreaming, a.state.StreamingMessage, a.state.ErrorMessage = false, nil, nil
-	a.state.PendingToolCalls = []string{}
+	a.state.PendingToolCalls = &ToolCallSet{}
 	a.steering.messages, a.followUp.messages = nil, nil
 	return nil
 }
 
 const busyPrompt = "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
 
-// Prompt accepts text, one Message, or []Message. Images accompany text input.
+// Prompt accepts text, message values or message references (single or slices).
+// Reference inputs keep their identity through callbacks and history.
+// Images accompany text input.
 // It blocks until the run and its listeners settle. Admission errors are
 // returned directly; run failures become Pi's assistant failure lifecycle.
 func (a *Agent) Prompt(ctx context.Context, input any, images ...ai.ContentBlock) error {
@@ -335,14 +366,18 @@ func (a *Agent) Prompt(ctx context.Context, input any, images ...ai.ContentBlock
 	}
 	now := a.options.Config.now
 	a.mu.Unlock()
-	var messages []ai.Message
+	var messages []*ai.Message
 	switch input := input.(type) {
 	case string:
 		content := append([]ai.ContentBlock{{Type: "text", Text: input}}, images...)
-		messages = []ai.Message{{Role: "user", Content: ai.BlockContent(content...), Timestamp: now()}}
+		messages = []*ai.Message{{Role: "user", Content: ai.BlockContent(content...), Timestamp: now()}}
 	case ai.Message:
-		messages = []ai.Message{input}
+		messages = []*ai.Message{&input}
+	case *ai.Message:
+		messages = []*ai.Message{input}
 	case []ai.Message:
+		messages = MessagePointers(input)
+	case []*ai.Message:
 		messages = input
 	default:
 		return fmt.Errorf("engine: unsupported prompt input %T", input)
@@ -363,8 +398,9 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return errors.New("Agent is already processing. Wait for completion before continuing.")
 	}
+	messages := a.messages.Values()
 	hasNonSystem := false
-	for _, message := range a.state.Messages {
+	for _, message := range messages {
 		if message.Role != "system" {
 			hasNonSystem = true
 			break
@@ -374,9 +410,9 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return errors.New("No messages to continue from")
 	}
-	var prompts []ai.Message
+	var prompts []*ai.Message
 	skipSteering, continuation := false, true
-	if a.state.Messages[len(a.state.Messages)-1].Role == "assistant" {
+	if messages[len(messages)-1].Role == "assistant" {
 		prompts = a.steering.drain()
 		if len(prompts) > 0 {
 			skipSteering = true
@@ -404,7 +440,7 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 	active := &activeRun{ctx: ctx, cancel: cancel, done: make(chan struct{}), stopParent: stopParent}
 	a.active = active
 	a.state.IsStreaming, a.state.StreamingMessage, a.state.ErrorMessage = true, nil, nil
-	current := Context{Messages: slices.Clone(a.state.Messages), Tools: slices.Clone(a.state.Tools)}
+	current := Context{Messages: a.messages.Values(), Tools: a.state.Tools.Values()}
 	config := a.options.Config
 	config.Model = a.state.Model
 	config.Reasoning = a.state.ThinkingLevel
@@ -440,25 +476,25 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 			return nil, nil
 		}
 	}
-	config.GetSteeringMessages = func() ([]ai.Message, error) {
+	config.GetSteeringMessages = func() ([]*ai.Message, error) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if skipSteering {
 			skipSteering = false
-			return []ai.Message{}, nil
+			return []*ai.Message{}, nil
 		}
 		return a.steering.drain(), nil
 	}
-	config.GetFollowUpMessages = func() ([]ai.Message, error) { a.mu.Lock(); defer a.mu.Unlock(); return a.followUp.drain(), nil }
+	config.GetFollowUpMessages = func() ([]*ai.Message, error) { a.mu.Lock(); defer a.mu.Unlock(); return a.followUp.drain(), nil }
 	return active, current, config, a.options.StreamFn
 }
 
-func (a *Agent) run(active *activeRun, current Context, config Config, stream StreamFn, prompts []ai.Message, continuation bool) (err error) {
+func (a *Agent) run(active *activeRun, current Context, config Config, stream StreamFn, prompts []*ai.Message, continuation bool) (err error) {
 	defer func() {
 		active.stopParent()
 		a.mu.Lock()
 		a.state.IsStreaming, a.state.StreamingMessage = false, nil
-		a.state.PendingToolCalls = []string{}
+		a.state.PendingToolCalls = &ToolCallSet{}
 		close(active.done)
 		a.active = nil
 		a.mu.Unlock()
@@ -509,12 +545,14 @@ func (a *Agent) handleFailure(active *activeRun, failure error, timestamp int64)
 	text := failure.Error()
 	message.ErrorMessage = &text
 	for _, event := range []Event{{Type: "message_start", Message: message}, {Type: "message_end", Message: message},
-		{Type: "turn_end", Message: message, ToolResults: []ai.Message{}}, {Type: "agent_end", Messages: []ai.Message{*message}}} {
+		{Type: "turn_end", Message: message, ToolResults: []*ai.Message{}}} {
 		if err := executeAgentRun(func() error { return a.processEvent(event) }); err != nil {
 			return err
 		}
 	}
-	return nil
+	return executeAgentRun(func() error {
+		return a.processEvent(Event{Type: "agent_end", Messages: []*ai.Message{message}})
+	})
 }
 
 func (a *Agent) processEvent(event Event) error {
@@ -524,15 +562,11 @@ func (a *Agent) processEvent(event Event) error {
 		a.state.StreamingMessage = event.Message
 	case "message_end":
 		a.state.StreamingMessage = nil
-		a.state.Messages = append(a.state.Messages, *event.Message)
+		a.messages.Append(event.Message)
 	case "tool_execution_start":
-		if !slices.Contains(a.state.PendingToolCalls, event.ToolCallID) {
-			a.state.PendingToolCalls = append(a.state.PendingToolCalls, event.ToolCallID)
-		}
+		a.state.PendingToolCalls = a.state.PendingToolCalls.with(event.ToolCallID)
 	case "tool_execution_end":
-		if index := slices.Index(a.state.PendingToolCalls, event.ToolCallID); index >= 0 {
-			a.state.PendingToolCalls = slices.Delete(a.state.PendingToolCalls, index, index+1)
-		}
+		a.state.PendingToolCalls = a.state.PendingToolCalls.without(event.ToolCallID)
 	case "turn_end":
 		if event.Message.Role == "assistant" && event.Message.ErrorMessage != nil && *event.Message.ErrorMessage != "" {
 			text := *event.Message.ErrorMessage

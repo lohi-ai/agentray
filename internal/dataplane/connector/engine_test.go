@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -50,7 +51,8 @@ func (f *fakeSource) TestConnection(ctx context.Context) error { return nil }
 func (f *fakeSource) DiscoverSchema(ctx context.Context) ([]Table, error) {
 	return nil, nil
 }
-func (f *fakeSource) Close() {}
+func (f *fakeSource) Close()                                                    {}
+func (f *fakeSource) ValidateSnapshotKey(context.Context, string, string) error { return nil }
 func (f *fakeSource) PullRows(ctx context.Context, req PullRequest) (PullResult, error) {
 	if f.blockCh != nil {
 		select {
@@ -176,6 +178,7 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 		return Run{}, false, nil
 	}
 	r.Status = "running"
+	r.LeaseEpoch++
 	return *r, true, nil
 }
 
@@ -345,6 +348,43 @@ func TestRunSyncAdvancesCursorAcrossBatches(t *testing.T) {
 	}
 }
 
+type receiptPublisher struct {
+	legacy     *fakeStore
+	batches    []IncrementalReceipt
+	completion *IncrementalReceipt
+}
+
+func (p *receiptPublisher) PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []LandedRow) error {
+	return p.legacy.PublishExternalRows(ctx, projectID, connectorID, table, rows)
+}
+func (p *receiptPublisher) PublishIncrementalBatch(_ context.Context, _, _, _ string, receipt IncrementalReceipt, rows []LandedRow) (int64, error) {
+	p.batches = append(p.batches, receipt)
+	p.legacy.published = append(p.legacy.published, rows)
+	return 1, nil
+}
+func (p *receiptPublisher) PublishIncrementalComplete(_ context.Context, _, _, _ string, receipt IncrementalReceipt) error {
+	p.completion = &receipt
+	return nil
+}
+
+func TestRunSyncPublishesIncrementalRunCompletionEvidence(t *testing.T) {
+	b1 := rowsBatch("5", "k1", "k2")
+	b1.HasMore = true
+	b2 := rowsBatch("9", "k3")
+	useFakeSource(&fakeSource{batches: []PullResult{b1, b2}}, nil)
+	store := newFakeStore(incrementalJob())
+	publisher := &receiptPublisher{legacy: store}
+	runSync(t, NewEngine(store, publisher), store, "s1")
+	if len(publisher.batches) != 2 || publisher.completion == nil {
+		t.Fatalf("receipt batches=%d completion=%+v", len(publisher.batches), publisher.completion)
+	}
+	if publisher.batches[0].RunID == "" || publisher.batches[0].RunID != publisher.batches[1].RunID ||
+		publisher.completion.RunID != publisher.batches[0].RunID || publisher.completion.ExpectedBatches != 2 ||
+		publisher.completion.ExpectedRows != 3 || publisher.completion.CaptureFinishedAt == nil {
+		t.Fatalf("incremental receipt wiring = batches=%+v complete=%+v", publisher.batches, publisher.completion)
+	}
+}
+
 // A batch the stream did not durably accept must not advance the persisted
 // cursor past the last batch that was accepted: the shared source cursor is
 // what stops the rows ever being pulled again, so it may only move once the
@@ -434,6 +474,33 @@ func TestRunSyncOpenFailurePersistsError(t *testing.T) {
 
 	if got := store.finished[0]; got.Err != "connect failed: host unreachable" || got.Cursor != "" || got.Rows != 0 {
 		t.Fatalf("result = %+v", got)
+	}
+}
+
+func TestRunSyncEncodingErrorDoesNotExposeSourceKey(t *testing.T) {
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	useFakeSource(&fakeSource{batches: []PullResult{{
+		Rows: []Row{{
+			Key:    sensitiveKey,
+			Cursor: "1",
+			Data:   map[string]any{"amount": math.NaN()},
+		}},
+		NextCursor:    "1",
+		NextCursorKey: sensitiveKey,
+	}}}, nil)
+	store := newFakeStore(incrementalJob())
+
+	runSync(t, NewEngine(store, store), store, "incremental-pii-safe-error")
+
+	if len(store.finished) != 1 {
+		t.Fatalf("finished results = %+v, want one", store.finished)
+	}
+	got := store.finished[0].Err
+	if !strings.Contains(got, "encode source row") || !strings.Contains(got, "unsupported value: NaN") {
+		t.Fatalf("SyncResult.Err = %q, want an actionable encoding error", got)
+	}
+	if strings.Contains(got, sensitiveKey) {
+		t.Fatalf("SyncResult.Err exposed source row key: %q", got)
 	}
 }
 

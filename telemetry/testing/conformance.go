@@ -28,7 +28,9 @@ type ConformanceCase struct {
 // CreateAdapterConformance creates a fresh fixture for each invocation of Run.
 // No testing framework or global state is required. The case names correspond
 // to Pi's original suite. Error returns/gated goroutines replace Promise
-// rejection/settlement; invalid Go payloads replace unreadable JS proxies.
+// rejection/settlement; unsupported Go attributes replace unreadable JS proxies.
+// SetStatusFrom readers model throwing status property access in Go.
+// A supplemental source-verified case covers readable status normalization.
 func CreateAdapterConformance(factory func() (*AdapterFixture, error)) []ConformanceCase {
 	makeCase := func(group, name string, test func(*AdapterFixture)) ConformanceCase {
 		return ConformanceCase{Group: group, Name: name, Run: func() (err error) {
@@ -108,36 +110,44 @@ func CreateAdapterConformance(factory func() (*AdapterFixture, error)) []Conform
 			equal(find(f, "expected-failure").Status, expected)
 		}),
 		makeCase("recording", "merges attributes and records ordered events", func(f *AdapterFixture) {
-			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "recording", Attributes: telemetry.Attributes{"start": "value", "overwrite": "start", "ignored": nil}}, func(s *telemetry.Span) error {
-				s.SetAttributes(telemetry.Attributes{"count": 1, "overwrite": "middle"})
-				s.SetAttributes(telemetry.Attributes{"count": nil, "overwrite": "end"})
-				s.AddEvent("first", telemetry.Attributes{"index": 1, "ignored": nil})
-				s.AddEvent("second", telemetry.Attributes{"index": 2})
+			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "recording", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "start", Value: "value"}, telemetry.Property{Name: "overwrite", Value: "start"}, telemetry.Property{Name: "ignored", Value: telemetry.Undefined})}, func(s *telemetry.Span) error {
+				s.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "count", Value: 1}, telemetry.Property{Name: "overwrite", Value: "middle"}))
+				s.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "count", Value: telemetry.Undefined}, telemetry.Property{Name: "overwrite", Value: "end"}))
+				s.AddEvent("first", telemetry.NewAttributes(telemetry.Property{Name: "index", Value: 1}, telemetry.Property{Name: "ignored", Value: telemetry.Undefined}))
+				s.AddEvent("second", telemetry.NewAttributes(telemetry.Property{Name: "index", Value: 2}))
 				return nil
 			}) == nil, "recording changed callback success")
 			span := find(f, "recording")
-			equal(span.Attributes, telemetry.Attributes{"start": "value", "overwrite": "end", "count": 1})
-			equal(span.Events, []telemetry.RecordedEvent{{Name: "first", Attributes: telemetry.Attributes{"index": 1}}, {Name: "second", Attributes: telemetry.Attributes{"index": 2}}})
+			equal(span.Attributes, telemetry.NewAttributes(telemetry.Property{Name: "start", Value: "value"}, telemetry.Property{Name: "overwrite", Value: "end"}, telemetry.Property{Name: "count", Value: 1}))
+			equal(span.Events, []telemetry.RecordedEvent{{Name: "first", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "index", Value: 1})}, {Name: "second", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "index", Value: 2})}})
 		}),
 		makeCase("recording", "ignores failed attribute calls atomically", func(f *AdapterFixture) {
-			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "atomic-attributes", Attributes: telemetry.Attributes{"retained": "value"}}, func(s *telemetry.Span) error {
-				s.SetAttributes(telemetry.Attributes{"partial": "must not survive", "unreadable": make(chan string)})
+			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "atomic-attributes", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "retained", Value: "value"})}, func(s *telemetry.Span) error {
+				s.SetAttributesFrom(func() telemetry.Attributes { panic("unreadable attribute") })
 				return nil
 			}) == nil, "invalid attributes changed callback success")
-			equal(find(f, "atomic-attributes").Attributes, telemetry.Attributes{"retained": "value"})
+			equal(find(f, "atomic-attributes").Attributes, telemetry.NewAttributes(telemetry.Property{Name: "retained", Value: "value"}))
 		}),
 		makeCase("recording", "makes calls after settlement inert", func(f *AdapterFixture) {
 			var captured *telemetry.Span
-			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "settled", Attributes: telemetry.Attributes{"value": "initial"}}, func(s *telemetry.Span) error { captured = s; return nil }) == nil, "span failed")
-			captured.SetAttributes(telemetry.Attributes{"value": "late"})
-			captured.AddEvent("late", telemetry.Attributes{"value": true})
+			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "settled", Attributes: telemetry.NewAttributes(telemetry.Property{Name: "value", Value: "initial"})}, func(s *telemetry.Span) error { captured = s; return nil }) == nil, "span failed")
+			captured.SetAttributes(telemetry.NewAttributes(telemetry.Property{Name: "value", Value: "late"}))
+			captured.AddEvent("late", telemetry.NewAttributes(telemetry.Property{Name: "value", Value: true}))
 			captured.SetStatus(telemetry.SpanStatus{Status: "error"})
+			reads := 0
+			late := func() telemetry.Attributes {
+				reads++
+				return telemetry.NewAttributes(telemetry.Property{Name: "late", Value: true})
+			}
+			captured.SetAttributesFrom(late)
+			captured.AddEventFrom("late-reader", late)
+			check(reads == 0, "settled span evaluated an attribute reader")
 			admitted := false
-			result, err := telemetry.StartSpan(captured.Context(), telemetry.SpanOptions{Name: "late-child"}, func(*telemetry.Span) (int, error) { admitted = true; return 7, nil })
-			check(admitted && result == 7 && err == nil, "late child callback was not preserved")
+			result, err := telemetry.StartSpanFrom(captured.Context(), func() telemetry.SpanOptions { reads++; return telemetry.SpanOptions{Name: "late-child"} }, func(*telemetry.Span) (int, error) { admitted = true; return 7, nil })
+			check(reads == 0 && admitted && result == 7 && err == nil, "late child read options or changed callback result")
 			spans := snapshots(f)
 			check(len(spans) == 1, "late child created a recorded span")
-			equal(spans[0].Attributes, telemetry.Attributes{"value": "initial"})
+			equal(spans[0].Attributes, telemetry.NewAttributes(telemetry.Property{Name: "value", Value: "initial"}))
 			equal(spans[0].Events, []telemetry.RecordedEvent{})
 			equal(spans[0].Status, telemetry.SpanStatus{Status: "ok"})
 		}),
@@ -163,27 +173,48 @@ func CreateAdapterConformance(factory func() (*AdapterFixture, error)) []Conform
 		}),
 		makeCase("passivity", "suppresses unreadable telemetry payload failures", func(f *AdapterFixture) {
 			calls := 0
-			result, err := telemetry.StartSpan(f.Context, telemetry.SpanOptions{Name: "unreadable-options", Attributes: telemetry.Attributes{"secret": make(chan string)}}, func(*telemetry.Span) (int, error) { calls++; return 9, nil })
-			check(calls == 1 && result == 9 && err == nil, "invalid options changed callback result")
+			reads := 0
+			result, err := telemetry.StartSpanFrom(f.Context, func() telemetry.SpanOptions { reads++; panic("unreadable options") }, func(*telemetry.Span) (int, error) { calls++; return 9, nil })
+			check(reads == 1 && calls == 1 && result == 9 && err == nil, "invalid options changed callback result or were not read")
 			equal(snapshots(f), []telemetry.RecordedSpan{})
 			check(f.Context.StartSpan(telemetry.SpanOptions{Name: "unreadable-recording"}, func(s *telemetry.Span) error {
-				bad := telemetry.Attributes{"secret": make(chan string)}
-				s.SetAttributes(bad)
-				s.AddEvent("unreadable-event", bad)
-				s.SetStatus(telemetry.SpanStatus{Status: "invalid"})
+				reads := 0
+				bad := func() telemetry.Attributes { reads++; panic("unreadable attributes") }
+				s.SetAttributesFrom(bad)
+				s.AddEventFrom("unreadable-event", bad)
+				check(reads == 2, "attribute/event readers were not admitted")
+				s.SetStatusFrom(func() telemetry.SpanStatus { panic("unreadable status") })
 				return nil
 			}) == nil, "invalid mutations changed callback result")
 			recorded := snapshots(f)
 			check(len(recorded) == 1, "invalid mutations created/dropped a span")
-			equal(recorded[0].Attributes, telemetry.Attributes{})
+			equal(recorded[0].Attributes, telemetry.NewAttributes())
 			equal(recorded[0].Events, []telemetry.RecordedEvent{})
 			equal(recorded[0].Status, telemetry.SpanStatus{Status: "ok"})
 		}),
 		makeCase("passivity", "ignores failed status calls atomically", func(f *AdapterFixture) {
-			rejection := errors.New("rejected after unreadable status")
-			err := f.Context.StartSpan(telemetry.SpanOptions{Name: "unreadable-status"}, func(s *telemetry.Span) error { s.SetStatus(telemetry.SpanStatus{Status: "invalid"}); return rejection })
-			check(err == rejection, "invalid status changed callback error")
-			check(find(f, "unreadable-status").Status.Status == "error", "invalid status suppressed automatic error")
+			failure := errors.New("rejected after unreadable status")
+			reads := 0
+			err := f.Context.StartSpan(telemetry.SpanOptions{Name: "unreadable-status"}, func(s *telemetry.Span) error {
+				s.SetStatusFrom(func() telemetry.SpanStatus { reads++; panic("unreadable status") })
+				return failure
+			})
+			check(err == failure && reads == 1, "status read changed callback failure or was not admitted")
+			check(find(f, "unreadable-status").Status.Status == "error", "failed status read suppressed automatic failure")
+		}),
+		makeCase("status", "normalizes readable status names and preserves explicit precedence", func(f *AdapterFixture) {
+			for _, status := range []string{"", "invalid", "OK"} {
+				name := "normalized-" + status
+				failure := &unreadableError{}
+				details := &telemetry.ErrorDetails{Name: "Explicit", Message: "kept"}
+				err := f.Context.StartSpan(telemetry.SpanOptions{Name: name}, func(s *telemetry.Span) error {
+					s.SetStatus(telemetry.SpanStatus{Status: status, Error: details})
+					details.Message = "changed caller value"
+					return failure
+				})
+				check(err == failure, "normalization changed callback error")
+				equal(find(f, name).Status, telemetry.SpanStatus{Status: "error", Error: &telemetry.ErrorDetails{Name: "Explicit", Message: "kept"}})
+			}
 		}),
 	}
 }

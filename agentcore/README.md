@@ -32,7 +32,7 @@ only this file knows is a rule that drifts:
 | `TestKernelNamesNoPlugin` | no `plugins/` import from the root package |
 | `TestKernelIsAModuleLeaf` | no in-module import at all |
 | `TestKernelTreeHoldsOnlyDeclaredBoundaries` | only the declared `engine/`, `plugins/`, and `integration/` boundaries sit below the root |
-| `TestNativeEngineNamesNoHost` | the native engine directly imports only AI/telemetry modules and libraries; it cannot launch a subprocess or import host policy |
+| `TestNativeEngineNamesNoHost` | the native engine directly imports only AI/telemetry modules, the shared JSON value codec, and libraries; it cannot launch a subprocess or import host policy |
 | `TestEveryKernelFileJustifiesItself` | every root `.go` file has a row below |
 | `TestPluginsDoNotNameEachOther` | no plugin imports a sibling (except `preset`) |
 | `TestEveryPluginDocumentsItself` | every plugin folder has a `README.md` |
@@ -85,7 +85,7 @@ cannot give one belongs in a plugin, or belongs nowhere.
 |---|---|
 | [`doc.go`](doc.go) | **contract** — the package doc: the two boundary rules, the three kinds of plugin contribution, and the layer map below rendered where `go doc` can see it. No code. |
 | [`provider.go`](provider.go) | **contract** — `LLMProvider`, `ChatRequest/ChatResponse`, `Usage`, and provider-neutral text/image `ContentPart`s. The wire seam every model call goes through, kept small enough that an implementation is a translation layer and nothing more. |
-| [`pi.go`](pi.go) | **contract** — `NewPi` and `PiAgent` transport the pinned, unchanged TypeScript Agent's public operations, native JSON provider/tool callbacks, and awaited events to Go hosts. `pi.ts` and `telemetry.ts` expose the original TypeScript APIs. The existing Go `Agent` remains a separate implementation until host policies and persistence are migrated. Build and verification: [`third_party/pi`](../third_party/pi/README.md). |
+| [`pi.go`](pi.go) | **contract** — transitional `NewPi` and `PiAgent` transport the pinned TypeScript Agent's public operations, JSON provider/tool callbacks, and awaited events to existing Go hosts. The native replacement is [`engine/`](engine/); reference bundles build directly from pinned sources under [`third_party/pi`](../third_party/pi/README.md). |
 | [`provider_session.go`](provider_session.go) | **contract + seam default** — provider-private conversation state with selective account-rotation reset, plus the bounded lease-aware in-process registry. The loop carries the session on every request; providers own the concrete records, and a cache miss may cost discovery but never change correctness. |
 | [`plugin.go`](plugin.go) | **loop** — `Plugin`, `Registry`, `Priority`. The composition surface itself: seam setters, additive contributions, per-plugin `Unload`. |
 | [`compose.go`](compose.go) | **loop** — `Build`, `BuildRegistry`, `ApplyConfig`, and `Limits`/`DefaultLimits`: the run's bounds are chosen at composition, read every turn, and published to extensions through `RunInfo`. There is no composition in which a run is unbounded. |

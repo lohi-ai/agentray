@@ -1,0 +1,252 @@
+{
+  "contract_version": 1,
+  "status": "frozen plan contract; synthetic fixtures; not runtime evidence",
+  "digest_note": "binding_digest is a synthetic opaque fixture value, not a claim about an installed binding",
+  "legacy_batch": {
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "connector_id": "00000000-0000-4000-8000-000000000002",
+    "table": "legacy_orders",
+    "rows": [
+      {
+        "key": "1",
+        "cursor": "",
+        "data": {
+          "amount_vnd": 100000,
+          "id": 1,
+          "payment_status": "completed"
+        }
+      }
+    ]
+  },
+  "batches": [
+    {
+      "protocol": "agentray.connector.snapshot.v1",
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "kind": "batch",
+      "run_id": "00000000-0000-4000-8000-000000000005",
+      "batch_id": "batch-000000",
+      "batch_index": 0,
+      "payload_sha256": "0aec0868e06383679d6599a22a8fd5d35618a3b3dcdbb6b305a0d71f53f64fcf",
+      "capture_finished_at": null,
+      "rows": [
+        {
+          "key": "1",
+          "cursor": "",
+          "data": {
+            "amount_vnd": 100000,
+            "id": 1,
+            "payment_status": "completed"
+          }
+        }
+      ]
+    },
+    {
+      "protocol": "agentray.connector.snapshot.v1",
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "kind": "batch",
+      "run_id": "00000000-0000-4000-8000-000000000006",
+      "batch_id": "batch-000001",
+      "batch_index": 1,
+      "payload_sha256": "2e2da584e7ad9de0e56ad38843bb20b945660738b570fe39e0786bf984f03f7a",
+      "capture_finished_at": null,
+      "rows": [
+        {
+          "key": "2",
+          "cursor": "",
+          "data": {
+            "amount_vnd": 200000,
+            "id": 2,
+            "payment_status": "pending"
+          }
+        }
+      ]
+    }
+  ],
+  "complete": {
+    "protocol": "agentray.connector.snapshot.v1",
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "connector_id": "00000000-0000-4000-8000-000000000002",
+    "table": "exports.topups_v1",
+    "sync_id": "00000000-0000-4000-8000-000000000003",
+    "generation": "00000000-0000-4000-8000-000000000004",
+    "generation_seq": 1,
+    "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+    "capture_started_at": "2026-10-01T00:00:00Z",
+    "kind": "complete",
+    "run_id": "00000000-0000-4000-8000-000000000006",
+    "expected_batches": 2,
+    "expected_rows": 2,
+    "batch_manifest_sha256": "f52627c82e7b54eca7c861082e57612713fe517d38f3afc8f4617980171e1e87",
+    "capture_finished_at": "2026-10-01T00:05:00Z"
+  },
+  "empty_complete": {
+    "protocol": "agentray.connector.snapshot.v1",
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "connector_id": "00000000-0000-4000-8000-000000000002",
+    "table": "exports.topups_v1",
+    "sync_id": "00000000-0000-4000-8000-000000000003",
+    "generation": "00000000-0000-4000-8000-000000000007",
+    "generation_seq": 2,
+    "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+    "capture_started_at": "2026-10-02T00:00:00Z",
+    "kind": "complete",
+    "run_id": "00000000-0000-4000-8000-000000000006",
+    "expected_batches": 0,
+    "expected_rows": 0,
+    "batch_manifest_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "capture_finished_at": "2026-10-02T00:00:01Z"
+  },
+  "local_promotion": {
+    "project_id": "00000000-0000-4000-8000-000000000001",
+    "connector_id": "00000000-0000-4000-8000-000000000002",
+    "table": "exports.topups_v1",
+    "sync_id": "00000000-0000-4000-8000-000000000003",
+    "generation": "00000000-0000-4000-8000-000000000004",
+    "generation_seq": 1,
+    "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+    "capture_started_at": "2026-10-01T00:00:00Z",
+    "capture_finished_at": "2026-10-01T00:05:00Z",
+    "promoted_at": "2026-10-01T00:05:03Z",
+    "expected_batches": 2,
+    "expected_rows": 2,
+    "batch_manifest_sha256": "f52627c82e7b54eca7c861082e57612713fe517d38f3afc8f4617980171e1e87"
+  },
+  "eligibility_descriptors": {
+    "resumable": {
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "state": "yielded",
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:02:00Z",
+      "terminal_at": null,
+      "capture_finished_at": null,
+      "resumable": true,
+      "is_active_on_this_store": false,
+      "has_unpublished_outbox": false
+    },
+    "cancelled": {
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "state": "cancelled",
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:02:00Z",
+      "terminal_at": "2026-10-01T00:03:00Z",
+      "capture_finished_at": null,
+      "resumable": false,
+      "is_active_on_this_store": false,
+      "has_unpublished_outbox": false
+    },
+    "failed_with_pending_outbox": {
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "state": "failed",
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:02:00Z",
+      "terminal_at": "2026-10-01T00:03:00Z",
+      "capture_finished_at": null,
+      "resumable": false,
+      "is_active_on_this_store": false,
+      "has_unpublished_outbox": true
+    },
+    "active_complete": {
+      "project_id": "00000000-0000-4000-8000-000000000001",
+      "connector_id": "00000000-0000-4000-8000-000000000002",
+      "table": "exports.topups_v1",
+      "sync_id": "00000000-0000-4000-8000-000000000003",
+      "generation": "00000000-0000-4000-8000-000000000004",
+      "generation_seq": 1,
+      "binding_digest": "e247048e25f84f283f62dfb96b9d427a91dd04d6638106f51584f7055e9174df",
+      "capture_started_at": "2026-10-01T00:00:00Z",
+      "state": "sealed",
+      "created_at": "2026-10-01T00:00:00Z",
+      "updated_at": "2026-10-01T00:02:00Z",
+      "terminal_at": "2026-10-01T00:05:00Z",
+      "capture_finished_at": "2026-10-01T00:05:00Z",
+      "resumable": false,
+      "is_active_on_this_store": true,
+      "has_unpublished_outbox": false
+    }
+  },
+  "delivery_cases": [
+    {
+      "name": "complete-after-two-runs",
+      "order": [
+        "batches[0]",
+        "batches[1]",
+        "complete"
+      ],
+      "expect": "promote exactly once at complete"
+    },
+    {
+      "name": "missing-middle",
+      "order": [
+        "batches[0]",
+        "complete"
+      ],
+      "expect": "no promotion; preserve prior complete"
+    },
+    {
+      "name": "late-batch",
+      "order": [
+        "complete",
+        "batches[1]",
+        "batches[0]"
+      ],
+      "expect": "promote only when last required batch lands"
+    },
+    {
+      "name": "replay",
+      "order": [
+        "batches[0]",
+        "batches[1]",
+        "complete",
+        "batches[0]",
+        "complete"
+      ],
+      "expect": "same active generation/totals; no extra promotion"
+    },
+    {
+      "name": "empty-newer",
+      "order": [
+        "batches[0]",
+        "batches[1]",
+        "complete",
+        "empty_complete",
+        "complete"
+      ],
+      "expect": "empty generation 2 remains active; old generation replay cannot restore rows"
+    }
+  ]
+}

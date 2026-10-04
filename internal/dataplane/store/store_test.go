@@ -242,6 +242,73 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 	}
 }
 
+func TestScopedReadonlySQLMasksDollarStringsAndNestedComments(t *testing.T) {
+	allowed := []string{
+		`SELECT $$can't$$ AS value FROM events LIMIT 1`,
+		`SELECT $note$FROM external_rows isn't a source$note$ AS value FROM events LIMIT 1`,
+		`SELECT 1 AS value /* outer /* inner */ ' */ FROM events LIMIT 1`,
+	}
+	for _, query := range allowed {
+		scoped, _, err := scopedReadonlySQL(query, "project-1", nil)
+		if err != nil {
+			t.Errorf("valid quoted/commented query rejected (%v): %s", err, query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("real events source was not scoped: %s", scoped)
+		}
+	}
+
+	unsourced := []string{
+		`SELECT $$FROM events$$ AS value`,
+		`SELECT 1 /* outer /* FROM events */ still hidden */`,
+	}
+	for _, query := range unsourced {
+		if _, _, err := scopedReadonlySQL(query, "project-1", nil); err == nil {
+			t.Errorf("source hidden in a quoted/commented span was accepted: %s", query)
+		}
+	}
+}
+
+func TestScopedReadonlySQLKeepsDollarQuotedSyntaxInsideIdentifiersVisible(t *testing.T) {
+	for _, alias := range []string{"é$tag$", "a$tag$$tag$"} {
+		query := "SELECT 1 AS " + alias + " FROM events LIMIT 1"
+		scoped, _, err := scopedReadonlySQL(query, "project-1", nil)
+		if err != nil {
+			t.Errorf("valid dollar-bearing identifier rejected (%v): %s", err, query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("real events source was not scoped: %s", scoped)
+		}
+	}
+}
+
+func TestScopedReadonlySQLDistinguishesOrdinaryAndEscapeStrings(t *testing.T) {
+	ordinary := `SELECT '\' AS slash FROM events LIMIT 1`
+	query, args, err := scopedReadonlySQL(ordinary, "project-1", nil)
+	if err != nil {
+		t.Fatalf("ordinary backslash literal rejected: %v", err)
+	}
+	if !strings.Contains(query, `SELECT '\' AS slash FROM scoped_events`) {
+		t.Fatalf("ordinary backslash consumed its closing quote: %s", query)
+	}
+	if len(args) != 1 || args[0] != "project-1" {
+		t.Fatalf("ordinary backslash args = %#v", args)
+	}
+
+	// E-strings deliberately retain backslash escaping, so an escaped quote
+	// cannot expose source-looking text inside the literal to the rewriter.
+	escaped := `SELECT E'it\'s FROM events' AS note FROM events LIMIT 1`
+	query, _, err = scopedReadonlySQL(escaped, "project-1", nil)
+	if err != nil {
+		t.Fatalf("escape string rejected: %v", err)
+	}
+	if strings.Count(query, "scoped_events") != 2 { // one CTE definition + one rewritten source
+		t.Fatalf("source-looking text inside E-string was rewritten: %s", query)
+	}
+}
+
 // Only FROM events is rewritten, so `… JOIN events` would read the bare table
 // cross-tenant — it must stay rejected even when external_rows is present.
 func TestScopedReadonlySQLRejectsEventsJoinedOntoExternalRows(t *testing.T) {

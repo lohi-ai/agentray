@@ -142,6 +142,33 @@ func TestMCPToolsCall(t *testing.T) {
 	}
 }
 
+func TestMCPStructuredContentPreservesExactIntegers(t *testing.T) {
+	reg := NewRegistry()
+	Register(reg, Operation[struct{}, struct {
+		Value int64 `json:"value"`
+	}]{
+		Name: "exact", Access: AccessAnalyticsRead,
+		Handler: func(context.Context, CallContext, struct{}) (struct {
+			Value int64 `json:"value"`
+		}, error) {
+			return struct {
+				Value int64 `json:"value"`
+			}{Value: 9223372036854775807}, nil
+		},
+	})
+	e := echo.New()
+	MountMCP(e.Group("/mcp"), reg, struct{}{}, func(echo.Context) (Principal, error) {
+		return Principal{ProjectID: "project-1", Kind: CredManagement, Grants: []Access{AccessAnalyticsRead}}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"exact","arguments":{}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"structuredContent":{"value":9223372036854775807}`) {
+		t.Fatalf("structuredContent rounded exact integer: %s", rec.Body.String())
+	}
+}
+
 func TestMCPToolsCallMissingRequired(t *testing.T) {
 	e := mcpServer(t)
 	resp := post(t, e, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{}}}`, nil)

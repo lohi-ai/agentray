@@ -2,7 +2,6 @@ package ai
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 )
 
@@ -281,16 +280,12 @@ func (s *AssistantMessageEventStream) Synchronize(fn func()) {
 }
 
 // SnapshotEvent copies the payload as observed now, not at the original Push.
+// Shared message, block and usage objects remain shared within the snapshot.
 // Retained raw events still observe subsequent mutations, as in Pi.
 func (s *AssistantMessageEventStream) SnapshotEvent(event AssistantMessageEvent) (AssistantMessageEvent, error) {
 	s.payloadMu.Lock()
 	defer s.payloadMu.Unlock()
-	var snapshot AssistantMessageEvent
-	data, err := json.Marshal(event)
-	if err == nil {
-		err = json.Unmarshal(data, &snapshot)
-	}
-	return snapshot, err
+	return snapshotAssistantEvent(event), nil
 }
 
 func (s *AssistantMessageEventStream) SnapshotResult(ctx context.Context) (*Message, error) {
@@ -298,14 +293,8 @@ func (s *AssistantMessageEventStream) SnapshotResult(ctx context.Context) (*Mess
 	if err != nil || message == nil {
 		return message, err
 	}
-	s.payloadMu.Lock()
-	defer s.payloadMu.Unlock()
-	var snapshot Message
-	data, err := json.Marshal(message)
-	if err == nil {
-		err = json.Unmarshal(data, &snapshot)
-	}
-	return &snapshot, err
+	snapshot, err := s.SnapshotEvent(AssistantMessageEvent{Message: message})
+	return snapshot.Message, err
 }
 
 func NewAssistantMessageEventStream() *AssistantMessageEventStream {

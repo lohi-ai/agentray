@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,8 +26,8 @@ func TestPiFailureValues(t *testing.T) {
 		Model          json.RawMessage
 		Cases          []struct {
 			Input struct {
-				Name, Kind string
-				Value      any
+				Name, Kind, NativeType string
+				Value                  any
 			}
 			Expected json.RawMessage
 		}
@@ -34,7 +35,7 @@ func TestPiFailureValues(t *testing.T) {
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) < 16 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 34 {
 		t.Fatal("unexpected failure oracle revision or coverage")
 	}
 	for _, test := range fixture.Cases {
@@ -45,6 +46,59 @@ func TestPiFailureValues(t *testing.T) {
 				failure = errors.New(failure.(string))
 			case "number":
 				failure = ai.ParseJSNumber(failure.(string))
+			case "self-cycle":
+				value := []any{float64(1), nil, float64(2)}
+				value[1] = value
+				failure = value
+			case "mutual-cycle":
+				a := []any{float64(1), nil}
+				b := []any{float64(2), a}
+				a[1] = b
+				failure = a
+			case "empty-cycle":
+				value := make([]any, 1)
+				value[0] = value
+				failure = value
+			case "shared-array":
+				child := []any{float64(1), float64(2)}
+				failure = []any{child, child}
+			}
+			switch test.Input.NativeType {
+			case "strings":
+				failure = []string{"a", "b"}
+			case "bools":
+				failure = []bool{true, false}
+			case "integers":
+				failure = []int64{1, 2, 3}
+			case "nested":
+				failure = [][]int{{1, 2}, {3}}
+			case "array":
+				failure = [2]string{"a", "b"}
+			case "bytes":
+				failure = []byte{65, 66}
+			case "nil-slice":
+				failure = []string(nil)
+			case "map":
+				failure = map[string]int{"code": 7}
+			case "float32":
+				failure = float32(failure.(float64))
+			case "int64":
+				value, err := strconv.ParseInt(test.Input.Value.(string), 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failure = value
+			case "uint64":
+				value, err := strconv.ParseUint(test.Input.Value.(string), 10, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				failure = value
+			case "named-cycle":
+				type array []any
+				value := array{float64(1), nil, float64(2)}
+				value[1] = value
+				failure = value
 			}
 			agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: fixture.Model}, AgentConfig: engine.AgentConfig{
 				Config: engine.Config{Now: func() int64 { return 1700000000123 }},
@@ -66,11 +120,11 @@ func TestPiFailureValues(t *testing.T) {
 			}
 			outcomes := map[string]engine.ToolOutcome{}
 			for _, stage := range []string{"prepare", "before", "execute", "after"} {
-				tool := engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(context.Context, string, json.RawMessage, func(engine.ToolResult)) (engine.ToolResult, error) {
+				tool := &engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
 					if stage == "execute" {
 						panic(failure)
 					}
-					return engine.ToolResult{Content: []ai.ContentBlock{}, Details: json.RawMessage(`{}`)}, nil
+					return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
 				}}
 				hooks := engine.ToolHooks{}
 				if stage == "prepare" {
@@ -83,13 +137,13 @@ func TestPiFailureValues(t *testing.T) {
 					hooks.After = func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) { panic(failure) }
 				}
 				call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-				outcome, err := engine.RunToolCall(context.Background(), call, []engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, hooks, nil)
+				outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, hooks, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 				outcomes[stage] = outcome
 			}
-			actual, err := json.Marshal(map[string]any{"events": events, "state": agent.State(), "tools": outcomes})
+			actual, err := json.Marshal(map[string]any{"events": events, "state": agentFixtureState(agent.State()), "tools": outcomes})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,21 +183,21 @@ func TestPiToolUpdateFailures(t *testing.T) {
 		t.Run(test.Mode, func(t *testing.T) {
 			failure := errors.New("update failed")
 			continued, caught, after := false, false, false
-			tool := engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ json.RawMessage, update func(engine.ToolResult)) (engine.ToolResult, error) {
-				invoke := func() { update(engine.ToolResult{Content: []ai.ContentBlock{}, Details: json.RawMessage(`{}`)}) }
+			tool := &engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
+				invoke := func() { update(&engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}) }
 				if test.Mode == "caught" {
 					func() { defer func() { caught = recover() == failure }(); invoke() }()
 				} else {
 					invoke()
 				}
 				continued = true
-				return engine.ToolResult{Content: []ai.ContentBlock{}, Details: json.RawMessage(`{}`)}, nil
+				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
 			}}
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-			outcome, err := engine.RunToolCall(context.Background(), call, []engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
+			outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
 				after = true
 				return nil, nil
-			}}, func(engine.ToolResult) error {
+			}}, func(*engine.ToolResult) error {
 				if test.Mode == "async" {
 					return failure
 				}
@@ -200,27 +254,27 @@ func TestPiPendingToolUpdates(t *testing.T) {
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			defer unblock()
 			var after atomic.Bool
-			tool := engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ json.RawMessage, update func(engine.ToolResult)) (engine.ToolResult, error) {
+			tool := &engine.Tool{Tool: ai.Tool{Name: "tool", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(_ context.Context, _ string, _ any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				defer close(executed)
-				go func() { defer close(firstDone); update(engine.ToolResult{Details: json.RawMessage(`{"id":"first"}`)}) }()
+				go func() { defer close(firstDone); update(&engine.ToolResult{Details: argumentRef(`{"id":"first"}`)}) }()
 				<-entered
 				if late {
 					go func() {
 						defer close(secondDone)
-						update(engine.ToolResult{Details: json.RawMessage(`{"id":"second"}`)})
+						update(&engine.ToolResult{Details: argumentRef(`{"id":"second"}`)})
 					}()
 					<-secondEntered
 				} else if test.Mode == "update-error" || test.Mode == "tool-and-update-error" || test.Mode == "already-rejected-order" {
-					update(engine.ToolResult{Details: json.RawMessage(`{"id":"second"}`)})
+					update(&engine.ToolResult{Details: argumentRef(`{"id":"second"}`)})
 				}
 				if test.Mode == "already-rejected-order" {
 					unblock()
 					<-firstDone
 				}
 				if test.Mode == "tool-error" || test.Mode == "tool-and-update-error" || test.Mode == "late-tool-and-update-error" {
-					return engine.ToolResult{}, toolError
+					return &engine.ToolResult{}, toolError
 				}
-				return engine.ToolResult{Content: []ai.ContentBlock{}, Details: json.RawMessage(`{}`)}, nil
+				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
 			}}
 			type completion struct {
 				outcome engine.ToolOutcome
@@ -229,11 +283,11 @@ func TestPiPendingToolUpdates(t *testing.T) {
 			done := make(chan completion, 1)
 			go func() {
 				call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-				outcome, err := engine.RunToolCall(context.Background(), call, []engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
+				outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
 					after.Store(true)
 					return nil, nil
-				}}, func(result engine.ToolResult) error {
-					if string(result.Details) == `{"id":"first"}` {
+				}}, func(result *engine.ToolResult) error {
+					if argumentJSON(t, result.Details) == `{"id":"first"}` {
 						close(entered)
 						<-release
 						if test.Mode == "already-rejected-order" {

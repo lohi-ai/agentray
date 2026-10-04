@@ -15,6 +15,7 @@ import (
 )
 
 type toolSpec struct {
+	RawParameters      string                     `json:"rawParameters"`
 	AfterContextResult *engine.ToolResult         `json:"afterContextResult"`
 	Name               string                     `json:"name"`
 	Label              string                     `json:"label"`
@@ -37,31 +38,43 @@ type toolSpec struct {
 }
 
 type loopInput struct {
-	RetainAfterResults bool                 `json:"retainAfterResults"`
-	Name               string               `json:"name"`
-	Prompts            []ai.Message         `json:"prompts"`
-	Messages           []ai.Message         `json:"messages"`
-	Tools              []toolSpec           `json:"tools"`
-	Responses          []ai.Message         `json:"responses"`
-	Resume             bool                 `json:"resume"`
-	ConvertCustom      bool                 `json:"convertCustom"`
-	TransformPrefix    *ai.Message          `json:"transformPrefix"`
-	StreamPartial      bool                 `json:"streamPartial"`
-	OmitTerminal       bool                 `json:"omitTerminal"`
-	Decisions          []string             `json:"decisions"`
-	Steering           [][]ai.Message       `json:"steering"`
-	FollowUps          [][]ai.Message       `json:"followUps"`
-	NextUpdates        []*engine.TurnUpdate `json:"nextUpdates"`
-	RequestUpdates     []*engine.TurnUpdate `json:"requestUpdates"`
-	Reasoning          string               `json:"reasoning"`
-	APIKeys            []string             `json:"apiKeys"`
-	APIKey             *string              `json:"apiKey"`
-	RecordHooks        bool                 `json:"recordHooks"`
-	Mode               string               `json:"mode"`
-	WaitForSecond      bool                 `json:"waitForSecond"`
-	CancelBefore       string               `json:"cancelBefore"`
-	OmitStream         bool                 `json:"omitStream"`
-	FailEvent          string               `json:"failEvent"`
+	MessageMutationAt   string                     `json:"messageMutationAt"`
+	MessageMutationRole string                     `json:"messageMutationRole"`
+	MessageMutation     map[string]json.RawMessage `json:"messageMutation"`
+	RetainedEndAt       string                     `json:"retainedEndAt"`
+	RetainedEndTrigger  string                     `json:"retainedEndTrigger"`
+	RetainedEndTarget   string                     `json:"retainedEndTarget"`
+	RetainedEndMutation map[string]json.RawMessage `json:"retainedEndMutation"`
+	RetainedEndDelete   []string                   `json:"retainedEndDelete"`
+	EndMutation         map[string]json.RawMessage `json:"endMutation"`
+	EndDeleteResult     []string                   `json:"endDeleteResult"`
+	EndReplacement      *engine.ToolResult         `json:"endReplacement"`
+	EndIsError          *bool                      `json:"endIsError"`
+	RetainAfterResults  bool                       `json:"retainAfterResults"`
+	Name                string                     `json:"name"`
+	Prompts             []*ai.Message              `json:"prompts"`
+	Messages            []*ai.Message              `json:"messages"`
+	Tools               []toolSpec                 `json:"tools"`
+	Responses           []ai.Message               `json:"responses"`
+	Resume              bool                       `json:"resume"`
+	ConvertCustom       bool                       `json:"convertCustom"`
+	TransformPrefix     *ai.Message                `json:"transformPrefix"`
+	StreamPartial       bool                       `json:"streamPartial"`
+	OmitTerminal        bool                       `json:"omitTerminal"`
+	Decisions           []string                   `json:"decisions"`
+	Steering            [][]*ai.Message            `json:"steering"`
+	FollowUps           [][]*ai.Message            `json:"followUps"`
+	NextUpdates         []*engine.TurnUpdate       `json:"nextUpdates"`
+	RequestUpdates      []*engine.TurnUpdate       `json:"requestUpdates"`
+	Reasoning           string                     `json:"reasoning"`
+	APIKeys             []string                   `json:"apiKeys"`
+	APIKey              *string                    `json:"apiKey"`
+	RecordHooks         bool                       `json:"recordHooks"`
+	Mode                string                     `json:"mode"`
+	WaitForSecond       bool                       `json:"waitForSecond"`
+	CancelBefore        string                     `json:"cancelBefore"`
+	OmitStream          bool                       `json:"omitStream"`
+	FailEvent           string                     `json:"failEvent"`
 }
 
 func TestPiLoopOracle(t *testing.T) {
@@ -79,7 +92,7 @@ func TestPiLoopOracle(t *testing.T) {
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) < 38 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 143 {
 		t.Fatal("unexpected oracle revision or coverage")
 	}
 	for _, tc := range fixture.Cases {
@@ -117,6 +130,17 @@ func runFixture(t *testing.T, input loopInput) []byte {
 	executed := []string{}
 	afterResults := []*engine.ToolResult{}
 	late := []func(){}
+	cloneResult := func(value *engine.ToolResult) *engine.ToolResult {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			panic(err)
+		}
+		var result *engine.ToolResult
+		if err := json.Unmarshal(raw, &result); err != nil {
+			panic(err)
+		}
+		return result
+	}
 	add := func(target *[]json.RawMessage, value any) {
 		raw, err := json.Marshal(value)
 		if err != nil {
@@ -127,34 +151,37 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		mu.Unlock()
 	}
 	secondDone := make(chan struct{})
-	tools := make([]engine.Tool, 0, len(input.Tools))
+	tools := make([]*engine.Tool, 0, len(input.Tools))
 	for _, spec := range input.Tools {
-		tool := engine.Tool{Tool: ai.Tool{Name: spec.Name, Description: spec.Description, Parameters: spec.Parameters}, ExecutionMode: spec.ExecutionMode}
+		if spec.RawParameters != "" {
+			spec.Parameters = json.RawMessage(spec.RawParameters)
+		}
+		tool := &engine.Tool{Tool: ai.Tool{Name: spec.Name, Description: spec.Description, Parameters: spec.Parameters}, ExecutionMode: spec.ExecutionMode}
 		if spec.Prepare != nil {
 			tool.PrepareArguments = func(json.RawMessage) (json.RawMessage, error) { return slices.Clone(spec.Prepare), nil }
 		}
-		tool.Execute = func(_ context.Context, id string, args json.RawMessage, update func(engine.ToolResult)) (engine.ToolResult, error) {
+		tool.Execute = func(_ context.Context, id string, args any, update func(*engine.ToolResult)) (*engine.ToolResult, error) {
 			mu.Lock()
 			executed = append(executed, id)
 			mu.Unlock()
 			for _, partial := range spec.Updates {
-				update(partial)
+				update(cloneResult(&partial))
 			}
 			if spec.LateUpdate != nil {
 				mu.Lock()
-				late = append(late, func() { update(*spec.LateUpdate) })
+				late = append(late, func() { update(cloneResult(spec.LateUpdate)) })
 				mu.Unlock()
 			}
 			if input.WaitForSecond && id == "one" {
 				<-secondDone
 			}
 			if spec.Failure != "" {
-				return engine.ToolResult{}, errors.New(spec.Failure)
+				return &engine.ToolResult{}, errors.New(spec.Failure)
 			}
 			if spec.Result != nil {
-				return *spec.Result, nil
+				return cloneResult(spec.Result), nil
 			}
-			return engine.ToolResult{Content: []ai.ContentBlock{{Type: "text", Text: string(args)}}, Details: json.RawMessage(`{}`)}, nil
+			return &engine.ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: argumentJSON(t, args)}}, Details: argumentRef(`{}`)}, nil
 		}
 		tools = append(tools, tool)
 	}
@@ -163,9 +190,9 @@ func runFixture(t *testing.T, input loopInput) []byte {
 	if input.APIKey != nil {
 		config.Options["apiKey"] = *input.APIKey
 	}
-	config.ConvertToLLM = func(messages []ai.Message) ([]ai.Message, error) {
+	config.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
 		roles := []string{}
-		result := slices.Clone(messages)
+		result := engine.MessagePointers(engine.MessageValues(messages))
 		for i, message := range messages {
 			roles = append(roles, message.Role)
 			if input.ConvertCustom && message.Role == "custom" {
@@ -176,13 +203,13 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		return result, nil
 	}
 	if input.TransformPrefix != nil {
-		config.TransformContext = func(_ context.Context, messages []ai.Message) ([]ai.Message, error) {
+		config.TransformContext = func(_ context.Context, messages []*ai.Message) ([]*ai.Message, error) {
 			add(&hooks, map[string]any{"hook": "transform"})
-			return append([]ai.Message{*input.TransformPrefix}, messages...), nil
+			return append([]*ai.Message{input.TransformPrefix}, messages...), nil
 		}
 	}
 	steering, follow, finish, next, request, key := 0, 0, 0, 0, 0, 0
-	config.GetSteeringMessages = func() ([]ai.Message, error) {
+	config.GetSteeringMessages = func() ([]*ai.Message, error) {
 		add(&hooks, map[string]any{"hook": "steering"})
 		defer func() { steering++ }()
 		if steering < len(input.Steering) {
@@ -190,7 +217,7 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		}
 		return nil, nil
 	}
-	config.GetFollowUpMessages = func() ([]ai.Message, error) {
+	config.GetFollowUpMessages = func() ([]*ai.Message, error) {
 		add(&hooks, map[string]any{"hook": "followUp"})
 		defer func() { follow++ }()
 		if follow < len(input.FollowUps) {
@@ -252,20 +279,12 @@ func runFixture(t *testing.T, input loopInput) []byte {
 			}
 			spec := find(call.ToolCall.Name)
 			if spec.BeforeArgs != nil || spec.BeforeDeleteArgs != nil {
-				var args map[string]json.RawMessage
-				if err := json.Unmarshal(call.Args, &args); err != nil {
-					return nil, err
-				}
+				args := call.Args.(*engine.Object)
 				for key, value := range spec.BeforeArgs {
-					args[key] = value
+					args.Set(key, argumentRef(string(value)))
 				}
 				for _, key := range spec.BeforeDeleteArgs {
-					delete(args, key)
-				}
-				var err error
-				call.Args, err = json.Marshal(args)
-				if err != nil {
-					return nil, err
+					args.Delete(key)
 				}
 			}
 			if spec.BeforeFailure != "" {
@@ -342,17 +361,70 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		}
 		return result, nil
 	}
+	endResults := map[string]*engine.ToolResult{}
+	var endMu sync.Mutex
+	messageMutated := false
 	sink := func(event engine.Event) error {
 		add(&events, event)
+		endMu.Lock()
+		defer endMu.Unlock()
+		if !messageMutated && event.Type == input.MessageMutationAt && event.Message != nil && event.Message.Role == input.MessageMutationRole {
+			raw, err := json.Marshal(event.Message)
+			if err != nil {
+				return err
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &fields); err != nil {
+				return err
+			}
+			for key, value := range input.MessageMutation {
+				fields[key] = value
+			}
+			raw, err = json.Marshal(fields)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(raw, event.Message); err != nil {
+				return err
+			}
+			messageMutated = true
+		}
 		if event.Type == input.FailEvent {
 			return errors.New("sink failed")
+		}
+		if event.Type == "tool_execution_end" {
+			if input.EndMutation != nil || input.EndDeleteResult != nil {
+				if err := mutateFixtureToolResult(event.Result, input.EndMutation, input.EndDeleteResult); err != nil {
+					return err
+				}
+			}
+			if input.EndReplacement != nil {
+				event.Result = input.EndReplacement
+			}
+			if input.EndIsError != nil {
+				event.IsError = *input.EndIsError
+			}
+			endResults[event.ToolCallID] = event.Result
+		}
+		id := event.ToolCallID
+		if event.Message != nil {
+			id = event.Message.ToolCallID
+		}
+		if event.Type == input.RetainedEndAt && id == input.RetainedEndTrigger {
+			retained := endResults[input.RetainedEndTarget]
+			if retained == nil {
+				return errors.New("missing retained tool result")
+			}
+			if err := mutateFixtureToolResult(retained, input.RetainedEndMutation, input.RetainedEndDelete); err != nil {
+				return err
+			}
 		}
 		if event.Type == "tool_execution_end" && event.ToolCallID == "two" && input.WaitForSecond {
 			close(secondDone)
 		}
 		return nil
 	}
-	var messages []ai.Message
+	var messages []*ai.Message
 	var err error
 	current := engine.Context{Messages: input.Messages, Tools: tools}
 	if input.OmitStream {
@@ -381,4 +453,26 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		t.Fatal(marshalErr)
 	}
 	return raw
+}
+
+func mutateFixtureToolResult(result *engine.ToolResult, mutations map[string]json.RawMessage, deleted []string) error {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	for key, value := range mutations {
+		fields[key] = value
+	}
+	for _, key := range deleted {
+		delete(fields, key)
+	}
+	raw, err = json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, result)
 }

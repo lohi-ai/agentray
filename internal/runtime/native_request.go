@@ -94,7 +94,7 @@ func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRu
 	if err = check(); err != nil {
 		return prepared, err
 	}
-	messages := prepared.request.Context.Messages
+	messages := engine.MessageValues(prepared.request.Context.Messages)
 	for _, method := range []string{"transformContext", "convertToLlm"} {
 		if !s.callbacks[method] {
 			if method == "convertToLlm" {

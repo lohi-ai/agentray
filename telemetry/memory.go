@@ -98,13 +98,18 @@ func (s *Span) SetAttributes(attributes Attributes) {
 	// Copy the entire incoming payload before merging, so invalid input cannot
 	// leave a partially applied mutation.
 	if copied, ok := copyAttributes(attributes); ok {
-		for key, value := range copied {
-			s.context.parent.Attributes[key] = value
+		for _, property := range copied.Entries() {
+			s.context.parent.Attributes.Set(property.Name, property.Value)
 		}
 	}
 }
 
 func (s *Span) SetStatus(status SpanStatus) {
+	// Pi ignores null because reading status.status throws. A readable empty
+	// object is different: it normalizes to an explicit error status.
+	if status.nullInput && status.Status == "" && status.Error == nil {
+		return
+	}
 	if s != nil && s.callbacks.SetStatus != nil {
 		s.callbacks.SetStatus(status)
 		return
@@ -114,11 +119,45 @@ func (s *Span) SetStatus(status SpanStatus) {
 	}
 	s.context.state.mu.Lock()
 	defer s.context.state.mu.Unlock()
-	if s.context.parent.Settled || (status.Status != "ok" && status.Status != "error") {
+	if s.context.parent.Settled {
 		return
 	}
 	s.context.parent.Status = copyStatus(status)
 	s.context.parent.explicitStatus = true
+}
+
+// SetStatusFrom reads a status only when recording is active. It is the Go
+// equivalent of Pi reading a status object with user-defined getters. A reader
+// panic is passive: no outer status/explicit-status change is applied, while
+// the reader's own reentrant mutations remain. Readers run without the recorder
+// lock, so they may record events, set a nested status or inspect snapshots.
+// Concurrent settlement wins over a reader that has not yet returned.
+// Callback backends implement admission through SpanCallbacks.SetStatusFrom.
+func (s *Span) SetStatusFrom(read func() SpanStatus) {
+	if s == nil {
+		return
+	}
+	if s.callbacks.SetStatusFrom != nil {
+		s.callbacks.SetStatusFrom(read)
+		return
+	}
+	if s.context.state == nil {
+		return
+	}
+	s.context.state.mu.Lock()
+	settled := s.context.parent.Settled
+	s.context.state.mu.Unlock()
+	if settled {
+		return
+	}
+	if status, ok := readSpanStatus(read); ok {
+		s.SetStatus(status)
+	}
+}
+
+func readSpanStatus(read func() SpanStatus) (status SpanStatus, ok bool) {
+	defer func() { _ = recover() }()
+	return read(), true
 }
 
 func (s *Span) settle(failed bool, failure any) {
@@ -145,7 +184,9 @@ func (s *Span) settle(failed bool, failure any) {
 	s.context.state.mu.Unlock()
 }
 
-// GetSpans returns detached snapshots in start order, including active spans.
+// GetSpans returns snapshots in start order, including active spans. Attribute
+// maps and outer arrays are detached; nested objects/arrays remain shared, as
+// with Pi's shallow copy. Callers must synchronize edits to shared payloads.
 func (m *InMemory) GetSpans() []RecordedSpan {
 	if m == nil || m.state == nil {
 		return []RecordedSpan{}
@@ -178,8 +219,11 @@ func copyInt(value *int) *int {
 }
 
 func copyStatus(status SpanStatus) SpanStatus {
-	copy := SpanStatus{Status: status.Status}
-	if status.Status == "error" && status.Error != nil {
+	if status.Status == "ok" {
+		return SpanStatus{Status: "ok"}
+	}
+	copy := SpanStatus{Status: "error"}
+	if status.Error != nil {
 		details := *status.Error
 		copy.Error = &details
 	}

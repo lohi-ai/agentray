@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 )
@@ -26,27 +27,15 @@ func validationKeywordRank(keyword string) int {
 func validationObject(raw json.RawMessage) ([]string, map[string]json.RawMessage) {
 	keys := []string{}
 	values := map[string]json.RawMessage{}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	if token, err := d.Token(); err != nil || token != json.Delim('{') {
+	properties, err := jsonjs.DecodeObjectProperties(raw)
+	if err != nil {
 		return keys, values
 	}
-	for d.More() {
-		token, err := d.Token()
-		if err != nil {
-			break
+	for _, property := range properties {
+		if _, exists := values[property.Name]; !exists {
+			keys = append(keys, property.Name)
 		}
-		key, ok := token.(string)
-		if !ok {
-			break
-		}
-		var value json.RawMessage
-		if d.Decode(&value) != nil {
-			break
-		}
-		if _, exists := values[key]; !exists {
-			keys = append(keys, key)
-		}
-		values[key] = value
+		values[property.Name] = property.Value
 	}
 	return keys, values
 }
@@ -148,8 +137,16 @@ func orderedValidationLines(err *jsonschema.ValidationError, schema, arguments j
 		if keyword, property, repeats := validationDependency(e); keyword != "" {
 			_, fields := validationObject(node)
 			_, dependencies := validationObject(fields[keyword])
-			var required []string
-			_ = json.Unmarshal(dependencies[property], &required)
+			required := []string{}
+			if value, err := jsonjs.DecodeJSON(dependencies[property]); err == nil {
+				if names, ok := value.([]any); ok {
+					for _, name := range names {
+						if name, ok := name.(string); ok {
+							required = append(required, name)
+						}
+					}
+				}
+			}
 			diagnostic.message = "must have properties " + strings.Join(required, ", ") + " when property " + property + " is present"
 			// Legacy dependencies stops after the first missing key; the newer
 			// dependentRequired keyword emits one identical error per missing key.
@@ -271,7 +268,7 @@ func validationOrder(e *jsonschema.ValidationError, schema, instance json.RawMes
 				name := e.InstanceLocation[depth]
 				depth++
 				order = append(order, slices.Index(keys, name))
-				instance, _ = json.Marshal(name)
+				instance = jsonjs.QuoteString(name)
 			}
 		case "additionalProperties":
 			// The Go validator reports schema-valued additional-property failures

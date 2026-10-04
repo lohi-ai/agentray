@@ -104,7 +104,7 @@ func TestPiTranscriptOracle(t *testing.T) {
 			before, _ := json.Marshal(fixture.Messages)
 			var normalize ToolCallIDNormalizer
 			if fixture.Normalize {
-				normalize = func(id string, _ Model, _ Message) string { return "normalized:" + id }
+				normalize = func(id string, _ *Model, _ *Message) string { return "normalized:" + id }
 			}
 			actual := transformMessagesAt(fixture.Messages, fixture.Model, normalize, func() int64 { return fixture.Now })
 			assertPiJSON(t, fixture.Expected, actual)

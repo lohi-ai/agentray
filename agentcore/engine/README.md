@@ -34,9 +34,20 @@ continuation or reset is rejected until the last end subscriber settles.
 Run failures produce the original assistant error/aborted event sequence;
 admission errors and failures in that recovery sequence are returned to callers.
 
-The Go API uses `State()` snapshots and explicit state setters instead of a
-mutable JavaScript state object. These copy top-level arrays; nested message
-payloads, tool declarations and model JSON should be treated as immutable.
+The Go API uses `State()` snapshots for scalar state and explicit setters.
+Its `Messages` and `Tools` fields retain live `*MessageList`/`*ToolList`
+collections, and `StreamingMessage` retains the current event object.
+`Get`, `Set`, `Append`, `Delete`, `SetLength`, `Has` and `Keys` operate on
+those collections. `Values()` returns a detached dense slice of shared items;
+`Clone()` also preserves sparse slots. Container operations are synchronized;
+concurrent message/tool field edits still require caller synchronization.
+`SetMessages`/`SetTools` copy native slices; `SetMessageList`/`SetToolList`
+copy live collections, including holes. Replacing a collection detaches old
+retained lists; mutating a list through a state getter remains visible to the
+agent. Model JSON should be treated as immutable.
+`State.SystemPrompt()` replays that view's messages when called, and JSON state
+export includes the computed string. Simply obtaining a state view does not
+eagerly replay an incomplete history.
 `Listener` pointers provide stable subscription identity without a new
 interface. The live listener set supports removal/addition during delivery.
 `Configure` replaces wrapper options atomically. Most callbacks are captured
@@ -44,21 +55,162 @@ when a run starts; an installed next-turn preparation wrapper reads its latest
 callback, matching Pi. Context-aware preparation takes precedence over the
 legacy signal-only preparation callback.
 
+The loop and wrapper retain shared `*ai.Message` objects across contexts,
+turns, queued messages, lifecycle events and results. Initial/replaced histories
+copy the caller's pointer slice and preserve its message objects. A callback
+editing a retained message also changes that message in `context.messages`,
+`newMessages`, `toolResults`, subsequent requests and the wrapper's history.
+Assistant start/update events retain Pi's shallow top-level copy behavior.
+`State()` retains the wrapper's live collections; provider normalization projects values only
+after transformation, conversion and credential callbacks have settled.
+`MessagePointers` adapts existing value slices, and `MessageValues` creates
+top-level value snapshots. `Prompt` also accepts individual message pointers or
+pointer slices; `Steer`, `FollowUp` and `SetMessages` use references directly.
+
+Twenty-eight original-source cases compare constructor/setter copies, retained
+list identity, slot replacement, append/delete/grow/shrink, sparse assignment,
+item mutation and reset. Ninety run cases compare edits before/during/after a
+prompt, context snapshot isolation, live history publication and streaming
+message identity for terminal-only and partial/update streams. State edits made
+after admission do not replace already-snapshotted context slots; edits to their
+shared message/tool objects remain visible. Native race checks exercise
+concurrent list reads, cloning and appends. The outer `State` value still
+snapshots scalar fields, and core loop contexts still use Go slices; this is
+not a claim of full JavaScript state-object/array identity everywhere.
+
+Ninety-four additional original-source cases compare object identity, complete
+events, requests, returned messages, original prompts and wrapper history.
+They cover retained-pointer edits in finish/end/next/request/transform/convert/
+credential/steering callbacks and edits through context, new-message and tool
+result lists, including error and aborted turns. The earlier twenty-one loop
+and twelve Agent mutation cases still cover pending/prepared messages, both
+tool modes, partial/result-only streams and recovery. Array-length changes
+through retained Go slice headers and provider stream-object aliasing remain
+outside this coverage. Message edits belong to awaited callbacks; callers must
+synchronize concurrent access to shared payloads or retained pointers.
+
 Go contexts carry the active abort signal and parent values. `Abort` or parent
 cancellation cancels it. Successful settlement detaches from the parent without
 cancelling a saved subscriber signal. Cancelling a `WaitForIdle` wait only stops
 that wait. Hooks/listeners must not synchronously wait for the run they belong to.
+
+Tool lists use `[]*Tool` in `Context`, `InitialState`, `SetTools`
+and `RunToolCall`, and `*ToolList` in `State`. The wrapper copies assigned membership while retaining each
+tool object. Preparation selects that object before argument preparation and
+before-call hooks: mutating its executor changes execution, but replacing the
+list entry cannot switch an already-selected call to a different tool. This
+also keeps external edits visible after the wrapper copies or grows its lists.
+Sixty-seven original-source cases compare selected executors, returned results
+and retained/current tool identity across argument preparation, before-call
+hooks, list replacement/growth, sequential/parallel calls, direct `RunToolCall`,
+initial Agent tools and `SetTools`. Shared slice length semantics in core loop
+contexts remain outside this coverage; wrapper state collections are covered above.
 
 Tool preflight is ordered. Parallel tools finish independently and emit end
 events in completion order; result messages are appended in original call
 order. Any sequential tool serializes the whole batch. Every finalized result
 must request termination to stop the batch. Truncated assistant messages never
 execute their tool calls. Provider errors and aborts remain hard exits.
-`ToolHooks.Before` receives `*BeforeToolCall`: replacing its validated `Args`
-updates the JSON passed to execution and the after hook, without another schema
-validation. `ToolCall.Arguments` remains the original provider input in lifecycle
-events and traces. This is the Go equivalent of mutating Pi's validated argument
-object, covered by numeric/object replacements and required-key deletion.
+`BeforeToolCall.Args` and the argument passed to `Tool.Execute` hold
+`*Object`, `*Array`, or a primitive value. The engine builds the validated graph
+directly from decoded values; Before, execution and After retain the same object
+graph. Nested edits through `Object.Set/Delete` and `Array.Set/Append/SetLength` remain visible
+across these callbacks without schema revalidation. Replacing a hook's
+`Args` field or the executor's local argument stays local. Replacing a nested
+property detaches its old value from that property; retained references still
+point to the old value. `ToolCall.Arguments` stays the separate raw input used
+in lifecycle events and traces.
+
+Seventy-two original-source cases distinguish argument edits from field
+replacement in before/execute/after/update callbacks, including primitive
+arguments. Another 54 cover nested object edits, array growth, child replacement
+and edits through retained references during updates and after settlement in
+programmatic, sequential and parallel modes. Earlier validation fixtures still
+cover numeric/object edits and required-key deletion. Callers must synchronize
+concurrent access to shared values. The concrete containers and passive JSON
+codec live in `internal/jsonjs`, shared with telemetry; no interface hierarchy
+or runtime TypeScript dependency is introduced. Host callbacks serialize the
+graph only at their JSON transport boundary. Raw model arguments still use serialized JSON; arbitrary object prototypes
+and named array properties remain outside this representation.
+
+Validation now uses the shared JSON.parse value domain for both arguments and
+schema strings. Its working values preserve binary64 overflow, negative zero,
+signed underflow and lone UTF-16 surrogates. Union candidates use recursive
+container copies, and successful validation constructs the ordered execution
+graph directly; neither step serializes live values. Unconstrained nonfinite
+values survive into hooks and tools, finite number/integer schemas reject them,
+and string coercion produces `Infinity`/`-Infinity`. Numeric constraints use
+finite binary64 comparisons; string lengths count Unicode code points, including
+lone surrogates. Regex subjects use the same code points, and literal surrogate
+patterns are lowered without changing their diagnostic spelling.
+
+An additional 884 original-source cases compare argument JSON, in-memory
+float64 bits before and during execution, validation messages (including their
+UTF-16 contents before and after text-block export), and unchanged raw input.
+They cover root/nested inputs,
+unions, numeric bounds/divisibility, string bounds, literal/escaped/property
+regexes, surrogate object keys, required/dependency errors, enums and array
+checks. Object-field scanning preserves raw field values and distinct UTF-16
+keys instead of decoding names through `encoding/json`. These cases extend
+validation coverage; they do not prove the entire TypeBox schema surface or
+all JavaScript object/prototype behavior.
+
+`ToolResult.Details`, `ToolResult.StructuredContent` and `ai.Message.Details`
+now carry live JSON-shaped values. Nested objects and arrays retain identity
+through updates, after hooks, execution-end events and published tool messages.
+An override copies the result's outer struct and keeps unchanged nested values;
+replacing details detaches that field, while a content override removes stale
+structured content unless it also supplies non-null structured content.
+Use `NewObject`/`NewArray` and primitives for native construction. At these
+optional fields, nil or `Undefined` means omitted and `Null` means explicit
+JSON null; decoding preserves that distinction. Both null and undefined
+overrides fall back to the prior value, including when it is false or zero.
+
+Another 160 original-source cases cover shared and JSON-decoded graphs, retained
+nested edits, field replacement, null/content/empty overrides, update callbacks,
+events, history messages and edits after settlement in all three execution modes.
+Sixty-six JSON-value cases compare exact result JSON, optional-field state and
+in-memory number bits across missing/null/falsy/scalar/container/function inputs.
+Execution does not serialize results: cycles and function values can remain live,
+while explicit JSON export rejects cycles and omits function-valued properties.
+Native checks verify passive export without user serialization methods.
+Stream snapshots clone these graphs with memoized concrete containers, keeping
+cycles/repeated references inside a detached copy and retaining sparse arrays,
+nonfinite numbers and signed zero. The existing cross-event/provider identity
+limitation of those snapshots is unchanged.
+
+Tool-call hooks, preparation, execution and outcomes retain a `*ai.ContentBlock`
+instead of copying it. Editing its ID/name/raw arguments affects later lifecycle
+events and transcript publication; the already selected tool and validated
+arguments stay selected. Replacing a hook's `ToolCall` pointer affects that hook
+context only. `RunToolCall` takes a pointer and preserves it in its outcome.
+Fifty-three original-source cases cover sequential, parallel and programmatic
+calls, edits before/during/after execution, blocks/failures and later callbacks
+editing an earlier call. Sequential messages already published keep their old
+IDs; parallel messages use the call's fields at publication. Twelve cases replace
+content slots or grow the list in before/after hooks: retained calls remain
+separate from replacement blocks and keep their identity after growth.
+
+`MessageContent.Blocks` and tool-result content use `[]*ai.ContentBlock`.
+`ai.BlockContent` constructs blocks from values; `ai.BlockReferences` keeps
+existing objects. Provider accumulators and the proxy publish their block lists
+directly, removing the per-event loop that copied every block. Three concurrent
+stream checks also verify that `toolcall_end` and its partial transcript refer
+to the same block. Eighteen original-source transformation cases verify which
+blocks remain shared and which are copied for cross-model signature/ID changes
+or image replacement, while keeping the input transcript unchanged. Retained
+slice headers do not automatically track list-length changes; live provider
+messages are still isolated by the engine's stream snapshots.
+
+`ai.TransformMessageReferences` also preserves message/model identity while
+transforming replay history. Its normalizer receives `*ai.Model` and
+`*ai.Message`; `ai.TransformMessages` remains a value adapter for provider
+conversion. Content normalization and image downgrade complete for the entire
+history before any ID callback. Signature removal copies a tool call before
+the callback, but ID comparison and result-ID mapping read the original call
+afterward. Fifty-six source cases cover callback edits to IDs, call fields,
+message fields/content, model identity/modalities and earlier/later messages,
+checking output, mutated inputs, callback snapshots and object identity.
 
 Decoded tool results retain extension metadata and explicit null fields in
 execution/update events. After-hook replacement preserves original result
@@ -74,6 +226,39 @@ an explicit override. Replacing the context's result pointer has no effect on th
 executed object. Overrides and hook failures leave any retained result pointer
 with the hook's mutations, matching Pi's object ownership.
 
+`Tool.Execute` returns `*ToolResult`; progress callbacks and `ToolOutcome.Result`
+also use pointers. Without an override, the tool, after hook, end event and public
+outcome share the same result object. Progress callbacks receive the actual
+partial object, including nil, and retained pointers see subsequent tool edits.
+Returning any after-hook override creates a shallow copy, even when the override
+is the executed object itself. A nil execution result becomes Pi's caught null
+property-read error after admitted updates settle. Thirty-seven original-source
+cases verify these identities and their serialized events/results across
+sequential, parallel and programmatic calls. Callers must synchronize concurrent
+access to retained result pointers.
+
+Awaited `tool_execution_end` sinks receive the finalized result object before
+transcript construction and batch termination. Mutating its content, metadata or
+`terminate` field affects the subsequent message/request and continuation.
+Replacing the event's result pointer or `isError` field affects only that event;
+the outcome's previously computed error flag stays unchanged. When the after
+hook returns no override, its retained result pointer sees the same event
+mutations; an override creates a separate result, matching Pi. Eighteen source
+scenarios cover sequential/parallel execution, immediate blocks, truncation,
+termination changes, pointer replacement and retained after-hook results. Two
+Agent subscriber scenarios additionally verify state snapshots, next provider
+requests and termination through the stateful wrapper.
+Twelve further scenarios cover a later callback mutating an earlier retained
+result, including immediate unknown-tool results. Sequential messages already
+published are not rebuilt; parallel batches read the current result when each
+message is constructed. Both modes read termination from the shared results
+after message events finish, so a later callback can clear an earlier tool's
+termination flag. The batch no longer stores a stale result snapshot alongside
+the live result object.
+Twenty-four additional scenarios preserve literal tool names in validation,
+truncation and unknown-tool diagnostics, including quotes, backslashes, control
+characters and Unicode; Go quoting no longer changes the diagnostic text.
+
 Caught Go errors retain their identity. JSON-shaped panic values use Pi's
 `Error.message` / `String(value)` error text, including null, arrays, objects,
 numeric formatting and nonfinite values. A tool update callback's panic reaches
@@ -81,6 +266,16 @@ the executing tool synchronously and can be recovered there; otherwise it become
 a tool error and runs the after hook. A returned update error represents a rejected
 promise: execution settles, then the call rejects without the after hook. Tools
 that start their own goroutines own the panic boundary in those goroutines.
+
+Go integer/float widths are formatted as JavaScript numbers, including binary64
+rounding, nonfinite values and signed zero. Typed slices and fixed arrays use
+JavaScript array joining, and typed maps use the ordinary object string. Array
+cycle detection tracks only the active join path: a self/mutual reference becomes
+an empty element, while a shared child is included at every separate occurrence.
+This prevents an error-reporting stack overflow on cyclic thrown arrays. Eighteen
+additional oracle cases cover these Go representations and cyclic/shared arrays
+through the Agent and all four tool failure stages.
+
 
 `EventSink` is awaited and can be called concurrently by parallel tools. A sink
 must synchronize its own mutable state. Tool updates are scoped to an execution;
@@ -109,6 +304,29 @@ available. Read raw payloads inside `Synchronize` or after producer settlement.
 These synchronization methods adapt JavaScript's single-threaded execution to
 Go; they do not impose event-time snapshots on the underlying stream.
 
+Observation snapshots copy the typed Go graph directly; they do not serialize
+and parse JSON while consuming an event or final result. Nonfinite numbers and
+negative zero therefore retain their in-memory values, and unreadable extension
+JSON cannot interrupt the loop merely by being copied. Public mutable fields
+are detached; private, immutable transcript encoding metadata remains shared.
+Snapshots preserve repeated message, content-block and usage references within
+the detached graph. In particular, a `toolcall_end`
+tool call remains the same block as its partial transcript entry; equal but
+distinct source objects remain distinct. Eight original-source loop/Agent cases
+check streamed block identities and full event/message JSON, including repeated
+blocks and a detached tool-call object. Three native provider concurrency tests
+check this relationship in both raw events and snapshots. Twenty-four additional
+original-source loop/Agent cases check NaN, positive/negative infinity and signed
+zero through progressive, terminal-only and ignored events, including exact usage
+JSON. Usage exports nonfinite numbers as `null` and negative zero as `0`, while
+retaining the original live numbers. Another 48 source-runtime cases check usage
+decoding, sparse/null counters, nested cost, numeric metadata and subsequent
+mutations. Go tests mutate all
+populated public snapshot fields to check producer isolation and verify that
+copying can succeed independently of explicit JSON export. Cross-event/provider
+identity remains separated by observation snapshots; this is not full live
+stream-object parity.
+
 ## Verification
 
 ```sh
@@ -116,8 +334,23 @@ make test-agentcore-native
 bun agentcore/engine/testdata/generate-pi-fixtures.ts --check
 bun agentcore/engine/testdata/generate-loop-stream-fixtures.ts --check
 bun agentcore/engine/testdata/generate-agent-fixtures.ts --check
+bun agentcore/engine/testdata/generate-message-reference-fixtures.ts --check
+bun agentcore/engine/testdata/generate-tool-reference-fixtures.ts --check
+bun agentcore/engine/testdata/generate-tool-definition-fixtures.ts --check
+bun agentcore/engine/testdata/generate-argument-reference-fixtures.ts --check
+bun agentcore/engine/testdata/generate-result-reference-fixtures.ts --check
+bun agentcore/engine/testdata/generate-stream-alias-fixtures.ts --check
+bun agentcore/engine/testdata/generate-stream-number-fixtures.ts --check
+bun ai/testdata/generate-usage-json-fixtures.ts --check
+bun ai/testdata/generate-block-reference-fixtures.ts --check
+bun ai/testdata/generate-transform-reference-fixtures.ts --check
 bun agentcore/engine/testdata/generate-proxy-fixtures.ts --check
+bun ai/testdata/generate-json-stringify-fixtures.ts --check
+bun ai/testdata/generate-json-prefix-fixtures.ts --check
+bun telemetry/testdata/generate-status-json-fixtures.ts --check
 bun agentcore/engine/testdata/generate-argument-fixtures.ts --check
+bun agentcore/engine/testdata/generate-format-patterns.ts --check
+bun agentcore/engine/testdata/generate-unicode-properties.ts --check
 bun agentcore/engine/testdata/generate-failure-fixtures.ts --check
 ```
 
@@ -127,12 +360,12 @@ verifying its source hashes. It compares complete JSON events, request contexts,
 messages, error strings, and hook ordering. Concurrent scenarios use explicit
 gates to make completion order deterministic in both runtimes. JSON object-key
 ordering is not treated as semantic; message content strings remain exact.
-There are 64 low-level loop scenarios and 38 stateful Agent scenarios. The
+There are 143 low-level loop scenarios and 52 stateful Agent scenarios. The
 latter record state at every event and action, including queue previews,
 subscriber failures, busy admission, reset baselines and forwarded controls.
 Additional race tests exercise concurrent queue/state access, blocking end
 subscribers, abort propagation, live subscription identity and callback changes.
-Another 51 proxy scenarios compare retained events, final messages, and HTTP
+Another 137 proxy scenarios compare retained events, final messages, and HTTP
 request envelopes against Pi, including post-terminal mutations and tool object
 identity. Terminal records preserve sparse/null usage, provider usage/cost
 extensions, optional thinking-level/error-message presence, and nullable text
@@ -141,13 +374,73 @@ with the settled live payload. Go HTTP/race tests cover cancellation, concurrent
 over 64 KiB, and UTF-8 split into single-byte reads. Invalid JSON and transport
 errors use Go's diagnostic wording; exact JS engine/fetch error text is not
 claimed. Malformed frames outside the typed protocol are not fully equivalent.
-Sixteen source-generated failure values exercise the Agent failure lifecycle and
+Sixteen proxy failure scenarios verify transport/reader panics become terminal
+error events, including null, primitive, array and object panic values. Cancellation
+changes the stop reason to `aborted` while retaining the failure's message. Reader
+panics still close the response body; they do not escape the producer goroutine.
+Fifteen further proxy scenarios cover request serialization: panics and returned
+errors from Go JSON marshalers settle through the error stream without making an
+HTTP request. Nested `encoding/json` marshaler wrappers are removed so the
+callback's original message survives. Cancellation during serialization records
+`aborted` without replacing that message. Initialization captures model identity,
+then the timestamp, then serializes the body, matching Pi even when clock or
+serializer callbacks mutate request inputs. Snapshots retain the same terminal
+payload as the live stream.
+
+Another 33 cases cover proxy option serialization. Thirty compare the literal
+HTTP body with Pi, including non-finite numbers as null, negative zero, binary64
+rounding of native integer/float widths, nested values, unescaped HTML and line
+separators, and the protocol's option/callback order. Map callbacks can replace
+or delete later captured keys; newly inserted keys wait until a later export.
+Repeated shared children serialize normally. Three cyclic graph cases verify
+Pi's error text, no HTTP request, and no repeated callback after an object loses
+a field during serialization.
+
+Ordinary Go maps use deterministic lexical order for non-index keys because they
+do not preserve insertion order; array-index keys use JavaScript ordering. The
+fixed protocol option order is preserved independently. Go byte slices retain
+Go's base64 representation. JSON emitted by raw messages and custom marshalers
+is normalized after callbacks finish: numbers use binary64, duplicate keys keep
+the last value at the first insertion position, index keys enumerate first, and
+strings use well-formed JSON.stringify escaping. The normalizer reads UTF-16 code
+units directly so lone surrogates and distinct surrogate object keys survive.
+Twenty-two further end-to-end cases compare exact request bytes for these paths,
+including overflow/underflow, duplicate escaped keys, mixed surrogate sequences,
+and nested objects. A separate pinned-runtime oracle checks all 65,536 single
+UTF-16 units and all 1,048,576 valid surrogate pairs using per-block SHA-256
+hashes; Go tests recompute every output without a JavaScript runtime.
+Struct-specific non-finite numeric inputs, exhaustive binary64 decimal-format
+parity, insertion order already lost in Go maps, and other non-serializable-value
+diagnostics remain unproven. UTF-16 wire checks here do not establish surrogate
+parity for the rest of the message/validation/provider APIs.
+
+Thirty-four source-generated failure values exercise the Agent failure lifecycle and
 all four tool prepare/before/execute/after catch sites. Three update scenarios
 compare synchronous throws, tool-caught throws and rejected update promises,
 including continuation, after-hook admission and original error identity.
 Seven pending-update scenarios compare successful waits, rejection before and
 after execution settles, concurrent execution/update failures, and selection
 among already-rejected updates.
+
+Tool declarations now share `ai.StringifyJSON` with complete JSON parsing and
+proxy requests. Valid parameter and constrained-sampling JSON is normalized
+before publication, rather than copied byte-for-byte from RawMessage. The old
+separate declaration serializer was removed. Twenty-four source-generated cases
+verify declaration output, equality and tool-state changes; four loop cases
+verify declaration insertion for distinct surrogate titles/property names and
+no redundant insertion for equivalent rounded numbers or duplicate keys.
+Malformed/absent schema error propagation still follows the existing Go behavior
+and is not established as equivalent to Pi's dynamic JSON-round-trip failure.
+
+Partial tool-argument parsing uses the same object-field serializer as complete
+JSON parsing. Canonical JSON keys retain distinct lone UTF-16 surrogates, avoid
+HTML/separator over-escaping, and preserve duplicate replacement and numeric
+index ordering. The partial parser retains Pi's `__proto__` setter behavior;
+complete JSON parsing retains that key as an own property. Another 848
+source-generated prefixes compare exact serialized results for Unicode keys,
+nested objects, repaired controls/escapes, numbers and malformed punctuation.
+These cover Unicode scalar boundaries; arbitrary raw lone-surrogate input
+strings and all malformed-input diagnostics remain unproven.
 
 ## Migration status
 
@@ -299,7 +592,7 @@ sink delivery. The native HTTP provider now uses this request tracing path;
 provider-specific descendant spans remain to be audited.
 
 Argument normalization ports Pi's serialized JSON-schema path. Validation uses
-the existing Go JSON Schema library. Another 323 source-generated programmatic
+the existing Go JSON Schema library. Another 1812 source-generated programmatic
 tool cases compare numeric argument coercion, hook/execution admission, exact
 argument/error text, and preserved original input. These include 26 constraint
 and path cases: array/object bounds, uniqueness, contains, forbidden tuple tails,
@@ -381,7 +674,90 @@ fixtures establish common coercion, optional-null, missing-property and type
 failure behavior. Do not infer full parity or production readiness from this
 subset. Models/options remain raw until the full Go AI provider contract lands.
 
-The upstream MIT license is retained in `LICENSE.pi`.
+Format assertions now cover UUID, IPv4/IPv6, email and IDN email, date, time,
+date-time, duration, URI/reference/template, JSON pointer/URI fragment/relative
+pointer, and regex. The checks use the locked TypeBox expressions and date/time
+rules, including leap-second offset normalization and NFC for IDN email. Another
+113 source scenarios verify valid/invalid values, coercion, sibling error order,
+unions, references and unknown formats. Unknown format names remain annotations.
+Hostname and IDN hostname add 190 cases covering ASCII labels, punycode,
+UTF-16/domain and encoded-label length limits, fullwidth/NFC/ignored-character
+mapping, contextual joiners, Pi's bidi rules, and raw-decoder UTF-16 surrogate
+pair joining. Raw RFC 3492 encoding/decoding
+runs in Go; Pi's permitted punctuation and partial contextual checks are retained
+instead of substituting a stricter IDNA policy. WHATWG URL-based `url`, `iri`
+and `iri-reference` run through the pinned pure-Go whatwg-url parser and translated
+TypeBox guards. Another 258 source cases cover relative references, Unicode hosts,
+IPv4/IPv6, ports, file/custom schemes, whitespace, percent encoding, and IPvFuture
+narrowing with the source's 2048 UTF-16-unit threshold. All 21 default format names
+have native checks. Another 145 regex-format scenarios verify a native syntax
+gate before the matcher: Unicode escape restrictions, capture references,
+duplicate names across disjoint alternatives, scoped modifiers, assertion
+quantifiers and class range endpoints. This rejects the legacy/.NET constructs
+that regexp2's ECMAScript mode otherwise permits. The pinned oracle's acceptance
+of non-ASCII identity escapes is retained. Another 42 matching cases cover named
+and numbered capture ordering, nesting, forward/optional references, disjoint
+duplicate names including repeated alternatives, and escaped/Unicode identifiers.
+Named captures are lowered to preserve JavaScript's opening-parenthesis numbering;
+diagnostics retain the original pattern. Another 101 tool-path cases verify
+Unicode property syntax, aliases, binary properties, general categories, scripts,
+script extensions, complements and mixed classes. Property sets use generated
+Go data extracted from the pinned Bun 1.3.14 / Unicode 15.1 oracle, rather than
+the Go toolchain's tables. `TestPiUnicodePropertyOracle` checks all 419 property
+sets using 86,903 boundary/interior probes in four positive/complement/class
+forms and compiles every one of the 1,627 accepted aliases. Generation enumerates
+all 1,114,112 code points and guards the oracle runtime version. Unicode alias
+inputs and their license are retained under `testdata/unicode-15.1/`.
+Another 277 tool-path cases cover Unicode admission for hostnames, ACE labels,
+IDN email, capture names and escaped name delimiters. Hostname category/script
+checks and Unicode format patterns share the pinned property tables. Capture
+names follow the observed JavaScriptCore grammar: Letter_Number and the
+Other_ID_Start/Other_ID_Continue exceptions are rejected. The Unicode oracle adds
+4,640 capture-name probes, each checked at the start and continuation positions
+in literal and escaped form. Escaped `>` closes a capture name or named reference
+in the pinned runtime; the scanner preserves that behavior and the following
+pattern text. Direct property lookups also run against all 86,903 oracle probes.
+Another 205 cases verify scoped dot-all and multiline behavior, including all
+four JavaScript line terminators, inherited/disabled/restored modifiers, CRLF,
+lookarounds, named captures and literal metacharacters. Dot and anchor lowering
+uses the parser's effective group flags; the former unconditional dot-rewrite
+pass has been removed.
+Another 145 tool cases cover repeated capture resets, optional descendants,
+duplicate names, bounded/lazy repetition, backtracking, lookarounds and empty
+iterations. `TestPiRegexpRepetitionOracle` also checks all 364 strings over
+`a/b/c` up to length five against 32 source patterns (11,648 comparisons).
+The lowering keeps capture history at one value, resets descendants per
+iteration, and uses backtrackable guards to reject optional empty iterations
+while preserving mandatory ones. Lookbehind uses the same operations in reverse
+execution order. Nullable-iteration guards now use backtrackable progress flags
+set by consuming atoms, including nonempty backreferences. Consumption inside
+a lookaround does not advance its enclosing repetition. The previous suffix/
+prefix scans have been removed. `BenchmarkPiNullableRepetition` measures
+`^(a?)*\1$` on 128–8,192 characters; on an Apple M1 Pro with three measured
+iterations, the 8,192-character case improved from 160.8 ms to 2.4 ms per match
+(about 67×). This is one focused benchmark, not a general regex performance bound.
+Word escapes and boundaries use Pi's Unicode-mode word set directly. Scoped
+ignore-case adds long s and Kelvin sign without admitting dotted capital I.
+Word escapes inside classes become separate union branches with their own
+folding policy; negated classes reject the union before consuming a scalar.
+Word boundaries compare the same set on both sides, including inside lookbehind.
+Thirteen tool-path cases check admission and original-pattern diagnostics.
+`TestPiRegexpCharactersOracle` covers 71 patterns over 255 inputs (17,340
+comparisons for the 68 valid patterns), including digit/space controls, mixed
+classes, complements, scoped flags, lookbehind and nullable repetition. It also
+checks both word sets over every representable Unicode scalar (2,224,128
+comparisons), using independently enumerated source results. Regenerate with
+`bun agentcore/engine/testdata/generate-regexp-character-fixtures.ts --check`.
+These changes pin word membership; general literal/property case folding still
+uses the backend and remains outside the established parity coverage.
+Full WHATWG/ECMAScript syntax, case folding, exhaustive lone-surrogate format behavior,
+arbitrary regex/backtracking edge cases and normalization/case-mapping parity
+remain unproven; these fixtures do not establish full format parity.
+
+The upstream MIT license is retained in `LICENSE.pi`; translated TypeBox format
+expressions and rules retain their MIT notice in `LICENSE.typebox`. The development
+pattern generator checks TypeBox 1.3.27 and emits Go literals. Native builds and
+tests do not read or execute TypeScript or depend on `node_modules`.
 
 Native session and runner configuration now selects Go when no worker path is
 provided. Explicit worker paths remain available for development/test comparison.
@@ -525,6 +901,6 @@ selected tool context and reasoning, live streaming, exact-once usage/traces,
 and abort before/after selection. Full runner HTTP tests combine summary fallback,
 parent escalation, tool execution, journal resume, independent child selection,
 and selection-write failure before effects. The pinned source checks still verify
-64 loop and 38 stateful Agent fixtures. Integration scope and evidence are tracked
+143 loop and 52 stateful Agent fixtures. Integration scope and evidence are tracked
 in [native-fallback-plan.md](native-fallback-plan.md); this does not establish full
 provider parity or complete the broader Go migration.

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,56 @@ type proxyTransport func(*http.Request) (*http.Response, error)
 
 func (f proxyTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+type proxyPanicReader struct {
+	failure any
+	closed  *bool
+}
+
+func (r proxyPanicReader) Read([]byte) (int, error) { panic(r.failure) }
+func (r proxyPanicReader) Close() error             { *r.closed = true; return nil }
+
+type proxyFailureSpec struct {
+	Kind, Message string
+	Value         any
+}
+
+type proxyRequestFailure struct {
+	before  func()
+	failure any
+	mode    string
+}
+
+func (f proxyRequestFailure) MarshalJSON() ([]byte, error) {
+	if f.before != nil {
+		f.before()
+	}
+	if f.mode == "nested-return" {
+		return json.Marshal(map[string]any{"nested": proxyRequestFailure{failure: f.failure, mode: "return"}})
+	}
+	if f.mode == "return" {
+		return nil, f.failure.(error)
+	}
+	panic(f.failure)
+}
+
+type proxyJSONMutation func()
+
+func (advance proxyJSONMutation) MarshalJSON() ([]byte, error) {
+	advance()
+	return []byte(`{"serialized":true}`), nil
+}
+
+type proxyJSONRecord struct {
+	key    string
+	record func(string)
+}
+
+func (v proxyJSONRecord) MarshalJSON() ([]byte, error) { v.record(v.key); return json.Marshal(v.key) }
+
+type proxyRawJSON string
+
+func (raw proxyRawJSON) MarshalJSON() ([]byte, error) { return []byte(raw), nil }
+
 func TestProxyPiFixtures(t *testing.T) {
 	data, err := os.ReadFile("testdata/pi-proxy.json")
 	if err != nil {
@@ -33,9 +85,27 @@ func TestProxyPiFixtures(t *testing.T) {
 		Now   int64
 		Cases []struct {
 			Input struct {
-				Name, Body, StatusText string
-				Status                 int
-				Options                map[string]any
+				Name, Body, StatusText         string
+				Status                         int
+				Options                        map[string]any
+				FailureAt                      string
+				AbortOnFailure                 bool
+				Failure                        *proxyFailureSpec
+				RequestFailure                 *proxyFailureSpec
+				RequestFailureMode             string
+				RequestClockAdvance            bool
+				RawMetadata                    *string
+				RawMetadataCallback            bool
+				RequestCycle                   string
+				RequestMapMutation             string
+				RequestSharedValue             bool
+				RawRequest, RequestOptionOrder bool
+				RequestNumber                  *struct {
+					Kind, Value string
+					Nested      bool
+				}
+				RequestModelMutation, ClockModelMutation bool
+				AbortOnRequest                           bool
 			}
 			Expected json.RawMessage
 		}
@@ -45,22 +115,169 @@ func TestProxyPiFixtures(t *testing.T) {
 	}
 	for _, test := range fixtures.Cases {
 		t.Run(test.Input.Name, func(t *testing.T) {
+			defer func() {
+				if failure := recover(); failure != nil {
+					t.Fatalf("proxy request preparation panicked (%T)", failure)
+				}
+			}()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			runCtx, abort := context.WithCancel(ctx)
+			defer abort()
 			var request any
+			bodyClosed := false
 			client := &http.Client{Transport: proxyTransport(func(r *http.Request) (*http.Response, error) {
 				var body any
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				rawBody, err := io.ReadAll(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				if err := json.Unmarshal(rawBody, &body); err != nil {
 					return nil, err
 				}
 				request = map[string]any{"url": r.URL.String(), "method": r.Method, "headers": map[string]string{"Authorization": r.Header.Get("Authorization"), "Content-Type": r.Header.Get("Content-Type")}, "body": body}
+				if test.Input.RawRequest {
+					request.(map[string]any)["rawBody"] = string(rawBody)
+				}
+				if test.Input.Failure != nil {
+					if test.Input.AbortOnFailure {
+						abort()
+					}
+					failure := test.Input.Failure.Value
+					if test.Input.Failure.Kind == "error" {
+						failure = errors.New(test.Input.Failure.Message)
+					}
+					if test.Input.FailureAt == "fetch" {
+						panic(failure)
+					}
+					return &http.Response{StatusCode: 200, Status: "200 OK", Body: proxyPanicReader{failure, &bodyClosed}, Header: make(http.Header), Request: r}, nil
+				}
 				status := test.Input.Status
 				if status == 0 {
 					status = 200
 				}
 				return &http.Response{StatusCode: status, Status: statusLine(status, test.Input.StatusText), Body: io.NopCloser(strings.NewReader(test.Input.Body)), Header: make(http.Header), Request: r}, nil
 			})}
-			stream := engine.StreamProxy(ctx, fixtures.Model, ai.NormalizeContext(ai.Context{}), engine.ProxyStreamOptions{ProxyURL: "https://proxy.example.com", AuthToken: "test-token", Client: client, Now: func() int64 { return fixtures.Now }, Options: test.Input.Options})
+			if spec := test.Input.RequestFailure; spec != nil {
+				failure := spec.Value
+				if spec.Kind == "error" {
+					failure = errors.New(spec.Message)
+				}
+				if test.Input.Options == nil {
+					test.Input.Options = map[string]any{}
+				}
+				var before func()
+				if test.Input.AbortOnRequest {
+					before = abort
+				}
+				test.Input.Options["metadata"] = proxyRequestFailure{failure: failure, mode: test.Input.RequestFailureMode, before: before}
+			}
+			requestedModel := append(json.RawMessage(nil), fixtures.Model...)
+			mutateModel := func() {
+				copy(requestedModel, bytes.Replace(requestedModel, []byte("proxy-model"), []byte("other-model"), 1))
+			}
+			clock := fixtures.Now
+			if test.Input.RequestClockAdvance {
+				if test.Input.Options == nil {
+					test.Input.Options = map[string]any{}
+				}
+				test.Input.Options["metadata"] = proxyJSONMutation(func() { clock += 1000 })
+			}
+			if test.Input.RequestModelMutation {
+				if test.Input.Options == nil {
+					test.Input.Options = map[string]any{}
+				}
+				test.Input.Options["metadata"] = proxyJSONMutation(mutateModel)
+			}
+			if spec := test.Input.RequestNumber; spec != nil {
+				var value any
+				switch spec.Kind {
+				case "int64":
+					n, err := strconv.ParseInt(spec.Value, 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					value = n
+				case "uint64":
+					n, err := strconv.ParseUint(spec.Value, 10, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					value = n
+				default:
+					n, err := strconv.ParseFloat(spec.Value, 64)
+					if err != nil {
+						t.Fatal(err)
+					}
+					value = n
+					if spec.Kind == "float32" {
+						value = float32(n)
+					}
+				}
+				if test.Input.Options == nil {
+					test.Input.Options = map[string]any{}
+				}
+				if spec.Nested {
+					test.Input.Options["metadata"] = map[string]any{"nested": []any{value}}
+				} else {
+					test.Input.Options["temperature"] = value
+				}
+			}
+			serializerOrder := []string{}
+			if test.Input.RequestOptionOrder {
+				test.Input.Options = map[string]any{}
+				for _, key := range []string{"temperature", "samplingParams", "maxTokens", "reasoning", "cacheRetention", "sessionId", "headers", "metadata", "transport", "thinkingBudgets", "maxRetryDelayMs", "ignored"} {
+					test.Input.Options[key] = proxyJSONRecord{key, func(name string) { serializerOrder = append(serializerOrder, name) }}
+				}
+			}
+			if test.Input.RequestMapMutation != "" {
+				metadata := map[string]any{"b": 1}
+				metadata["a"] = proxyJSONMutation(func() {
+					switch test.Input.RequestMapMutation {
+					case "replace":
+						metadata["b"] = 2
+					case "delete":
+						delete(metadata, "b")
+					case "insert":
+						metadata["c"] = 3
+					}
+				})
+				test.Input.Options = map[string]any{"metadata": metadata}
+			}
+			if test.Input.RequestSharedValue {
+				child := map[string]any{"value": 1}
+				test.Input.Options = map[string]any{"metadata": map[string]any{"a": child, "b": child}}
+			}
+			if test.Input.RequestCycle != "" {
+				var value any
+				if test.Input.RequestCycle == "array" {
+					array := make([]any, 1)
+					array[0] = array
+					value = array
+				} else {
+					object := map[string]any{}
+					object["self"] = object
+					if test.Input.RequestCycle == "mutating-map" {
+						object["unused"] = true
+						object["a"] = proxyJSONMutation(func() { serializerOrder = append(serializerOrder, "a"); delete(object, "unused") })
+					}
+					value = object
+				}
+				test.Input.Options = map[string]any{"metadata": value}
+			}
+			if test.Input.RawMetadata != nil {
+				var value any = json.RawMessage(*test.Input.RawMetadata)
+				if test.Input.RawMetadataCallback {
+					value = proxyRawJSON(*test.Input.RawMetadata)
+				}
+				test.Input.Options = map[string]any{"metadata": value}
+			}
+			stream := engine.StreamProxy(runCtx, requestedModel, ai.NormalizeContext(ai.Context{}), engine.ProxyStreamOptions{ProxyURL: "https://proxy.example.com", AuthToken: "test-token", Client: client, Now: func() int64 {
+				if test.Input.ClockModelMutation {
+					mutateModel()
+				}
+				return clock
+			}, Options: test.Input.Options})
 			events := []ai.AssistantMessageEvent{}
 			for {
 				event, ok, err := stream.Next(ctx)
@@ -79,7 +296,17 @@ func TestProxyPiFixtures(t *testing.T) {
 			if err := stream.WaitForEnd(ctx); err != nil {
 				t.Fatal(err)
 			}
-			actual, err := json.Marshal(map[string]any{"events": events, "result": result, "request": request})
+			if test.Input.FailureAt == "read" && !bodyClosed {
+				t.Fatal("reader panic leaked response body")
+			}
+			values := map[string]any{"events": events, "result": result}
+			if test.Input.RequestOptionOrder || test.Input.RequestCycle == "mutating-map" {
+				values["serializerOrder"] = serializerOrder
+			}
+			if request != nil {
+				values["request"] = request
+			}
+			actual, err := json.Marshal(values)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -106,7 +333,8 @@ func TestProxyPiFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			copied, err := json.Marshal(map[string]any{"events": snapshots, "result": final, "request": request})
+			values["events"], values["result"] = snapshots, final
+			copied, err := json.Marshal(values)
 			if err != nil || !bytes.Equal(actual, copied) {
 				t.Fatalf("snapshot changed settled payload: %v\nlive: %s\nsnapshot: %s", err, actual, copied)
 			}
@@ -183,7 +411,7 @@ func TestProxyConcurrentEngineSnapshots(t *testing.T) {
 	defer cancel()
 	var mu sync.Mutex
 	var snapshots []*ai.Message
-	messages, err := engine.Run(ctx, []ai.Message{{Role: "user", Content: ai.TextContent("test")}}, engine.Context{}, engine.Config{ConvertToLLM: func(messages []ai.Message) ([]ai.Message, error) { return messages, nil }, Model: json.RawMessage(`{"id":"m","provider":"p","api":"a"}`)}, func(e engine.Event) error {
+	messages, err := engine.Run(ctx, []*ai.Message{{Role: "user", Content: ai.TextContent("test")}}, engine.Context{}, engine.Config{ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }, Model: json.RawMessage(`{"id":"m","provider":"p","api":"a"}`)}, func(e engine.Event) error {
 		if e.Message != nil {
 			mu.Lock()
 			snapshots = append(snapshots, e.Message)
