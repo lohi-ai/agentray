@@ -14,7 +14,7 @@ func (s *Span) SetAttributesFrom(read func() Attributes) {
 		s.callbacks.SetAttributesFrom(read)
 		return
 	}
-	if s.context.state == nil {
+	if s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()
@@ -57,7 +57,7 @@ func (s *Span) AddEventFrom(name string, read func() Attributes) {
 		s.callbacks.AddEventFrom(name, read)
 		return
 	}
-	if s.context.state == nil {
+	if s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()

@@ -188,6 +188,14 @@ and concurrency; the constructors do not hide backend failures or change results
 Backends can forward `SpanCallbacks.SetStatusFrom`, `SetAttributesFrom` and
 `AddEventFrom` to preserve deferred read admission and passivity; opaque
 contexts leave absent callbacks inert.
+Supplied status callbacks receive explicit null status inputs and retain their
+own failure behavior; only the in-memory recorder ignores unreadable null status.
+Thirty-two pinned-source cases compare direct and typed backend delegation,
+nested/retained child starters, callback results and thrown-value identity.
+An opaque span can use an in-memory root context for its children without owning
+a recorded parent span. Its missing mutation callbacks remain inert, including
+deferred readers; creating children still records through that context. Six Go
+regressions cover this boundary for events, attributes and status.
 `telemetry/testing.CreateAdapterConformance` supplies ten runner-independent
 cases. Each case creates and closes its own `AdapterFixture`, checks normalized
 snapshots, and returns an error on failure. Run the suite for any new backend.

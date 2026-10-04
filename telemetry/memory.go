@@ -69,7 +69,7 @@ func (s *Span) AddEvent(name string, attributes Attributes) {
 		s.callbacks.AddEvent(name, attributes)
 		return
 	}
-	if s == nil || s.context.state == nil {
+	if s == nil || s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()
@@ -87,7 +87,7 @@ func (s *Span) SetAttributes(attributes Attributes) {
 		s.callbacks.SetAttributes(attributes)
 		return
 	}
-	if s == nil || s.context.state == nil {
+	if s == nil || s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()
@@ -105,16 +105,17 @@ func (s *Span) SetAttributes(attributes Attributes) {
 }
 
 func (s *Span) SetStatus(status SpanStatus) {
-	// Pi ignores null because reading status.status throws. A readable empty
-	// object is different: it normalizes to an explicit error status.
-	if status.nullInput && status.Status == "" && status.Error == nil {
-		return
-	}
 	if s != nil && s.callbacks.SetStatus != nil {
 		s.callbacks.SetStatus(status)
 		return
 	}
-	if s == nil || s.context.state == nil {
+	// Pi ignores null because reading status.status throws. A readable empty
+	// object is different: it normalizes to an explicit error status. This is
+	// the in-memory recorder's policy; supplied backends receive the input.
+	if status.nullInput && status.Status == "" && status.Error == nil {
+		return
+	}
+	if s == nil || s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()
@@ -141,7 +142,7 @@ func (s *Span) SetStatusFrom(read func() SpanStatus) {
 		s.callbacks.SetStatusFrom(read)
 		return
 	}
-	if s.context.state == nil {
+	if s.context.state == nil || s.context.parent == nil {
 		return
 	}
 	s.context.state.mu.Lock()

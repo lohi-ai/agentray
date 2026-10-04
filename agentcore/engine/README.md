@@ -105,6 +105,34 @@ continuation or reset is rejected until the last end subscriber settles.
 Run failures produce the original assistant error/aborted event sequence;
 admission errors and failures in that recovery sequence are returned to callers.
 
+Construction validates initial tool declarations before resolving the stream
+fallback. Null tools return the source diagnostic; a null first message still
+allows an initial system baseline. Single-message queue mode retains a null head
+without selecting it, and previews fall back to the follow-up queue when the
+steering selection is empty. All-message mode selects null entries and preserves
+the source failure stage when pending messages are inspected. Another 312
+pinned-source cases cover these constructor and queue behaviors, including
+prompt/continuation events, provider requests and settled state.
+
+An initial null model uses the default model. Later model assignments retain
+null/undefined instead; a failure reads the current state model, while an
+already-started request retains its captured model. Failure messages preserve
+missing, null and non-string JSON identity fields rather than adding empty
+strings or rejecting the diagnostic. Another 144 original-source cases compare
+model assignment before/during runs, request snapshots, full failure events,
+state JSON and recovery. AI transcript tests verify that replacing decoded
+identity fields with strings leaves an earlier value copy unchanged. This does
+not establish live model-object identity or arbitrary typed credential callback
+arguments; models still use the native raw-JSON boundary.
+
+Wrapper failures share Pi's module-level usage object across runs and agents,
+including an agent called reentrantly from an awaited failure listener. Replacing
+one message's `Usage` pointer detaches that message; retained usage aliases remain
+live. Ninety original-source cases compare identities, event-time values and
+settled histories after numeric/cost/optional-field edits or usage replacement,
+through failure events and after settlement. Callers must synchronize concurrent
+mutations of this shared usage, as with other retained message objects.
+
 Continuation admission retains Pi's distinction between the wrapper and the
 low-level loop. Agent rejects an absent/null tail or an all-system history before
 starting; its `every` scan skips holes and stops at the first non-system message.
@@ -148,6 +176,17 @@ when a run starts; an installed next-turn preparation wrapper reads its latest
 callback, matching Pi. Context-aware preparation takes precedence over the
 legacy signal-only preparation callback.
 
+Preparation updates retain the current model for omitted or explicit JSON null
+models, but accept other JSON values, including false, zero and an empty string.
+An explicit empty thinking level from `SetThinkingLevel` or a preparation update
+remains present in provider options, subsequent requests and assistant metadata;
+`off` removes reasoning. The native zero-valued `Config.Reasoning` still means
+omitted reasoning. Another 336 pinned-source cases compare both preparation hooks
+in the loop and wrapper across three turns. A host-admission test verifies the
+same empty-level propagation followed by an explicit `off` update. Admission's
+already-selected model remains authoritative, including explicit JSON null;
+only optional Pi preparation updates apply the nullish fallback rule.
+
 The loop and wrapper retain shared `*ai.Message` objects across contexts,
 turns, queued messages, lifecycle events and results. Initial/replaced histories
 copy the caller's pointer slice and preserve its message objects. A callback
@@ -159,6 +198,14 @@ after transformation, conversion and credential callbacks have settled.
 `MessagePointers` adapts existing value slices, and `MessageValues` creates
 top-level value snapshots. `Prompt` also accepts individual message pointers or
 pointer slices; `Steer`, `FollowUp` and `SetMessages` use references directly.
+
+The default provider-message filter skips sparse slots and custom roles while
+retaining selected message objects. A null collection, a null entry, or an own
+non-callable `filter` property fails with the pinned source diagnostic, before
+credential resolution. Method lookup precedes constructor/species validation,
+which in turn precedes entry reads. Another 150 original-source cases compare
+prompt and continuation failures, callback order, credential-time mutations,
+error events and a subsequent successful prompt.
 
 Twenty-eight original-source cases compare constructor/setter copies, retained
 list identity, slot replacement, append/delete/grow/shrink, sparse assignment,
@@ -522,9 +569,16 @@ identity. Terminal records preserve sparse/null usage, provider usage/cost
 extensions, optional thinking-level/error-message presence, and nullable text
 and thinking signatures. Every proxy fixture also compares detached snapshots
 with the settled live payload. Go HTTP/race tests cover cancellation, concurrent engine reads, frames
-over 64 KiB, and UTF-8 split into single-byte reads. Invalid JSON and transport
-errors use Go's diagnostic wording; exact JS engine/fetch error text is not
-claimed. Malformed frames outside the typed protocol are not fully equivalent.
+over 64 KiB, and UTF-8 split into single-byte reads. A native iterative JSON
+validator now retains the pinned Bun syntax diagnostics: 2,064 source cases cover
+lexical errors, object/array context, numeric prefixes, string escapes and UTF-16
+error text. Another 186 proxy cases compare malformed JSON, null/primitive frames,
+unknown event types and irrelevant extension fields before text, after text and
+after a terminal event, with and without a final newline. Each event branch
+decodes only the fields it reads. Error-message export preserves lone surrogate
+code units in those diagnostics. Transport errors still use Go's diagnostic
+wording; malformed values in fields read by the typed protocol, parser limits
+and all JavaScript engine-specific behavior are not fully equivalent.
 Sixteen proxy failure scenarios verify transport/reader panics become terminal
 error events, including null, primitive, array and object panic values. Cancellation
 changes the stop reason to `aborted` while retaining the failure's message. Reader
@@ -590,8 +644,12 @@ index ordering. The partial parser retains Pi's `__proto__` setter behavior;
 complete JSON parsing retains that key as an own property. Another 848
 source-generated prefixes compare exact serialized results for Unicode keys,
 nested objects, repaired controls/escapes, numbers and malformed punctuation.
-These cover Unicode scalar boundaries; arbitrary raw lone-surrogate input
-strings and all malformed-input diagnostics remain unproven.
+Another 2064 source cases compare exact `ParseJSONWithRepair` errors and
+successful serialization, including failed repairs and raw lone-surrogate
+values. Complete parsing shares the native syntax validator with the proxy;
+the shared serializer preserves WTF-8 surrogate units, checked against all
+2048 surrogate-unit source hashes. Arbitrary raw lone-surrogate combinations,
+parser resource limits and exhaustive malformed-input coverage remain unproven.
 
 ## Migration status
 
@@ -615,7 +673,10 @@ differential cases, including strict schemas, managed effort and native tool
 changes. Another 86 cases cover its native stream accumulator and SSE reader:
 thinking signatures, partial tool arguments, fallback and 1h cache pricing,
 transformation diagnostics, callback mutations, aborts, incomplete streams and
-split UTF-8/CRLF input. Concurrent snapshot tests preserve live message and tool
+split UTF-8/CRLF input. Another 204 source cases check exact SSE JSON errors,
+repaired strings, NBSP/BOM payloads, Unicode, raw/ignored events and retained
+partial output. Shared JSON validation replaces the empty-payload error special
+case. Concurrent snapshot tests preserve live message and tool
 identity. Its direct Go HTTP provider has another 62 differential cases for
 API-key/header auth, OAuth-token identity, Copilot headers, payload replacement,
 callbacks, HTTP errors and retry behavior. Local HTTP tests cover header timeout,

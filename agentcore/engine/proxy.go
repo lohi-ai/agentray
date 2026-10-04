@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"golang.org/x/text/encoding/unicode"
 )
 
@@ -151,8 +152,8 @@ func readProxy(ctx context.Context, stream *ai.AssistantMessageEventStream, part
 					return r >= '\u2000' && r <= '\u200a' || strings.ContainsRune("\t\n\v\f\r \u00a0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff", r)
 				})
 				if data != "" {
-					var frame proxyEvent
-					if err := json.Unmarshal([]byte(data), &frame); err != nil {
+					frame, err := decodeProxyEvent([]byte(data))
+					if err != nil {
 						return err
 					}
 					var event ai.AssistantMessageEvent
@@ -196,6 +197,86 @@ type proxyEvent struct {
 	Usage                 json.RawMessage            `json:"usage"`
 	ErrorMessage          json.RawMessage            `json:"errorMessage"`
 	ProviderThinkingLevel json.RawMessage            `json:"providerThinkingLevel"`
+}
+
+// Pi parses JSON before switching on type. Unknown types and JSON primitives
+// are ignored; each known branch reads only its own fields, so unrelated
+// extension fields must not trigger typed Go decoding failures.
+func decodeProxyEvent(raw []byte) (proxyEvent, error) {
+	if err := jsonjs.ValidateJSON(raw); err != nil {
+		return proxyEvent{}, err
+	}
+	raw = bytes.TrimSpace(raw)
+	if bytes.Equal(raw, []byte("null")) {
+		return proxyEvent{}, jsonjs.PropertyReadError(true, "proxyEvent.type")
+	}
+	if raw[0] != '{' {
+		return proxyEvent{}, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return proxyEvent{}, err
+	}
+	var kind string
+	if err := json.Unmarshal(fields["type"], &kind); err != nil {
+		return proxyEvent{}, nil
+	}
+	var names []string
+	switch kind {
+	case "start":
+	case "text_start", "thinking_start":
+		names = []string{"contentIndex"}
+	case "toolcall_start":
+		names = []string{"contentIndex", "id", "toolName"}
+	case "text_delta", "thinking_delta", "toolcall_delta":
+		names = []string{"contentIndex", "delta"}
+	case "text_end", "thinking_end":
+		names = []string{"contentIndex", "contentSignature"}
+	case "toolcall_end":
+		names = []string{"contentIndex", "toolCall"}
+	case "done":
+		names = []string{"reason", "usage", "providerThinkingLevel"}
+	case "error":
+		names = []string{"reason", "usage", "providerThinkingLevel", "errorMessage"}
+	default:
+		return proxyEvent{}, nil
+	}
+	frame := proxyEvent{Type: kind}
+	for _, name := range names {
+		value, ok := fields[name]
+		if !ok {
+			continue
+		}
+		var target any
+		switch name {
+		case "contentIndex":
+			target = &frame.ContentIndex
+		case "id":
+			target = &frame.ID
+		case "toolName":
+			target = &frame.ToolName
+		case "delta":
+			target = &frame.Delta
+		case "reason":
+			target = &frame.Reason
+		case "toolCall":
+			target = &frame.ToolCall
+		case "contentSignature":
+			frame.ContentSignature = value
+		case "usage":
+			frame.Usage = value
+		case "providerThinkingLevel":
+			frame.ProviderThinkingLevel = value
+		case "errorMessage":
+			frame.ErrorMessage = value
+		}
+		if target != nil {
+			if err := json.Unmarshal(value, target); err != nil {
+				return proxyEvent{}, err
+			}
+		}
+	}
+	return frame, nil
 }
 
 // Content entries and toolcall_end events share stable block objects even when

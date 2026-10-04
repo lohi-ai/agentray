@@ -100,11 +100,10 @@ func BuildOpenAIResponsesParams(rawModel json.RawMessage, context TranscriptCont
 	set("store", false)
 	if cache != "none" {
 		if session, exists := options["sessionId"]; exists {
-			key := []rune(samplingString(session))
-			if len(key) > 64 {
-				key = key[:64]
+			params["prompt_cache_key"], err = ClampOpenAIPromptCacheKey(session)
+			if err != nil {
+				return nil, err
 			}
-			set("prompt_cache_key", string(key))
 		}
 	}
 	if !chatGPT {

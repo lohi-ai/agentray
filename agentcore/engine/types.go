@@ -254,6 +254,9 @@ type Config struct {
 	GetFollowUpMessages func() (*MessageList, error)
 	// Now supplies Date.now for deterministic replay and differential testing.
 	Now func() int64
+	// Preserve an explicit empty level from a wrapper or update, while the
+	// native Config zero value still represents omitted reasoning.
+	reasoningDefined bool
 }
 
 func (c Config) now() int64 {

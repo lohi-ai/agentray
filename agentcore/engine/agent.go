@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,7 +47,7 @@ type AgentOptions struct {
 // and message objects. List operations are synchronized; callers synchronize
 // concurrent item edits. Use SetMessages/SetTools to replace a collection.
 type State struct {
-	Model            json.RawMessage `json:"model"`
+	Model            json.RawMessage `json:"model,omitempty"`
 	ThinkingLevel    string          `json:"thinkingLevel"`
 	Tools            *ToolList       `json:"tools"`
 	Messages         *MessageList    `json:"messages"`
@@ -112,8 +113,13 @@ type messageQueue struct {
 
 func (q *messageQueue) peek() []*ai.Message {
 	count := len(q.messages)
-	if q.mode != "all" && count > 1 {
-		count = 1
+	if q.mode != "all" && count > 0 {
+		// Pi previews a single truthy head without consuming a null head.
+		if q.messages[0] == nil {
+			count = 0
+		} else {
+			count = 1
+		}
 	}
 	return append([]*ai.Message{}, q.messages[:count]...)
 }
@@ -140,28 +146,35 @@ type Agent struct {
 
 const defaultModel = `{"id":"unknown","name":"unknown","api":"unknown","provider":"unknown","baseUrl":"","reasoning":false,"input":[],"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"contextWindow":0,"maxTokens":0}`
 
+// Pi assigns its module-level EMPTY_USAGE object to every wrapper failure.
+// Retained failure messages therefore share usage across runs and agents.
+// Callers must synchronize concurrent edits to these shared message objects.
+var failureUsage = &ai.Usage{}
+
 func NewAgent(options AgentOptions) (*Agent, error) {
-	configured, err := normalizeAgentConfig(options.AgentConfig)
-	if err != nil {
-		return nil, err
-	}
 	initial := options.InitialState
 	state := State{Model: slices.Clone(initial.Model), ThinkingLevel: initial.ThinkingLevel,
 		Tools: NewList(initial.Tools...), PendingToolCalls: &ToolCallSet{}}
 	messages := append([]*ai.Message{}, initial.Messages...)
-	if state.Model == nil {
+	if state.Model == nil || bytes.Equal(bytes.TrimSpace(state.Model), []byte("null")) {
 		state.Model = json.RawMessage(defaultModel)
 	}
 	if state.ThinkingLevel == "" {
 		state.ThinkingLevel = "off"
 	}
-	declarations := make([]ai.Tool, len(initial.Tools))
-	for i, tool := range initial.Tools {
-		declarations[i] = ai.ToToolDeclaration(tool.Tool)
+	declarations, err := declareTools(state.Tools)
+	if err != nil {
+		return nil, err
 	}
 	baseline := ai.CreateInitialSystemMessage(initial.SystemPrompt, declarations)
-	if baseline != nil && (len(messages) == 0 || messages[0].Role != "system") {
+	if baseline != nil && (len(messages) == 0 || messages[0] == nil || messages[0].Role != "system") {
 		messages = append([]*ai.Message{baseline}, messages...)
+	}
+	// The source creates state before resolving the stream fallback. Invalid
+	// initial tool declarations therefore take precedence over a missing stream.
+	configured, err := normalizeAgentConfig(options.AgentConfig)
+	if err != nil {
+		return nil, err
 	}
 	return &Agent{state: state, messages: NewList(messages...), options: configured, steering: messageQueue{mode: configured.SteeringMode},
 		followUp: messageQueue{mode: configured.FollowUpMode}, listeners: map[*Listener]uint64{}}, nil
@@ -194,12 +207,27 @@ func normalizeAgentConfig(options AgentConfig) (AgentConfig, error) {
 }
 
 func defaultConvertToLLM(messages *MessageList) (*MessageList, error) {
+	if messages == nil {
+		return nil, jsonjs.PropertyReadError(true, "messages.filter")
+	}
+	// An own data property shadows Array.prototype.filter before species
+	// construction or callback reads. Message-valued properties are not callable.
+	if value, present := messages.GetProperty("filter"); present {
+		kind := "an instance of Object"
+		if value == nil {
+			kind = "null"
+		}
+		return nil, fmt.Errorf(`messages.filter is not a function. (In 'messages.filter((message) => message.role === "system" || message.role === "user" || message.role === "assistant" || message.role === "toolResult")', 'messages.filter' is %s)`, kind)
+	}
 	result := NewList[*ai.Message]()
 	// Array.filter skips holes and creates a new dense collection. Snapshot
 	// indexed membership while retaining the message objects.
 	input := messages.Clone()
 	for _, index := range input.Keys() {
 		message := input.Get(index)
+		if message == nil {
+			return nil, jsonjs.PropertyReadError(true, "message.role")
+		}
 		switch message.Role {
 		case "system", "user", "assistant", "toolResult":
 			result.Append(message)
@@ -300,8 +328,8 @@ func (a *Agent) HasQueuedMessages() bool {
 func (a *Agent) PeekQueuedMessages() []*ai.Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if len(a.steering.messages) > 0 {
-		return a.steering.peek()
+	if selected := a.steering.peek(); len(selected) > 0 {
+		return selected
 	}
 	return a.followUp.peek()
 }
@@ -503,10 +531,7 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 	})
 	config := a.options.Config
 	config.Model = a.state.Model
-	config.Reasoning = a.state.ThinkingLevel
-	if config.Reasoning == "off" {
-		config.Reasoning = ""
-	}
+	config.setThinkingLevel(a.state.ThinkingLevel)
 	config.Options = make(map[string]any, len(a.options.Options)+4)
 	for key, value := range a.options.Options {
 		config.Options[key] = value
@@ -596,21 +621,45 @@ func (a *Agent) handleFailure(active *activeRun, failure error, timestamp int64)
 	a.mu.Lock()
 	modelRaw := a.state.Model
 	a.mu.Unlock()
-	var model struct {
-		API      string `json:"api"`
-		Provider string `json:"provider"`
-		ID       string `json:"id"`
+	modelRaw = bytes.TrimSpace(modelRaw)
+	if len(modelRaw) == 0 || bytes.Equal(modelRaw, []byte("null")) {
+		return jsonjs.PropertyReadError(len(modelRaw) != 0, "this._state.model.api")
 	}
-	if err := json.Unmarshal(modelRaw, &model); err != nil {
+	// Property reads on JSON primitives return undefined. Object properties
+	// retain their raw values, including null and malformed identity fields.
+	var model map[string]json.RawMessage
+	if modelRaw[0] == '{' {
+		if err := json.Unmarshal(modelRaw, &model); err != nil {
+			return err
+		}
+	} else {
+		var primitive any
+		if err := json.Unmarshal(modelRaw, &primitive); err != nil {
+			return err
+		}
+	}
+	stopReason := "error"
+	if active.ctx.Err() != nil {
+		stopReason = "aborted"
+	}
+	fields := map[string]any{"role": "assistant", "content": ai.BlockContent(ai.ContentBlock{Type: "text", Text: ""}),
+		"usage": &ai.Usage{}, "stopReason": stopReason, "timestamp": timestamp, "errorMessage": failure.Error()}
+	for field, property := range map[string]string{"api": "api", "provider": "provider", "model": "id"} {
+		if value, present := model[property]; present {
+			fields[field] = value
+		}
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
 		return err
 	}
-	message := &ai.Message{Role: "assistant", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: ""}),
-		API: model.API, Provider: model.Provider, Model: model.ID, Usage: &ai.Usage{}, StopReason: "error", Timestamp: timestamp}
-	if active.ctx.Err() != nil {
-		message.StopReason = "aborted"
+	message := &ai.Message{}
+	if err := json.Unmarshal(raw, message); err != nil {
+		return err
 	}
-	text := failure.Error()
-	message.ErrorMessage = &text
+	// Assign the shared object after decoding identity fields: constructing a
+	// failure must neither clone nor serialize usage retained by another caller.
+	message.Usage = failureUsage
 	for _, event := range []Event{{Type: "message_start", Message: message}, {Type: "message_end", Message: message},
 		{Type: "turn_end", Message: message, ToolResults: NewList[*ai.Message]()}} {
 		if err := catchFailure(func() error { return a.processEvent(event) }); err != nil {

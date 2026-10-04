@@ -48,6 +48,13 @@ func TestDecodeJSONStringUTF16Oracle(t *testing.T) {
 	check("single units", fixture.SingleUnits, func(page, offset int) []byte {
 		return fmt.Appendf(nil, `"\u%04x"`, page*256+offset)
 	}, 256)
+	check("single units with raw surrogates", fixture.SingleUnits, func(page, offset int) []byte {
+		unit := page*256 + offset
+		if unit >= 0xd800 && unit <= 0xdfff {
+			return []byte{'"', 0xe0 | byte(unit>>12), 0x80 | byte(unit>>6&0x3f), 0x80 | byte(unit&0x3f), '"'}
+		}
+		return fmt.Appendf(nil, `"\u%04x"`, unit)
+	}, 256)
 	check("surrogate pairs", fixture.SurrogatePairs, func(page, offset int) []byte {
 		return fmt.Appendf(nil, `"\u%04x\u%04x"`, 0xd800+page, 0xdc00+offset)
 	}, 1024)

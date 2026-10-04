@@ -93,8 +93,8 @@ func ParseJSONWithRepair(input string) (json.RawMessage, error) {
 }
 
 func parseCompleteJSON(input string) (json.RawMessage, error) {
-	var value json.RawMessage
-	if err := json.Unmarshal([]byte(input), &value); err != nil {
+	value := json.RawMessage(input)
+	if err := jsonjs.ValidateJSON(value); err != nil {
 		return nil, err
 	}
 	// Pi parses numbers as IEEE-754 and JSON.stringify renders overflow as

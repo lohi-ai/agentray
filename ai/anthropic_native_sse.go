@@ -42,9 +42,6 @@ func readAnthropicSSE(ctx context.Context, body io.Reader, consume func(json.Raw
 			return nil
 		}
 		raw, err := ParseJSONWithRepair(payload)
-		if err != nil && strings.TrimFunc(payload, jsWhitespace) == "" {
-			err = errors.New("JSON Parse error: Unexpected EOF")
-		}
 		if err == nil && strings.TrimSpace(string(raw)) == "null" {
 			err = errors.New("null is not an object (evaluating 'event.type')")
 		}

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -114,16 +115,19 @@ func runLoop(ctx context.Context, current *Context, messages *MessageList, confi
 			pending = nil
 			var admitted *RequestAdmission
 			if config.AdmitRequest != nil {
-				admitted, err = config.AdmitRequest(ctx, Request{Context: current, Model: config.Model, ThinkingLevel: thinkingLevel(config.Reasoning)}, requestOptions(config))
+				admitted, err = config.AdmitRequest(ctx, Request{Context: current, Model: config.Model, ThinkingLevel: config.thinkingLevel()}, requestOptions(config))
 				if err != nil {
 					return nil, err
 				}
 				if admitted == nil || admitted.Stream == nil || admitted.Request.Context == nil || len(admitted.Request.Model) == 0 {
 					return nil, errors.New("engine: invalid prepared request admission")
 				}
-				current = applyUpdate(current, &config, &TurnUpdate{Context: admitted.Request.Context, Model: admitted.Request.Model, ThinkingLevel: &admitted.Request.ThinkingLevel})
+				current = applyUpdate(current, &config, &TurnUpdate{Context: admitted.Request.Context, ThinkingLevel: &admitted.Request.ThinkingLevel})
+				// Admission has already selected the request and opened its stream.
+				// Preserve that model exactly, including an explicit JSON null.
+				config.Model = admitted.Request.Model
 			} else if config.PrepareRequest != nil {
-				update, err := config.PrepareRequest(ctx, Request{Context: current, Model: config.Model, ThinkingLevel: thinkingLevel(config.Reasoning)})
+				update, err := config.PrepareRequest(ctx, Request{Context: current, Model: config.Model, ThinkingLevel: config.thinkingLevel()})
 				if err != nil {
 					return nil, err
 				}
@@ -216,14 +220,11 @@ func applyUpdate(current *Context, config *Config, update *TurnUpdate) *Context 
 			current.Messages = NewList[*ai.Message]()
 		}
 	}
-	if update.Model != nil {
+	if update.Model != nil && !bytes.Equal(bytes.TrimSpace(update.Model), []byte("null")) {
 		config.Model = update.Model
 	}
 	if update.ThinkingLevel != nil {
-		config.Reasoning = *update.ThinkingLevel
-		if config.Reasoning == "off" {
-			config.Reasoning = ""
-		}
+		config.setThinkingLevel(*update.ThinkingLevel)
 	}
 	return current
 }
@@ -235,11 +236,23 @@ func poll(fn func() (*MessageList, error)) (*MessageList, error) {
 	return fn()
 }
 
-func thinkingLevel(reasoning string) string {
-	if reasoning == "" {
+func (c Config) hasReasoning() bool {
+	return c.reasoningDefined || c.Reasoning != ""
+}
+
+func (c Config) thinkingLevel() string {
+	if !c.hasReasoning() {
 		return "off"
 	}
-	return reasoning
+	return c.Reasoning
+}
+
+func (c *Config) setThinkingLevel(level string) {
+	c.Reasoning = level
+	c.reasoningDefined = level != "off"
+	if !c.reasoningDefined {
+		c.Reasoning = ""
+	}
 }
 
 func emitMessage(message *ai.Message, emit EventSink) error {
@@ -252,7 +265,11 @@ func emitMessage(message *ai.Message, emit EventSink) error {
 func declareToolChanges(current Context, pending *MessageList, now func() int64) (*MessageList, error) {
 	systemIndex := -1
 	for i := pending.Len() - 1; i >= 0; i-- {
-		if pending.Get(i).Role == "system" {
+		message := pending.Get(i)
+		if message == nil {
+			return nil, jsonjs.PropertyReadError(pending.Has(i), "pendingMessages[i].role")
+		}
+		if message.Role == "system" {
 			systemIndex = i
 			break
 		}
@@ -357,7 +374,7 @@ func requestOptions(config Config) map[string]any {
 	} else {
 		delete(options, "toolExecution")
 	}
-	if config.Reasoning == "" {
+	if !config.hasReasoning() {
 		delete(options, "reasoning")
 	} else {
 		options["reasoning"] = config.Reasoning
@@ -375,7 +392,7 @@ func consumeAssistant(ctx context.Context, current *Context, config Config, emit
 		if message == nil {
 			return nil, errors.New("engine: stream has no final assistant message")
 		}
-		level := thinkingLevel(config.Reasoning)
+		level := config.thinkingLevel()
 		message.ThinkingLevel = &level
 		if addedPartial {
 			current.Messages.setLast(message)

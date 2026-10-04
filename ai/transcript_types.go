@@ -301,6 +301,9 @@ func marshalTranscriptObject(value any, extra map[string]json.RawMessage, requir
 func (m Message) MarshalJSON() ([]byte, error) {
 	type plain Message
 	required := map[string]any{}
+	if m.ErrorMessage != nil {
+		required["errorMessage"] = *m.ErrorMessage
+	}
 	if !m.HasContent() {
 		required["content"] = Undefined
 	}
@@ -376,17 +379,49 @@ func decodeTranscriptObject(data []byte, target any, known string) (map[string]j
 func (m *Message) UnmarshalJSON(data []byte) error {
 	type plain Message
 	*m = Message{}
-	extra, err := decodeTranscriptObject(data, (*plain)(m), "role content timestamp sections toolsAdded toolsRemoved api provider model responseModel responseId providerThinkingLevel thinkingLevel diagnostics usage stopReason deferred errorMessage rawStopReason endTurn toolCallId toolName details nestedCalls isError")
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	// Pi copies model identity properties without string validation, including
+	// into failure messages. Keep non-string JSON values in encoding metadata;
+	// native string fields remain empty until explicitly replaced by callers.
+	identity := map[string]json.RawMessage{}
+	for _, key := range []string{"api", "provider", "model"} {
+		value := bytes.TrimSpace(fields[key])
+		if len(value) > 0 && value[0] != '"' && !bytes.Equal(value, []byte("null")) {
+			identity[key] = fields[key]
+			delete(fields, key)
+		}
+	}
+	decoded := data
+	if len(identity) > 0 {
+		var err error
+		decoded, err = json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+	}
+	extra, err := decodeTranscriptObject(decoded, (*plain)(m), "role content timestamp sections toolsAdded toolsRemoved api provider model responseModel responseId providerThinkingLevel thinkingLevel diagnostics usage stopReason deferred errorMessage rawStopReason endTurn toolCallId toolName details nestedCalls isError")
 	m.Extra = extra
 	if err == nil {
-		var fields map[string]json.RawMessage
-		if err = json.Unmarshal(data, &fields); err == nil {
-			m.Content.undefined = fields["content"] == nil
-			m.Details, err = jsonjs.DecodeOptional(fields["details"])
-		}
+		m.Content.undefined = fields["content"] == nil
+		m.Details, err = jsonjs.DecodeOptional(fields["details"])
 	}
 	if err == nil {
 		m.encoding, err = captureTranscriptEncoding(data, m)
+	}
+	if err == nil && len(identity) > 0 {
+		if m.encoding == nil {
+			m.encoding = &transcriptEncoding{original: map[string]json.RawMessage{}, normalized: map[string]json.RawMessage{}}
+		}
+		for key, value := range identity {
+			m.encoding.original[key] = value
+			m.encoding.normalized[key] = nil
+			if m.Role == "assistant" {
+				m.encoding.normalized[key] = json.RawMessage(`""`)
+			}
+		}
 	}
 	return err
 }

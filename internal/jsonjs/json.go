@@ -219,7 +219,13 @@ func (p *jsonValueParser) stringUnits() []uint16 {
 			}
 			units = append(units, unit)
 		} else {
-			r, size := utf8.DecodeRune(p.raw[p.pos:])
+			raw := p.raw[p.pos:]
+			r, size := utf8.DecodeRune(raw)
+			// In-memory JavaScript strings may contain unpaired UTF-16 units.
+			// Preserve their WTF-8 representation, as StringCodePoints does.
+			if len(raw) >= 3 && raw[0] == 0xed && raw[1] >= 0xa0 && raw[1] <= 0xbf && raw[2]&0xc0 == 0x80 {
+				r, size = rune(raw[0]&0xf)<<12|rune(raw[1]&0x3f)<<6|rune(raw[2]&0x3f), 3
+			}
 			p.pos += size
 			if r > 0xffff {
 				high, low := utf16.EncodeRune(r)
