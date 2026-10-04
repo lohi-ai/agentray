@@ -111,6 +111,7 @@ func TestLohiEvidenceV1HonestyRulesStayPortable(t *testing.T) {
 		"partial", "unavailable", "gross VND", "net event", "LT credits",
 		"canonical_id", "Unknown signup attribution", "association", "scenario projection",
 		"first-touch-with-unknown", "full elapsed horizon", "lt_purchased_topup_control",
+		"settled escrow consumption", "direct-debit lower bounds",
 		"do not", "read-only", "revision conflict", "external MCP clients",
 	} {
 		if !strings.Contains(strings.ToLower(body), strings.ToLower(marker)) {

@@ -147,7 +147,7 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 
 	r11 := run("R11")
 	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "net_event_revenue_vnd", Value: 850000, State: "partial", ReasonLike: "exclusive cutoff 18:14 HCM"})
-	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 380, State: "complete"})
+	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 380, State: "qualified", ReasonLike: "settled escrow consumption is unavailable"})
 	components := map[string]float64{}
 	for _, series := range []string{"lt_issued", "lt_purchased_ledger", "lt_refunded", "lt_granted", "lt_issued_other", "lt_purchased_topup_control", "lt_purchase_reconciliation_delta"} {
 		components[series] = lohiMetricValue(t, r11, series)
@@ -168,6 +168,49 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	if outflows["lt_spent"] != 380 || outflows["lt_held"] != 200 || outflows["lt_clawed_back"] != 800 {
 		t.Fatalf("debit classification drifted: %#v", outflows)
 	}
+}
+
+func TestLohiEvidenceV1SettlementAndSubsecondAgeStayHonest(t *testing.T) {
+	d := openTestDuckDB(t)
+	projectID := "10101010-1010-4010-8010-101010101010"
+	connectorID := "51515151-5151-4515-8515-515151515151"
+	ctx := context.Background()
+	ledgerRows := []connector.LandedRow{
+		{Key: "auction-hold", DataJSON: `{"id":"auction-hold","user_id":"winner","created_at":"2026-09-15T04:00:00Z","amount_lt":-100,"reason":"hoa_than_bid_hold","reference_id":"auction-1"}`},
+		{Key: "auction-refund", DataJSON: `{"id":"auction-refund","user_id":"winner","created_at":"2026-09-16T04:00:00Z","amount_lt":90,"reason":"hoa_than_refund","reference_id":"auction-1"}`},
+	}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "ar_lohi.wallet_ledger_v1", ledgerRows, AppliedMark{}); err != nil {
+		t.Fatalf("seed settled auction ledger: %v", err)
+	}
+	userRows := []connector.LandedRow{{
+		Key:      "subsecond-young",
+		DataJSON: `{"id":"subsecond-young","user_id":"subsecond-young","registered_at":"2026-09-26T11:14:00.000001Z","updated_at":"2026-09-26T11:14:00.000001Z","signup_provider":"google"}`,
+	}}
+	if err := d.InsertExternalRows(ctx, projectID, connectorID, "ar_lohi.users_v1", userRows, AppliedMark{}); err != nil {
+		t.Fatalf("seed subsecond cohort: %v", err)
+	}
+
+	pool, queryCtx := newTestSandboxPool(t, d, nil)
+	run := func(ref string) []map[string]any {
+		t.Helper()
+		query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()[ref], projectID, nil)
+		if err != nil {
+			t.Fatalf("scope %s: %v", ref, err)
+		}
+		rows, err := pool.query(queryCtx, projectID, query, args)
+		if err != nil {
+			t.Fatalf("execute %s: %v", ref, err)
+		}
+		return rows
+	}
+
+	r06 := run("R06")
+	assertLohiRow(t, r06, querytest.LohiAssertion{Date: "2026-09-15", Series: "lt_spent", Value: 0, State: "qualified", ReasonLike: "settled escrow consumption"})
+	assertLohiRow(t, r06, querytest.LohiAssertion{Date: "2026-09-15", Series: "lt_spenders", Value: 0, State: "qualified", ReasonLike: "spender evidence are unavailable"})
+	r11 := run("R11")
+	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 0, State: "qualified", ReasonLike: "settled escrow consumption is unavailable"})
+	r10 := run("R10")
+	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-26", Series: "conversion_7d:unknown", State: "not_ready", AgeDays: 6, Eligible: 0, Converted: 0})
 }
 
 func TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows(t *testing.T) {
@@ -228,6 +271,9 @@ func assertLohiRow(t *testing.T, rows []map[string]any, want querytest.LohiAsser
 		}
 		if want.ReasonLike != "" && !strings.Contains(fmt.Sprint(row["reason"]), want.ReasonLike) {
 			t.Fatalf("%s/%s reason = %v, want substring %q", want.Date, want.Series, row["reason"], want.ReasonLike)
+		}
+		if want.AgeDays != nil && fmt.Sprint(row["age_days"]) != fmt.Sprint(want.AgeDays) {
+			t.Fatalf("%s/%s age_days = %v, want %v", want.Date, want.Series, row["age_days"], want.AgeDays)
 		}
 		if want.Eligible != nil && fmt.Sprint(row["eligible"]) != fmt.Sprint(want.Eligible) {
 			t.Fatalf("%s/%s eligible = %v, want %v", want.Date, want.Series, row["eligible"], want.Eligible)

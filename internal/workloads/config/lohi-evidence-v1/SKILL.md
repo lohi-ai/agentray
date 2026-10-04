@@ -24,9 +24,12 @@ and the exact body external MCP clients import.
    money/counts and round only ratios.
    For LT, positive reasons ending in `_refund` (and the legacy exact `refund`)
    are reversal credits; negative refund reasons are clawbacks. Negative reasons
-   ending in `_hold` are escrow, not consumption. Keep all debits visible and
-   reconcile them exactly to consumption, holds, and clawbacks; only consumption
-   contributes to spender counts and LT/spender.
+   ending in `_hold` are escrow ledger movements, not directly attributable
+   consumption. Keep all debits visible and reconcile them exactly to direct
+   consumption debits, gross hold debits, and clawbacks. The six exports do not
+   include auction/session settlement state, so `lt_spent` and `lt_spenders` are
+   qualified direct-debit lower bounds; `lt_per_spender` covers directly observed
+   consumers only. Never infer settled escrow consumption from hold/refund pairs.
 5. Count event people by `canonical_id`. Join source users only on the approved
    `user_id`. Unknown signup attribution remains unknown; a payment rail is not
    an acquisition source. Never backfill TikTok from a later page view.
@@ -318,27 +321,35 @@ WITH bound AS (
   UNION ALL SELECT day, 'lt_per_spender', CASE WHEN spenders = 0 THEN NULL ELSE round(spent_lt::DOUBLE / spenders, 2) END, 'LT/person', spenders FROM daily
 )
 SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
-       CASE WHEN value IS NULL THEN 'unavailable' WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
-       CASE WHEN value IS NULL THEN 'undefined denominator'
-            WHEN day = DATE '2026-10-03' AND series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'exclusive cutoff 18:14 HCM, partial HCM day, consumption only, excludes refund clawbacks and escrow holds'
-            WHEN day = DATE '2026-10-03' AND series = 'lt_all_debits' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, exact reconciliation total: consumption plus escrow holds plus refund clawbacks'
+       CASE WHEN value IS NULL THEN 'unavailable'
+            WHEN day = DATE '2026-10-03' THEN 'partial'
+            WHEN series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'qualified'
+            ELSE 'complete' END AS state,
+       CASE WHEN value IS NULL AND series = 'lt_per_spender' THEN 'undefined direct-debit denominator, settled escrow consumption and spender evidence are unavailable in the six exports'
+            WHEN value IS NULL THEN 'undefined denominator'
+            WHEN day = DATE '2026-10-03' AND series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'exclusive cutoff 18:14 HCM, partial HCM day, direct-debit consumption only, settled escrow consumption and spender evidence are unavailable in the six exports'
+            WHEN day = DATE '2026-10-03' AND series = 'lt_all_debits' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, exact ledger-debit total: direct consumption debits plus gross escrow-hold debits plus refund clawbacks'
             WHEN day = DATE '2026-10-03' AND series = 'lt_clawed_back' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, negative refund-reason reversals excluded from consumption'
-            WHEN day = DATE '2026-10-03' AND series = 'lt_held' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, escrow holds excluded from consumption'
+            WHEN day = DATE '2026-10-03' AND series = 'lt_held' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, gross escrow-hold debits, not outstanding escrow or settled price'
             WHEN series = 'lt_issued' THEN 'sum of purchased, refunded, granted and other positive ledger components'
             WHEN series = 'lt_purchased_topup_control' THEN 'completed topups_v1.lt_amount control, compare with lt_purchased_ledger'
             WHEN series = 'lt_purchase_reconciliation_delta' THEN 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile'
-            WHEN series = 'lt_all_debits' THEN 'exact reconciliation total: consumption plus escrow holds plus refund clawbacks'
+            WHEN series = 'lt_all_debits' THEN 'exact ledger-debit total: direct consumption debits plus gross escrow-hold debits plus refund clawbacks'
             WHEN series = 'lt_clawed_back' THEN 'negative refund-reason reversals, excluded from consumption and spender counts'
-            WHEN series = 'lt_held' THEN 'negative escrow-hold reasons, excluded from consumption and spender counts'
-            WHEN series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'consumption only, excludes refund clawbacks and escrow holds'
+            WHEN series = 'lt_held' THEN 'gross negative escrow-hold debits, not outstanding escrow or settled price'
+            WHEN series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'qualified direct-debit consumption only, settled escrow consumption and spender evidence are unavailable in the six exports'
             WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, partial HCM day'
             ELSE '' END AS reason
 FROM metrics ORDER BY day, series
 ```
 
 `lt_issued` must equal the four positive-ledger components. `lt_all_debits` must
-equal `lt_spent + lt_held + lt_clawed_back`; the latter two never contribute to
-spender counts or LT/spender. Reconcile
+equal `lt_spent + lt_held + lt_clawed_back` as a classification of ledger
+movements. This equation does not prove auction lifecycle settlement: the six
+exports carry neither settlement state nor the settled price. `lt_spent` and
+`lt_spenders` are therefore qualified direct-debit lower bounds, and
+`lt_per_spender` describes directly observed consumers only when defined.
+Reconcile
 `lt_purchased_ledger` to `lt_purchased_topup_control`; do not hide a nonzero
 delta. A flow deficit does not prove current balances or the next purchase time.
 
@@ -494,7 +505,7 @@ WITH source_bound AS (
   FROM signup_events_ranked WHERE touch_rank = 1
 ), people AS (
   SELECT u.user_id, u.registered_at, cast(timezone('Asia/Ho_Chi_Minh', u.registered_at) AS DATE) AS cohort_date,
-         floor(date_diff('second', u.registered_at, TIMESTAMPTZ '2026-10-03 11:14:00+00')::DOUBLE / 86400)::BIGINT AS cohort_age_days,
+         floor(epoch(TIMESTAMPTZ '2026-10-03 11:14:00+00' - u.registered_at) / 86400)::BIGINT AS cohort_age_days,
          fp.first_completed_at,
          coalesce(se.acquisition, 'unknown') AS acquisition
   FROM users u LEFT JOIN first_pay fp USING (user_id) LEFT JOIN signup_events se USING (user_id)
@@ -634,10 +645,10 @@ WITH source_bound AS (
   UNION ALL SELECT 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows outside purchase, refund and grant classes' FROM ledger_totals
   UNION ALL SELECT 'lt_purchased_topup_control', purchased_lt::DOUBLE, 'LT', topup_rows, 'complete', 'Sep 1-Oct 2 completed topups_v1.lt_amount control' FROM topup_control
   UNION ALL SELECT 'lt_purchase_reconciliation_delta', (l.purchased_lt-t.purchased_lt)::DOUBLE, 'LT', t.topup_rows, 'complete', 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile' FROM ledger_totals l CROSS JOIN topup_control t
-  UNION ALL SELECT 'lt_all_debits', all_debits_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 exact total: consumption plus escrow holds plus refund clawbacks' FROM ledger_totals
+  UNION ALL SELECT 'lt_all_debits', all_debits_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 exact ledger-debit total: direct consumption debits plus gross escrow-hold debits plus refund clawbacks' FROM ledger_totals
   UNION ALL SELECT 'lt_clawed_back', clawed_back_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 negative refund-reason reversals, excluded from consumption' FROM ledger_totals
-  UNION ALL SELECT 'lt_held', held_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 escrow holds, excluded from consumption' FROM ledger_totals
-  UNION ALL SELECT 'lt_spent', spent_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 consumption only, excludes refund clawbacks and escrow holds, LT is not VND' FROM ledger_totals
+  UNION ALL SELECT 'lt_held', held_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 gross escrow-hold debits, not outstanding escrow or settled price' FROM ledger_totals
+  UNION ALL SELECT 'lt_spent', spent_lt::DOUBLE, 'LT', ledger_rows, 'qualified', 'Sep 1-Oct 2 direct-debit consumption lower bound, settled escrow consumption is unavailable in the six exports, LT is not VND' FROM ledger_totals
   UNION ALL SELECT 'known_payer_source_max_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*largest_known_source/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, unknown remains separate, 60 percent is a target' FROM source_mix
   UNION ALL SELECT 'payer_outside_tiktok_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*outside_tiktok/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, association not campaign proof' FROM source_mix
   UNION ALL SELECT 'cost_per_signup', NULL::DOUBLE, 'VND/person', 0, 'unavailable', 'approved campaign-cost binding not installed'

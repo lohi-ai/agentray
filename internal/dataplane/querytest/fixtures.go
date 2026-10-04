@@ -75,6 +75,7 @@ type LohiAssertion struct {
 	Value      any    `json:"value,omitempty"`
 	State      string `json:"state,omitempty"`
 	ReasonLike string `json:"reason_like,omitempty"`
+	AgeDays    any    `json:"age_days,omitempty"`
 	Eligible   any    `json:"eligible,omitempty"`
 	Converted  any    `json:"converted,omitempty"`
 }
