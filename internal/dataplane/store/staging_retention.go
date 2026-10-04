@@ -56,6 +56,19 @@ type StagingRetentionBackend interface {
 	DeleteEligibleStagingChunk(context.Context, string, time.Time, int) (deleted int, stillEligible bool, err error)
 }
 
+type stagingGenerationCursor struct {
+	terminalAt time.Time
+	generation string
+	valid      bool
+}
+
+// stagingRetentionPager lets the production backend advance past protected
+// terminal generations without widening the public retention contract. Test
+// and alternate backends keep the single-page interface above.
+type stagingRetentionPager interface {
+	listStagingGenerationsPage(context.Context, time.Time, stagingGenerationCursor, int) ([]StagingGenerationDescriptor, stagingGenerationCursor, bool, error)
+}
+
 type StagingRetention struct {
 	backend StagingRetentionBackend
 	ttl     time.Duration
@@ -96,24 +109,38 @@ func (r *StagingRetention) sweep(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, stagingPassBudget)
 	defer cancel()
 	cutoff := r.now().UTC().Add(-r.ttl)
+	process := func(candidates []StagingGenerationDescriptor) bool {
+		for _, candidate := range candidates {
+			if !EligibleForStagingCleanup(candidate, cutoff) {
+				continue
+			}
+			for {
+				deleted, eligible, err := r.backend.DeleteEligibleStagingChunk(ctx, candidate.Generation, cutoff, stagingDeleteChunk)
+				if err != nil || !eligible || deleted < stagingDeleteChunk {
+					break
+				}
+			}
+			if ctx.Err() != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if pager, ok := r.backend.(stagingRetentionPager); ok {
+		cursor := stagingGenerationCursor{}
+		for {
+			candidates, next, more, err := pager.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+			if err != nil || !process(candidates) || !more {
+				return
+			}
+			cursor = next
+		}
+	}
 	candidates, err := r.backend.ListStagingGenerations(ctx, cutoff, 256)
 	if err != nil {
 		return
 	}
-	for _, candidate := range candidates {
-		if !EligibleForStagingCleanup(candidate, cutoff) {
-			continue
-		}
-		for {
-			deleted, eligible, err := r.backend.DeleteEligibleStagingChunk(ctx, candidate.Generation, cutoff, stagingDeleteChunk)
-			if err != nil || !eligible || deleted < stagingDeleteChunk {
-				break
-			}
-		}
-		if ctx.Err() != nil {
-			return
-		}
-	}
+	process(candidates)
 }
 
 func (r *StagingRetention) Stop() {

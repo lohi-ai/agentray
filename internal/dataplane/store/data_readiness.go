@@ -522,6 +522,15 @@ WHERE project_id = ? AND connector_id = ? AND table_name = ?`, s.ProjectID, s.Co
 		}
 		return true, nil
 	}
+	if s.GenerationSeq > 0 && priorGenerationSeq == 0 {
+		// An incremental-to-snapshot switch also starts a new ordering domain.
+		// A delayed snapshot from before the switch must not regain authority
+		// merely because snapshot sequences are positive; compare the capture
+		// boundaries across the mode transition just as the inverse case does.
+		if s.CaptureStartedAt == nil || (priorCaptureStarted.Valid && !s.CaptureStartedAt.UTC().After(priorCaptureStarted.Time.UTC())) {
+			return true, nil
+		}
+	}
 	if s.GenerationSeq > 0 && s.GenerationSeq == priorGenerationSeq && generationKey != priorGenerationKey {
 		return false, fmt.Errorf("generation sequence %d conflicts with current generation", s.GenerationSeq)
 	}

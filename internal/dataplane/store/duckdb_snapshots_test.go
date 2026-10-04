@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 )
 
@@ -138,6 +141,112 @@ func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
 	}); err != nil || rows == 0 {
 		t.Fatalf("active staging rows=%d err=%v", rows, err)
 	}
+}
+
+func TestDelayedSnapshotDoesNotOverwriteNewerIncrementalRows(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		delayedFinalBatch  bool
+		legitimateNewStart bool
+	}{
+		{name: "delayed_completion"},
+		{name: "delayed_final_batch", delayedFinalBatch: true},
+		{name: "later_snapshot_transition", legitimateNewStart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDuckDB(t)
+			ctx := context.Background()
+			projectID, connectorID, syncID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+			base := time.Now().UTC().Add(-time.Hour)
+			batch1, complete1 := snapshotEnvelopePair(t, projectID, connectorID, syncID, base.Add(time.Minute), 1, 1)
+			for _, env := range []connector.SnapshotEnvelope{batch1, complete1} {
+				if _, err := d.ApplySnapshotEnvelope(ctx, env, AppliedMark{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			snapshotStart := base.Add(2 * time.Minute)
+			if tc.legitimateNewStart {
+				snapshotStart = base.Add(4 * time.Minute)
+			}
+			batch2, complete2 := snapshotEnvelopePair(t, projectID, connectorID, syncID, snapshotStart, 2, 2)
+			if tc.delayedFinalBatch {
+				if promotion, err := d.ApplySnapshotEnvelope(ctx, complete2, AppliedMark{}); err != nil || promotion != nil {
+					t.Fatalf("stage completion promotion=%+v err=%v", promotion, err)
+				}
+			} else if !tc.legitimateNewStart {
+				if promotion, err := d.ApplySnapshotEnvelope(ctx, batch2, AppliedMark{}); err != nil || promotion != nil {
+					t.Fatalf("stage batch promotion=%+v err=%v", promotion, err)
+				}
+			}
+
+			incrementalAt := base.Add(3 * time.Minute)
+			index := uint64(0)
+			incremental := SourceReceiptMark{ProjectID: projectID, ConnectorID: connectorID, Table: "orders", SyncID: syncID,
+				RunID: uuid.NewString(), BatchID: "delta", BatchIndex: &index, PayloadSHA256: strings.Repeat("b", 64),
+				CaptureStartedAt: &incrementalAt, Promoted: true}
+			if err := d.InsertExternalRows(ctx, projectID, connectorID, "orders",
+				[]connector.LandedRow{{Key: "same", DataJSON: `{"n":3}`}}, AppliedMark{Source: &incremental}); err != nil {
+				t.Fatal(err)
+			}
+
+			trigger := complete2
+			if tc.delayedFinalBatch || tc.legitimateNewStart {
+				trigger = batch2
+				if tc.legitimateNewStart {
+					if promotion, err := d.ApplySnapshotEnvelope(ctx, complete2, AppliedMark{}); err != nil || promotion != nil {
+						t.Fatalf("stage later completion promotion=%+v err=%v", promotion, err)
+					}
+				}
+			}
+			promotion, err := d.ApplySnapshotEnvelope(ctx, trigger, AppliedMark{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 3
+			if tc.legitimateNewStart {
+				want = 2
+				if promotion == nil {
+					t.Fatal("later snapshot was not promoted")
+				}
+			} else if promotion != nil {
+				t.Fatalf("delayed snapshot unexpectedly promoted: %+v", promotion)
+			}
+			var got int
+			if err := d.Read(ctx, func(conn *sql.Conn) error {
+				return conn.QueryRowContext(ctx, `SELECT CAST(json_extract(data,'$.n') AS INTEGER) FROM external_rows
+WHERE project_id=? AND connector_id=? AND table_name='orders'`, projectID, connectorID).Scan(&got)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("serving value=%d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func snapshotEnvelopePair(t *testing.T, projectID, connectorID, syncID string, started time.Time, sequence int64, value int) (connector.SnapshotEnvelope, connector.SnapshotEnvelope) {
+	t.Helper()
+	rows := []connector.SnapshotRow{{Key: "same", Data: json.RawMessage(fmt.Sprintf(`{"n":%d}`, value))}}
+	payload, err := connector.SnapshotPayloadDigest(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := connector.SnapshotManifestDigest([]connector.SnapshotManifestEntry{{Index: 0, BatchID: "batch", PayloadSHA256: payload, RowCount: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := started.Add(time.Second)
+	batch := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: connectorID,
+		Table: "orders", SyncID: syncID, RunID: uuid.NewString(), Generation: uuid.NewString(), GenerationSeq: sequence,
+		BindingDigest: strings.Repeat("a", 64), CaptureStartedAt: started, Kind: connector.SnapshotKindBatch,
+		BatchID: "batch", PayloadSHA256: payload, Rows: rows}
+	complete := batch
+	complete.Kind, complete.Rows, complete.BatchID, complete.PayloadSHA256 = connector.SnapshotKindComplete, nil, "", ""
+	complete.CaptureFinishedAt, complete.ExpectedBatches, complete.ExpectedRows = &finished, 1, 1
+	complete.BatchManifestSHA256 = manifest
+	return batch, complete
 }
 
 func TestSnapshotCleanupTombstoneFencesLateRedelivery(t *testing.T) {

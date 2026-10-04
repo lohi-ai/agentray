@@ -663,3 +663,52 @@ WHERE project_id=? AND connector_id=? AND table_name=?`, projectID, sync.Connect
 		})
 	}
 }
+
+func TestStagingRetentionPaginatesPastProtectedSealedGenerations(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.duck = openTestDuckDB(t)
+	t.Cleanup(func() {
+		if _, err := s.pg.Exec(ctx, `DELETE FROM connector_snapshot_generations WHERE project_id=$1`, projectID); err != nil {
+			t.Error(err)
+		}
+	})
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch,sync_revision,source_revision)
+SELECT $1,$2,$3,$4,gen_random_uuid(),i,$5,'sealed',$6,$6,$6,gen_random_uuid(),'retention-pagination',1,1,1
+FROM generate_series(1,256) AS series(i)`, projectID, sync.ConnectorID, sync.SourceTable, syncID, strings.Repeat("a", 64), old); err != nil {
+		t.Fatal(err)
+	}
+	target := uuid.NewString()
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,terminal_at,run_id,owner,lease_epoch,sync_revision,source_revision)
+VALUES($1,$2,$3,$4,$5,257,$6,'failed',$7,$7,$8,'retention-pagination',1,1,1)`,
+		projectID, sync.ConnectorID, sync.SourceTable, syncID, target, strings.Repeat("a", 64), old.Add(time.Hour), uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.duck.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_rows
+(project_id,connector_id,table_name,generation,batch_id,row_key,data) VALUES(?,?,?,?,?,?,?)`,
+			projectID, sync.ConnectorID, sync.SourceTable, target, "batch-0", "1", "{}")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := NewStagingRetention(s, 7*24*time.Hour)
+	r.sweep(ctx)
+	var rows int
+	if err := s.duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, target).Scan(&rows)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("eligible candidate after protected page retained %d staging rows", rows)
+	}
+}
