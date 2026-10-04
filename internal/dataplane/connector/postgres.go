@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func init() {
@@ -25,8 +26,10 @@ func init() {
 // connection per Source; the Engine opens and closes it around each sync run.
 // A Source is used from one goroutine at a time, so the type cache is unlocked.
 type postgresSource struct {
-	conn    *pgx.Conn
-	binding *SourceBinding
+	conn              *pgx.Conn
+	bindings          []SourceBinding
+	validatedBindings map[string]struct{}
+	validatedKeys     map[string]struct{}
 	// columnTypes caches format_type lookups per "table\x00column" — the type
 	// cannot change within a Source's lifetime, and PullRows runs per batch.
 	columnTypes map[string]string
@@ -39,11 +42,11 @@ func openPostgres(ctx context.Context, dsn string) (Source, error) {
 	return openPostgresConfig(ctx, dsn, nil, nil)
 }
 
-func openPostgresWithPolicy(ctx context.Context, dsn string, policy *SourcePolicy, binding *SourceBinding) (Source, error) {
-	return openPostgresConfig(ctx, dsn, policy, binding)
+func openPostgresWithPolicy(ctx context.Context, dsn string, policy *SourcePolicy, bindings []SourceBinding) (Source, error) {
+	return openPostgresConfig(ctx, dsn, policy, bindings)
 }
 
-func openPostgresConfig(ctx context.Context, dsn string, policy *SourcePolicy, binding *SourceBinding) (Source, error) {
+func openPostgresConfig(ctx context.Context, dsn string, policy *SourcePolicy, bindings []SourceBinding) (Source, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		// ParseConfig error text can echo the raw connection string; never
@@ -75,21 +78,27 @@ func openPostgresConfig(ctx context.Context, dsn string, policy *SourcePolicy, b
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect to %s:%d/%s failed: %s", cfg.Host, cfg.Port, cfg.Database, sanitizePGError(err, cfg.Password))
 	}
-	source := &postgresSource{conn: conn, binding: binding, columnTypes: map[string]string{}}
+	source := &postgresSource{conn: conn, bindings: bindings, validatedBindings: map[string]struct{}{}, validatedKeys: map[string]struct{}{}, columnTypes: map[string]string{}}
 	if policy != nil {
 		var super, createRole, createDB, bypassRLS, broadMembership, canCreateSchema, readOnly bool
-		if err := conn.QueryRow(dialCtx, `SELECT r.rolsuper,r.rolcreaterole,r.rolcreatedb,r.rolbypassrls,
+		schemas := map[string]struct{}{}
+		for _, binding := range bindings {
+			schemas[binding.Schema] = struct{}{}
+		}
+		for schema := range schemas {
+			if err := conn.QueryRow(dialCtx, `SELECT r.rolsuper,r.rolcreaterole,r.rolcreatedb,r.rolbypassrls,
 EXISTS(SELECT 1 FROM unnest(ARRAY['pg_read_all_data','pg_write_all_data','pg_execute_server_program','pg_read_server_files','pg_write_server_files','pg_signal_backend']) wanted(role_name)
 JOIN pg_roles granted ON granted.rolname=wanted.role_name WHERE pg_has_role(current_user,granted.oid,'MEMBER')),
 has_database_privilege(current_user,current_database(),'CREATE') OR has_schema_privilege(current_user,$1,'CREATE'),
-current_setting('default_transaction_read_only')='on' FROM pg_roles r WHERE r.rolname=current_user`, binding.Schema).
-			Scan(&super, &createRole, &createDB, &bypassRLS, &broadMembership, &canCreateSchema, &readOnly); err != nil {
-			source.Close()
-			return nil, fmt.Errorf("postgres: source role preflight failed")
-		}
-		if super || createRole || createDB || bypassRLS || broadMembership || canCreateSchema || !readOnly {
-			source.Close()
-			return nil, fmt.Errorf("postgres: source role has prohibited administrative privileges")
+current_setting('default_transaction_read_only')='on' FROM pg_roles r WHERE r.rolname=current_user`, schema).
+				Scan(&super, &createRole, &createDB, &bypassRLS, &broadMembership, &canCreateSchema, &readOnly); err != nil {
+				source.Close()
+				return nil, fmt.Errorf("postgres: source role preflight failed")
+			}
+			if super || createRole || createDB || bypassRLS || broadMembership || canCreateSchema || !readOnly {
+				source.Close()
+				return nil, fmt.Errorf("postgres: source role has prohibited administrative privileges")
+			}
 		}
 	}
 	return source, nil
@@ -232,8 +241,8 @@ func (p *postgresSource) TestConnection(ctx context.Context) error {
 // non-system schema the connection can see, with primary-key membership so
 // the UI and the AI draft can propose a row key.
 func (p *postgresSource) DiscoverSchema(ctx context.Context) ([]Table, error) {
-	if p.binding != nil {
-		return p.discoverApprovedView(ctx)
+	if len(p.bindings) > 0 {
+		return p.discoverApprovedRelations(ctx)
 	}
 	rows, err := p.conn.Query(ctx, `
 SELECT c.table_schema, c.table_name, c.column_name, c.data_type,
@@ -283,20 +292,31 @@ ORDER BY c.table_schema, c.table_name, c.ordinal_position`)
 	return tables, rows.Err()
 }
 
-func (p *postgresSource) discoverApprovedView(ctx context.Context) ([]Table, error) {
-	b := p.binding
+func (p *postgresSource) discoverApprovedRelations(ctx context.Context) ([]Table, error) {
+	tables := make([]Table, 0, len(p.bindings))
+	for i := range p.bindings {
+		table, err := p.discoverApprovedBinding(ctx, &p.bindings[i])
+		if err != nil {
+			return nil, err
+		}
+		tables = append(tables, table)
+	}
+	return tables, nil
+}
+
+func (p *postgresSource) discoverApprovedBinding(ctx context.Context, b *SourceBinding) (Table, error) {
 	var relKind string
 	if err := p.conn.QueryRow(ctx, `
 SELECT c.relkind::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1 AND c.relname = $2`, b.Schema, b.Relation).Scan(&relKind); err != nil {
-		return nil, fmt.Errorf("postgres: approved export is unavailable")
+		return Table{}, fmt.Errorf("postgres: approved export is unavailable")
 	}
 	expectedKind := "v"
 	if b.RelationKind == RelationKindLegacyTable {
 		expectedKind = "r"
 	}
 	if relKind != expectedKind {
-		return nil, fmt.Errorf("postgres: approved export relation kind changed")
+		return Table{}, fmt.Errorf("%w: postgres approved export relation kind changed", ErrSnapshotKeyInvalid)
 	}
 	rows, err := p.conn.Query(ctx, `
 SELECT a.attname, format_type(a.atttypid, a.atttypmod)
@@ -304,31 +324,31 @@ FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON
 WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum`, b.Schema, b.Relation)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: discover approved export failed")
+		return Table{}, fmt.Errorf("postgres: discover approved export failed")
 	}
 	defer rows.Close()
 	found := map[string]string{}
 	for rows.Next() {
 		var name, typ string
 		if err := rows.Scan(&name, &typ); err != nil {
-			return nil, fmt.Errorf("postgres: discover approved export failed")
+			return Table{}, fmt.Errorf("postgres: discover approved export failed")
 		}
 		found[name] = typ
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: discover approved export failed")
+		return Table{}, fmt.Errorf("postgres: discover approved export failed")
 	}
 	if len(found) != len(b.Columns) {
-		return nil, fmt.Errorf("postgres: approved export schema changed")
+		return Table{}, fmt.Errorf("%w: postgres approved export schema changed", ErrSnapshotKeyInvalid)
 	}
 	cols := make([]Column, 0, len(b.Columns))
 	for _, allowed := range b.Columns {
 		if found[allowed.Name] != allowed.PGType {
-			return nil, fmt.Errorf("postgres: approved export schema changed")
+			return Table{}, fmt.Errorf("%w: postgres approved export schema changed", ErrSnapshotKeyInvalid)
 		}
 		cols = append(cols, Column{Name: allowed.Name, Type: allowed.PGType, IsPrimaryKey: allowed.Name == b.KeyColumn})
 	}
-	return []Table{{Name: b.DisplayRelation(), Columns: cols, RelationKind: b.RelationKind, KeyColumn: b.KeyColumn, KeyStability: b.KeyStability}}, nil
+	return Table{Name: b.DisplayRelation(), Columns: cols, RelationKind: b.RelationKind, KeyColumn: b.KeyColumn, KeyStability: b.KeyStability}, nil
 }
 
 // PullRows fetches the next incremental batch, keyset-paginated on
@@ -341,19 +361,33 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	if req.Table == "" || req.KeyColumn == "" || (!req.Snapshot && req.CursorColumn == "") {
 		return PullResult{}, fmt.Errorf("postgres: table, key column, and cursor column are required")
 	}
-	if p.binding != nil {
-		if err := p.validateApprovedRequest(req); err != nil {
+	var binding *SourceBinding
+	if len(p.bindings) > 0 {
+		var err error
+		binding, err = p.bindingForRelation(req.Table)
+		if err != nil {
 			return PullResult{}, err
+		}
+		if err := p.validateApprovedRequest(binding, req); err != nil {
+			return PullResult{}, err
+		}
+		if err := p.ensureApprovedBinding(ctx, binding); err != nil {
+			return PullResult{}, err
+		}
+		if !req.Snapshot {
+			if err := p.ensureApprovedKey(ctx, binding); err != nil {
+				return PullResult{}, err
+			}
 		}
 	}
 	if req.Limit <= 0 {
 		req.Limit = 1000
 	}
 	queryTable := req.Table
-	if p.binding != nil {
+	if binding != nil {
 		// Keep the persisted/public landing identity untouched while always
 		// addressing the governed source relation with an explicit schema.
-		queryTable = p.binding.QualifiedRelation()
+		queryTable = binding.QualifiedRelation()
 	}
 	tableIdent, err := quoteQualified(queryTable)
 	if err != nil {
@@ -363,9 +397,9 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	keyIdent := pgx.Identifier{req.KeyColumn}.Sanitize()
 
 	selectList := "*"
-	if p.binding != nil {
-		idents := make([]string, 0, len(p.binding.Columns))
-		for _, c := range p.binding.Columns {
+	if binding != nil {
+		idents := make([]string, 0, len(binding.Columns))
+		for _, c := range binding.Columns {
 			idents = append(idents, pgx.Identifier{c.Name}.Sanitize())
 		}
 		selectList = strings.Join(idents, ", ")
@@ -460,8 +494,7 @@ func (p *postgresSource) PullRows(ctx context.Context, req PullRequest) (PullRes
 	return out, nil
 }
 
-func (p *postgresSource) validateApprovedRequest(req PullRequest) error {
-	b := p.binding
+func (p *postgresSource) validateApprovedRequest(b *SourceBinding, req PullRequest) error {
 	if !b.MatchesRelation(req.Table) || req.KeyColumn != b.KeyColumn {
 		return fmt.Errorf("postgres: source relation or key is not approved")
 	}
@@ -481,24 +514,67 @@ func (p *postgresSource) validateApprovedRequest(req PullRequest) error {
 // cannot establish uniqueness, so this query scans until it finds a violation
 // or proves none under the caller's deadline.
 func (p *postgresSource) ValidateSnapshotKey(ctx context.Context, table, keyColumn string) error {
-	if p.binding == nil || !p.binding.MatchesRelation(table) || keyColumn != p.binding.KeyColumn {
-		return fmt.Errorf("postgres: source relation or key is not approved")
+	b, err := p.bindingForRelation(table)
+	if err != nil || keyColumn != b.KeyColumn {
+		return fmt.Errorf("%w: postgres source relation or key is not approved", ErrSnapshotKeyInvalid)
 	}
-	tableIdent, err := quoteQualified(p.binding.QualifiedRelation())
+	// Snapshot validation is called before capture and again immediately before
+	// sealing. Do not use the per-connection structural cache here: the second
+	// call must observe relation-kind, column, or type drift during capture.
+	if _, err := p.discoverApprovedBinding(ctx, b); err != nil {
+		return err
+	}
+	return p.validateApprovedKey(ctx, b)
+}
+
+func (p *postgresSource) validateApprovedKey(ctx context.Context, b *SourceBinding) error {
+	tableIdent, err := quoteQualified(b.QualifiedRelation())
 	if err != nil {
 		return err
 	}
-	keyIdent := pgx.Identifier{keyColumn}.Sanitize()
+	keyIdent := pgx.Identifier{b.KeyColumn}.Sanitize()
 	query := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s WHERE %s IS NULL OR %s::text = '') OR EXISTS (SELECT 1 FROM %s GROUP BY %s HAVING count(*) > 1 LIMIT 1)`, tableIdent, keyIdent, keyIdent, tableIdent, keyIdent)
 	var invalid bool
 	if err := p.conn.QueryRow(ctx, query).Scan(&invalid); err != nil {
 		return fmt.Errorf("postgres: approved key validation failed")
 	}
 	if invalid {
-		return fmt.Errorf("postgres: approved key is null, empty, or duplicate")
+		return fmt.Errorf("%w: postgres approved key is null, empty, or duplicate", ErrSnapshotKeyInvalid)
 	}
-	_, err = p.discoverApprovedView(ctx)
-	return err
+	return nil
+}
+
+func (p *postgresSource) ensureApprovedKey(ctx context.Context, b *SourceBinding) error {
+	key := b.QualifiedRelation() + "\x00" + b.KeyColumn
+	if _, ok := p.validatedKeys[key]; ok {
+		return nil
+	}
+	if err := p.validateApprovedKey(ctx, b); err != nil {
+		return err
+	}
+	p.validatedKeys[key] = struct{}{}
+	return nil
+}
+
+func (p *postgresSource) bindingForRelation(relation string) (*SourceBinding, error) {
+	for i := range p.bindings {
+		if p.bindings[i].MatchesRelation(relation) {
+			return &p.bindings[i], nil
+		}
+	}
+	return nil, ErrSourcePolicyDenied
+}
+
+func (p *postgresSource) ensureApprovedBinding(ctx context.Context, b *SourceBinding) error {
+	key := b.QualifiedRelation()
+	if _, ok := p.validatedBindings[key]; ok {
+		return nil
+	}
+	if _, err := p.discoverApprovedBinding(ctx, b); err != nil {
+		return err
+	}
+	p.validatedBindings[key] = struct{}{}
+	return nil
 }
 
 // columnType returns the server-rendered type (format_type) of one column, for
@@ -579,6 +655,12 @@ func stringifyPGValue(v any) string {
 	}
 	if s, ok := v.(string); ok {
 		return s
+	}
+	if n, ok := v.(pgtype.Numeric); ok {
+		value, err := n.Value()
+		if err == nil && value != nil {
+			return fmt.Sprint(value)
+		}
 	}
 	return fmt.Sprint(v)
 }

@@ -231,6 +231,177 @@ func TestSnapshotClaimRejectsStaleSyncAndSourceRevisions(t *testing.T) {
 	}
 }
 
+func TestRepairG1FinishCancellationTerminalizesGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, claimed, g := seedRepairSnapshotGeneration(t, "g1")
+	if _, err := s.CancelConnectorRun(ctx, projectID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the heartbeat race: durable cancellation is already visible,
+	// but the local run context has not observed it yet (cancelled=false).
+	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-g1", connector.SyncResult{}, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "cancelled" {
+		t.Fatalf("generation state=%q after durable cancellation, want cancelled (run=%s epoch=%d)", got.State, claimed.ID, claimed.LeaseEpoch)
+	}
+}
+
+func TestRepairR1LocalShutdownKeepsGenerationResumable(t *testing.T) {
+	s, ctx, _, syncID, run, _, g := seedRepairSnapshotGeneration(t, "r1-shutdown")
+	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-r1-shutdown", connector.SyncResult{Err: "context canceled"}, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "capturing" {
+		t.Fatalf("local shutdown changed generation to %s without durable cancellation", got.State)
+	}
+}
+
+func TestRepairR2CancelledCrashedRunCannotResumeGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, _, g := seedRepairSnapshotGeneration(t, "r2-crash")
+	if _, err := s.CancelConnectorRun(ctx, projectID, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileConnectorRuns(ctx, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "after-cancelled-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimConnectorRun(ctx, next.ID, "owner-r2-next")
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := s.ClaimSnapshotGeneration(ctx, job, next.ID, "owner-r2-next", claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Generation == g.Generation {
+		t.Fatalf("durably cancelled generation resumed after crash: %s", g.Generation)
+	}
+}
+
+func TestSnapshotClaimDoesNotResumeArchiveCancelledGeneration(t *testing.T) {
+	s, ctx, projectID, syncID, run, _, generation := seedRepairSnapshotGeneration(t, "archive-crash")
+	dc, err := s.DataConnectorForProject(ctx, projectID, generation.ConnectorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := s.ArchiveDataConnectorIdempotent(ctx, projectID, generation.ConnectorID, dc.Revision, "archive-crash", "archive-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelledRun, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
+	if err != nil || !cancelledRun.CancelRequested {
+		t.Fatalf("archive cancellation is not durable: run=%+v err=%v", cancelledRun, err)
+	}
+	// Simulate the worker disappearing before it observes cancel_requested and
+	// calls FinishConnectorRun, then restore the connector for a later run.
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReconcileConnectorRuns(ctx, time.Now().Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UnarchiveDataConnectorIdempotent(ctx, projectID, generation.ConnectorID, archived.Revision, "unarchive-crash", "unarchive-crash"); err != nil {
+		t.Fatal(err)
+	}
+	nextRun, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "after-archive-crash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := s.ClaimConnectorRun(ctx, nextRun.ID, "owner-archive-next")
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextGeneration, err := s.ClaimSnapshotGeneration(ctx, job, nextRun.ID, "owner-archive-next", claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextGeneration.Generation == generation.Generation {
+		t.Fatalf("archive-cancelled generation resumed after crash: %s", generation.Generation)
+	}
+	retired, err := s.SnapshotGeneration(ctx, generation.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.State != "cancelled" {
+		t.Fatalf("archive-cancelled generation state=%q, want cancelled", retired.State)
+	}
+}
+
+func TestRepairG5ExpiredOwnerCannotFailGeneration(t *testing.T) {
+	s, ctx, _, _, run, _, g := seedRepairSnapshotGeneration(t, "g5")
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_runs SET heartbeat_at=now()-interval '3 minutes' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FailSnapshotGeneration(ctx, g); err == nil {
+		t.Fatal("expired owner changed generation to failed")
+	}
+	got, err := s.SnapshotGeneration(ctx, g.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "capturing" {
+		t.Fatalf("generation state=%q, want capturing", got.State)
+	}
+}
+
+func seedRepairSnapshotGeneration(t *testing.T, suffix string) (*Store, context.Context, string, string, connector.Run, connector.Run, connector.SnapshotGeneration) {
+	t.Helper()
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := connector.SourceBinding{ProjectID: projectID, ConnectorID: sync.ConnectorID, Schema: "public", Relation: "users", RelationKind: connector.RelationKindView,
+		Columns: []connector.SourcePolicyColumn{{Name: "id", PGType: "text"}}, KeyColumn: "id", KeyStability: connector.KeyStabilityImmutableUnique}
+	s.sourcePolicy = &connector.SourcePolicy{Version: 1, Bindings: []connector.SourceBinding{binding}}
+	s.sourcePolicyConfigured = true
+	if _, err := s.pg.Exec(ctx, `UPDATE connector_syncs SET source_table='public.users',sync_mode='snapshot',cursor_column='' WHERE id=$1`, syncID); err != nil {
+		t.Fatal(err)
+	}
+	run, _, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "repair-"+suffix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "owner-" + suffix
+	claimed, ok, err := s.ClaimConnectorRun(ctx, run.ID, owner)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	job, err := s.ConnectorSyncJob(ctx, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.ClaimSnapshotGeneration(ctx, job, run.ID, owner, claimed.LeaseEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, ctx, projectID, syncID, run, claimed, g
+}
+
 func TestStagingCleanupPreservesPerColourAuthority(t *testing.T) {
 	s := openConvTestStore(t)
 	ctx := context.Background()

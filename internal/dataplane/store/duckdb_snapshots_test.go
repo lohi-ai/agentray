@@ -214,3 +214,65 @@ func TestSnapshotConflictingReplayRejected(t *testing.T) {
 		t.Fatal("conflicting replay accepted")
 	}
 }
+
+func TestSnapshotDuplicateStagingErrorDoesNotExposeKey(t *testing.T) {
+	ctx := context.Background()
+	d, err := OpenDuckDB(ctx, filepath.Join(t.TempDir(), "staging-pii.duckdb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	raw, err := os.ReadFile(filepath.Join("..", "ingest", "testdata", "c1-wire-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Batches []connector.SnapshotEnvelope `json:"batches"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	first := fixture.Batches[0]
+	first.Rows[0].Key = sensitiveKey
+	first.PayloadSHA256, _ = connector.SnapshotPayloadDigest(first.Rows)
+	if _, err := d.ApplySnapshotEnvelope(ctx, first, AppliedMark{Durable: "staging-pii", Seq: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	conflict := fixture.Batches[1]
+	conflict.Rows = append([]connector.SnapshotRow(nil), first.Rows...)
+	conflict.PayloadSHA256, _ = connector.SnapshotPayloadDigest(conflict.Rows)
+	if _, err := d.ApplySnapshotEnvelope(ctx, conflict, AppliedMark{Durable: "staging-pii", Seq: 2}); err == nil {
+		t.Fatal("cross-batch duplicate accepted")
+	} else {
+		if !strings.Contains(err.Error(), "rejected by staging") {
+			t.Fatalf("error = %q, want safe staging category", err)
+		}
+		if strings.Contains(err.Error(), sensitiveKey) {
+			t.Fatalf("staging error exposed source row key: %v", err)
+		}
+	}
+
+	var batches, rows int
+	if err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM connector_snapshot_batches),(SELECT count(*) FROM connector_snapshot_rows)`).Scan(&batches, &rows)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if batches != 1 || rows != len(first.Rows) {
+		t.Fatalf("partial bad batch committed: batches=%d rows=%d", batches, rows)
+	}
+	position, err := d.AppliedPosition(ctx, "staging-pii")
+	if err != nil || position.Seq != 1 {
+		t.Fatalf("mark advanced: %+v %v", position, err)
+	}
+	if _, err := d.ApplySnapshotEnvelope(ctx, first, AppliedMark{Durable: "staging-pii", Seq: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApplySnapshotEnvelope(ctx, fixture.Batches[1], AppliedMark{Durable: "staging-pii", Seq: 3}); err != nil {
+		t.Fatal(err)
+	}
+}

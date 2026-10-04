@@ -1110,6 +1110,7 @@ export type ConnectorSync = {
   source_table: string;
   key_column: string;
   cursor_column: string;
+  sync_mode: '' | 'incremental' | 'snapshot';
   schedule_cron: string;
   enabled: boolean;
   cursor: string;
@@ -1149,6 +1150,7 @@ export type ConnectorSyncInput = {
   source_table: string;
   key_column: string;
   cursor_column: string;
+  sync_mode?: 'incremental' | 'snapshot';
   schedule_cron: string;
   enabled: boolean;
   join_key: string;

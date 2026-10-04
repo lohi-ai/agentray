@@ -144,16 +144,23 @@ func Open(ctx context.Context, kind, dsn string) (Source, error) {
 // OpenWithPolicy is the governed source entrypoint. PostgreSQL dials are
 // admitted against an operator-owned destination and export binding before a
 // socket is opened; other registered plugins retain their existing contract.
-func OpenWithPolicy(ctx context.Context, kind, dsn, projectID, connectorID string, policy *SourcePolicy) (Source, error) {
+func OpenWithPolicy(ctx context.Context, kind, dsn, projectID, connectorID string, policy *SourcePolicy, relation ...string) (Source, error) {
 	if kind != "postgres" {
 		return Open(ctx, kind, dsn)
 	}
 	if policy == nil {
 		return nil, ErrSourcePolicyDenied
 	}
-	binding, err := policy.Binding(projectID, connectorID)
+	bindings, err := policy.BindingsForConnector(projectID, connectorID)
 	if err != nil {
 		return nil, err
 	}
-	return openPostgresWithPolicy(ctx, dsn, policy, binding)
+	if len(relation) > 0 {
+		binding, err := policy.BindingForRelation(projectID, connectorID, relation[0])
+		if err != nil {
+			return nil, err
+		}
+		bindings = []SourceBinding{*binding}
+	}
+	return openPostgresWithPolicy(ctx, dsn, policy, bindings)
 }

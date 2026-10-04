@@ -22,33 +22,55 @@ func (q EventQueue) BuildSnapshotBatches(common connector.SnapshotEnvelope, rows
 	}
 	chunks := chunkRows(rows, q.publishBudget())
 	out := make([]connector.SnapshotEnvelope, 0, len(chunks))
-	for i, chunk := range chunks {
-		landed := make([]connector.LandedRow, 0, len(chunk))
-		for _, row := range chunk {
-			landed = append(landed, connector.LandedRow{Key: row.Key, Cursor: "", DataJSON: string(row.Data)})
-		}
-		wireRows, err := connector.SnapshotRows(landed)
+	for len(chunks) > 0 {
+		chunk := chunks[0]
+		chunks = chunks[1:]
+		idx := startIndex + int64(len(out))
+		env, raw, err := buildSnapshotBatch(common, chunk, idx)
 		if err != nil {
 			return nil, err
 		}
-		idx := startIndex + int64(i)
-		env := common
-		env.Protocol = connector.SnapshotProtocolV1
-		env.Kind = connector.SnapshotKindBatch
-		env.BatchIndex = idx
-		env.BatchID = fmt.Sprintf("batch-%06d", idx)
-		env.Rows = wireRows
-		env.CaptureFinishedAt = nil
-		env.PayloadSHA256, err = connector.SnapshotPayloadDigest(wireRows)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := connector.MarshalSnapshotEnvelope(env); err != nil {
-			return nil, err
+		if len(raw) > q.publishBudget() {
+			if len(chunk) == 1 {
+				return nil, fmt.Errorf("snapshot batch %d is %d bytes, over the %d-byte publish budget", idx, len(raw), q.publishBudget())
+			}
+			// The legacy chunker budgets row bodies only. Split an oversized
+			// candidate and measure the complete snapshot envelopes again so
+			// protocol metadata is accounted for before anything is persisted.
+			mid := len(chunk) / 2
+			chunks = append([][]ExternalRow{chunk[:mid], chunk[mid:]}, chunks...)
+			continue
 		}
 		out = append(out, env)
 	}
 	return out, nil
+}
+
+func buildSnapshotBatch(common connector.SnapshotEnvelope, chunk []ExternalRow, index int64) (connector.SnapshotEnvelope, []byte, error) {
+	landed := make([]connector.LandedRow, 0, len(chunk))
+	for _, row := range chunk {
+		landed = append(landed, connector.LandedRow{Key: row.Key, Cursor: "", DataJSON: string(row.Data)})
+	}
+	wireRows, err := connector.SnapshotRows(landed)
+	if err != nil {
+		return connector.SnapshotEnvelope{}, nil, err
+	}
+	env := common
+	env.Protocol = connector.SnapshotProtocolV1
+	env.Kind = connector.SnapshotKindBatch
+	env.BatchIndex = index
+	env.BatchID = fmt.Sprintf("batch-%06d", index)
+	env.Rows = wireRows
+	env.CaptureFinishedAt = nil
+	env.PayloadSHA256, err = connector.SnapshotPayloadDigest(wireRows)
+	if err != nil {
+		return connector.SnapshotEnvelope{}, nil, err
+	}
+	raw, err := connector.MarshalSnapshotEnvelope(env)
+	if err != nil {
+		return connector.SnapshotEnvelope{}, nil, err
+	}
+	return env, raw, nil
 }
 
 func (q EventQueue) PublishSnapshotEnvelope(ctx context.Context, env connector.SnapshotEnvelope) error {

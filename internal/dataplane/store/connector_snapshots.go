@@ -244,6 +244,20 @@ WHERE cs.id=$1 AND cs.project_id=$2 AND cs.connector_id=$3 FOR UPDATE OF cs,dc`,
 	if err := requireSnapshotRunFence(ctx, tx, runID, job.SyncID, owner, leaseEpoch); err != nil {
 		return connector.SnapshotGeneration{}, err
 	}
+	// A cancellation request is durable even when its worker disappears before
+	// FinishConnectorRun can terminalize the generation. Archive uses that
+	// request path for every admitted run, so retire any resumable generation
+	// whose previous run carries the flag before assigning it to this run.
+	// The flag is deliberately narrower than terminal run status: a local
+	// shutdown may finish its run as cancelled while leaving resumable progress.
+	if _, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations g
+SET state='cancelled',terminal_at=now(),updated_at=now()
+WHERE g.project_id=$1 AND g.connector_id=$2 AND g.table_name=$3
+AND g.state IN ('capturing','yielded')
+AND EXISTS (SELECT 1 FROM connector_runs r WHERE r.id=g.run_id AND r.cancel_requested)`,
+		job.ProjectID, job.ConnectorID, job.Table); err != nil {
+		return connector.SnapshotGeneration{}, err
+	}
 	var g connector.SnapshotGeneration
 	err = tx.QueryRow(ctx, `SELECT `+snapshotGenerationColumns+` FROM connector_snapshot_generations g
 WHERE g.project_id=$1 AND g.connector_id=$2 AND g.table_name=$3 AND
@@ -494,7 +508,15 @@ func (s *Store) SnapshotGeneration(ctx context.Context, generation string) (conn
 }
 
 func (s *Store) FailSnapshotGeneration(ctx context.Context, g connector.SnapshotGeneration) error {
-	tag, err := s.pg.Exec(ctx, `UPDATE connector_snapshot_generations SET state='failed',terminal_at=now(),updated_at=now()
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := requireSnapshotRunFence(ctx, tx, g.RunID, g.SyncID, g.Owner, g.LeaseEpoch); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE connector_snapshot_generations SET state='failed',terminal_at=now(),updated_at=now()
 WHERE generation=$1 AND state IN ('capturing','yielded') AND run_id=$2 AND owner=$3 AND lease_epoch=$4`, g.Generation, g.RunID, g.Owner, g.LeaseEpoch)
 	if err != nil {
 		return err
@@ -502,7 +524,7 @@ WHERE generation=$1 AND state IN ('capturing','yielded') AND run_id=$2 AND owner
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("snapshot generation failure was fenced")
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) CancelSnapshotGeneration(ctx context.Context, runID, owner string, leaseEpoch int64) error {
