@@ -168,7 +168,9 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation=? AND batc
 WHERE project_id=? AND connector_id=? AND table_name=? AND generation=? AND row_key=?`,
 			env.ProjectID, env.ConnectorID, env.Table, env.Generation, row.Key).Scan(&priorBatch)
 		if err == nil {
-			return false, fmt.Errorf("snapshot row key already belongs to another batch")
+			// The source row key is intentionally absent: ingestion logs this
+			// category on retries and dead-letter settlement.
+			return false, errors.New("snapshot batch rows were rejected by staging")
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return false, err
@@ -306,7 +308,6 @@ WHERE project_id=? AND connector_id=? AND table_name=? AND generation=? ORDER BY
 	if err != nil || digest != complete.BatchManifestSHA256 {
 		return snapshotPromotionResult{state: snapshotAwaitingPromotion}, nil
 	}
-
 	if _, err := tx.ExecContext(ctx, `DELETE FROM external_rows WHERE project_id=? AND connector_id=? AND table_name=?`, env.ProjectID, env.ConnectorID, env.Table); err != nil {
 		return snapshotPromotionResult{}, err
 	}

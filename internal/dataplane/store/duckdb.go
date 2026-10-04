@@ -84,8 +84,22 @@ func OpenDuckDB(ctx context.Context, path string) (*DuckDB, error) {
 	// database-global and cannot be set again after the first spill, even to
 	// the same path: doing so prevents the pool from opening new connections.
 	connector, err := duckdb.NewConnector(path, func(execer driver.ExecerContext) error {
-		_, err := execer.ExecContext(context.Background(), "SET TimeZone = 'UTC'", nil)
-		return err
+		for _, stmt := range []string{
+			"SET TimeZone = 'UTC'",
+			// Serving tables have explicit keys and all ordered reads use ORDER BY.
+			// Avoid retaining irrelevant insertion-order metadata so atomic snapshot
+			// promotion and its readiness receipts fit the fixed engine memory bound.
+			"SET preserve_insertion_order = false",
+			// Keep each operator's working set bounded as well. The process admits
+			// concurrent readers separately; intra-query parallelism only multiplies
+			// memory during the million-row promotion copy.
+			"SET threads = 1",
+		} {
+			if _, err := execer.ExecContext(context.Background(), stmt, nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("duckdb: connector: %w", err)
