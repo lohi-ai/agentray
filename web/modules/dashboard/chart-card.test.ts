@@ -60,6 +60,7 @@ describe('SqlGraph', () => {
       if (name === '@/lib/api') return { AgentRayAPI, APIError: class extends Error {} };
       if (name === '@/lib/app-state') return { useFiltersStore: (selector) => selector({ appliedFilters: filters }) };
       if (name === '@/lib/format') return { formatCompact: String, formatCost: String };
+      if (name === '@/modules/app/hooks/media') return { useMediaQuery: () => false };
       if (name === './evidence-panel') return { evidenceFilterKey: (value) => JSON.stringify([value.from || '', value.to || '', value.hours]) };
       if (name === 'next/navigation') return { useRouter: () => ({}) };
       return new Proxy({}, { get: (_, key) => key });

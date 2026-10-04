@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Chart } from '@/lib/api';
-import { parseBoardEvidence, resolveEvidenceState, type ChartEvidenceStatus } from './evidence-panel';
+import { chartEvidenceStatus, parseBoardEvidence, queryLimitation, resolveEvidenceState, type ChartEvidenceStatus } from './evidence-panel';
 
 const chart = { id: 'chart-1' } as Chart;
 const sync = (state: 'ready' | 'syncing' | 'stale' | 'error' | 'incomplete' | 'not_configured') => ({ readiness: { state } }) as never;
@@ -32,6 +32,28 @@ describe('dashboard evidence', () => {
       expect(resolveEvidenceState({ loading: false, denied: false, charts: [chart], syncs: [sync('ready')], chartStatuses: [status] })).toBe('error');
     },
   );
+
+  it.each(['bounded', 'unknown'] satisfies ChartEvidenceStatus[])(
+    'never reports ready when execution completeness is %s',
+    (status) => {
+      expect(resolveEvidenceState({ loading: false, denied: false, charts: [chart], syncs: [sync('ready')], chartStatuses: [status] })).toBe('error');
+    },
+  );
+
+  it('maps bounded and unavailable query metadata to honest evidence statuses and limitations', () => {
+    const baseMeta = {
+      query_ref: 'query/1', query_digest: 'digest', executed_at: '2026-10-04T00:00:00Z',
+      serving_data_watermark: null, truncated: null, availability_reason: null,
+    } as const;
+    const boundedMeta = { ...baseMeta, result_completeness: 'bounded' as const };
+    expect(chartEvidenceStatus('ready', boundedMeta)).toBe('bounded');
+    expect(queryLimitation({ status: 'bounded', filterKey: 'filters', meta: boundedMeta }, 'saved')).toMatch(/bounded.*additional rows/i);
+
+    const unknownMeta = { ...baseMeta, result_completeness: 'unknown' as const, availability_reason: 'query_evidence_unavailable' };
+    expect(chartEvidenceStatus('ready', unknownMeta)).toBe('unknown');
+    expect(chartEvidenceStatus('ready')).toBe('unknown');
+    expect(queryLimitation({ status: 'unknown', filterKey: 'filters', meta: unknownMeta }, 'saved')).toMatch(/completeness is unknown.*unavailable/i);
+  });
 
   it('requires every configured source and execution to be queryable', () => {
     expect(resolveEvidenceState({ loading: false, denied: false, charts: [chart], syncs: [sync('ready'), sync('not_configured')], chartStatuses: ['ready'] })).toBe('empty');

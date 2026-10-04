@@ -8,7 +8,7 @@ import { StatusPill } from '@/modules/shared/components/lohi-evidence-primitives
 import type { ReadinessSync } from '@/modules/app/hooks/connectors';
 import { evidenceTime } from '@/modules/settings/source-readiness';
 
-export type ChartEvidenceStatus = 'loading' | 'ready' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied';
+export type ChartEvidenceStatus = 'loading' | 'ready' | 'bounded' | 'unknown' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied';
 export type ChartEvidence = {
   status: ChartEvidenceStatus;
   filterKey: string;
@@ -70,11 +70,31 @@ export function evidenceFilterKey(filters: Filters): string {
   return JSON.stringify([filters.from || '', filters.to || '', filters.hours]);
 }
 
+export function chartEvidenceStatus(status: ChartEvidenceStatus, meta?: QueryMeta): ChartEvidenceStatus {
+  if (status !== 'ready') return status;
+  if (meta?.result_completeness === 'bounded' || meta?.truncated === true) return 'bounded';
+  if (!meta || meta.result_completeness === 'unknown' || meta.availability_reason === 'query_evidence_unavailable') return 'unknown';
+  return status;
+}
+
+export function queryLimitation(evidence: ChartEvidence | undefined, savedLimitation: string): string {
+  const meta = evidence?.meta;
+  if (evidence?.status === 'bounded' || meta?.result_completeness === 'bounded' || meta?.truncated === true) {
+    return 'Query result is bounded to the returned rows; additional rows may have been omitted.';
+  }
+  if (evidence?.status === 'unknown' || (!meta && evidence?.status === 'ready') || meta?.result_completeness === 'unknown' || meta?.availability_reason === 'query_evidence_unavailable') {
+    return 'Query result completeness is unknown; query evidence is unavailable.';
+  }
+  if (meta?.availability_reason) return meta.availability_reason.replace(/[_-]+/g, ' ');
+  if (evidence && evidence.status !== 'ready') return `Current query status: ${evidence.status.replace(/_/g, ' ')}`;
+  return savedLimitation;
+}
+
 export function resolveEvidenceState({ loading, denied, readinessError = false, charts, syncs, chartStatuses, cohortEligibility }: { loading: boolean; denied: boolean; readinessError?: boolean; charts: readonly Chart[]; syncs: readonly ReadinessSync[]; chartStatuses: readonly ChartEvidenceStatus[]; cohortEligibility?: string }): EvidenceState {
   if (denied) return 'read-only-denied';
   if (readinessError) return 'readiness-error';
   if (chartStatuses.some((status) => status === 'denied')) return 'query-denied';
-  if (chartStatuses.some((status) => status === 'error' || status === 'unsupported' || status === 'capacity' || status === 'non_plottable')) return 'error';
+  if (chartStatuses.some((status) => status === 'bounded' || status === 'unknown' || status === 'error' || status === 'unsupported' || status === 'capacity' || status === 'non_plottable')) return 'error';
   if (syncs.some((s) => s.readiness?.state === 'error' || s.readiness?.state === 'incomplete')) return 'error';
   if (syncs.some((s) => s.readiness?.state === 'stale')) return 'stale';
   if (loading || chartStatuses.some((status) => status === 'loading') || syncs.some((s) => s.readiness?.state === 'syncing')) return 'syncing';
@@ -122,13 +142,14 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
   const state = resolveEvidenceState({ loading: readinessLoading, denied: readinessDenied, readinessError, charts, syncs, chartStatuses, cohortEligibility: selectedEvidence?.cohortEligibility });
   const copy = STATE_COPY[state];
   const lastComplete = syncs.map((sync) => sync.readiness?.last_complete_at).filter((value): value is string => !!value).sort()[0];
+  const staleLastComplete = syncs
+    .filter((sync) => sync.readiness?.state === 'stale')
+    .map((sync) => sync.readiness?.last_complete_at)
+    .filter((value): value is string => !!value)
+    .sort()[0];
   const freshness = [lastComplete ? `Source last complete ${evidenceTime(lastComplete)}` : null, selectedEvidence?.meta?.executed_at ? `Query executed ${evidenceTime(selectedEvidence.meta.executed_at)}` : null].filter(Boolean).join(' · ') || 'Freshness not verified';
   const queryRef = selectedEvidence?.meta?.query_ref || 'Query reference pending';
-  const limitation = selectedEvidence?.meta?.availability_reason
-    ? selectedEvidence.meta.availability_reason.replace(/[_-]+/g, ' ')
-    : selectedEvidence && selectedEvidence.status !== 'ready'
-      ? `Current query status: ${selectedEvidence.status.replace(/_/g, ' ')}`
-      : savedEvidence.limitation;
+  const limitation = queryLimitation(selectedEvidence, savedEvidence.limitation);
   const definition = selectedEvidence?.definition || selectedChart?.name || 'Definition not supplied';
   const unit = selectedEvidence?.unit || (selectedChart?.y_field ? `Unit not declared for ${selectedChart.y_field}` : 'Not declared');
   const range = selectedEvidence?.range?.label || pendingRange(appliedFilters);
@@ -174,7 +195,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
             <div className="lohi-evidence-fact"><dt>Partial day</dt><dd>{partialDay(selectedEvidence?.range)}</dd></div>
             <div className="lohi-evidence-fact"><dt>Cohort eligibility</dt><dd>{cohortEligibility}</dd></div>
           </dl>
-          {state === 'stale' && lastComplete ? <p className="lohi-evidence-stale-age">Source last complete {evidenceTime(lastComplete)}</p> : null}
+          {staleLastComplete ? <p className="lohi-evidence-stale-age">Source last complete {evidenceTime(staleLastComplete)}</p> : null}
           <Accordion type="single" collapsible>
             <AccordionItem value="evidence-detail">
               <AccordionTrigger>Review evidence</AccordionTrigger>

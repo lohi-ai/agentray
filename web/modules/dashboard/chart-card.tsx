@@ -12,9 +12,10 @@ import { AgentRayAPI, APIError, type ActivitySummary, type Chart, type QueryMeta
 import { Card as LohiCard } from '@/lib/lohi-ui';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
+import { useMediaQuery } from '@/modules/app/hooks/media';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
 import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
-import { evidenceFilterKey, type ChartEvidence } from './evidence-panel';
+import { chartEvidenceStatus, evidenceFilterKey, type ChartEvidence } from './evidence-panel';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -38,6 +39,7 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
 }
 
 type EvidenceFacts = { definition?: string; unit?: string; cohortEligibility?: string };
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
   const first = rows[0];
@@ -62,13 +64,15 @@ function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts
 // compact "latest" figure anchors the trend; peak/avg are left to the ECharts
 // hover tooltip rather than crowding the card with always-on labels.
 function SeriesChart({ values, labels, type, annotations, appearance, title }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; title?: string }) {
+  const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
+    || (typeof window !== 'undefined' && window.matchMedia?.(REDUCED_MOTION_QUERY).matches);
   if (values.length === 0) {
     return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
   const latest = values[values.length - 1];
   return (
     <div>
-      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations }} />
+      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations, motion: appearance === 'lohi-evidence' ? !reduceMotion : undefined }} />
       {appearance === 'lohi-evidence' ? (
         <details className="lohi-chart-table">
           <summary>View data table</summary>
@@ -156,7 +160,7 @@ function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { c
   useEffect(() => {
     if (!onEvidence) return;
     onEvidence(chart.id, {
-      status: current.status,
+      status: chartEvidenceStatus(current.status, evidenceMeta),
       filterKey: evidenceFilterKey(applied),
       ...queryEvidence,
       definition: 'evidenceFacts' in current ? current.evidenceFacts?.definition : undefined,

@@ -23,6 +23,10 @@ export type ChartSpec = {
   // Force whole-number y-axis ticks. Pair with smooth: false for count series —
   // otherwise ECharts' auto interval can still land on 0.5 steps.
   integerY?: boolean;
+  // Disable engine-level initial, update, and interaction animation. Callers
+  // that opt into an accessibility surface pass their live motion preference;
+  // omitted preserves the shared chart's existing default behavior.
+  motion?: boolean;
   // Annotations the chart may mark — resolved against the x-axis by
   // annotationMarks; a non-temporal axis renders none.
   annotations?: ChartAnnotation[];
@@ -148,7 +152,7 @@ function formatAxisTick(value: string | number, series?: (string | number)[]): s
 // buildOption turns a ChartSpec into a themed ECharts option: transparent
 // background, token-driven axis/grid/text colors, tooltips, and a soft area
 // gradient for line/area. This is the single place chart styling lives.
-function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
+export function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
   const colors = palette();
   const axisColor = cssVar('--muted-foreground', '#7E8AA0');
   const gridColor = cssVar('--border', '#243044');
@@ -166,6 +170,8 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
 
   if (spec.type === 'pie') {
     return {
+      animation: spec.motion,
+      stateAnimation: spec.motion === false ? { duration: 0 } : undefined,
       color: colors,
       tooltip,
       legend: { bottom: 0, textStyle: { color: axisColor, fontSize: 12 }, icon: 'circle' },
@@ -173,6 +179,7 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
         type: 'pie', radius: ['52%', '74%'], center: ['50%', '44%'],
         data: spec.slices ?? [], label: { color: text, fontSize: 12 },
         itemStyle: { borderColor: surface, borderWidth: 2 },
+        emphasis: spec.motion === false ? { scale: false } : undefined,
       }],
     };
   }
@@ -237,6 +244,8 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
     : undefined;
 
   return {
+    animation: spec.motion,
+    stateAnimation: spec.motion === false ? { duration: 0 } : undefined,
     color: colors,
     tooltip,
     grid: { left: 8, right: 14, top: 16, bottom: 4, containLabel: true },
@@ -274,6 +283,7 @@ function buildOption(spec: ChartSpec): echarts.EChartsCoreOption {
           { offset: 1, color: 'transparent' },
         ]),
       } : undefined,
+      emphasis: spec.motion === false ? { scale: false } : undefined,
       // The marks ride the first series: they belong to the axis, not to any
       // one line, and the first series is always present when marks resolved.
       markLine: i === 0 ? markLine : undefined,
@@ -302,4 +312,3 @@ export function Chart({ spec }: { spec: ChartSpec }) {
 
   return <div ref={ref} style={{ width: '100%', height }} />;
 }
-
