@@ -106,6 +106,7 @@ func TestLohiEvidenceV1HonestyRulesStayPortable(t *testing.T) {
 	for _, marker := range []string{
 		"partial", "unavailable", "gross VND", "net event", "LT credits",
 		"canonical_id", "Unknown signup attribution", "association", "scenario projection",
+		"first-touch-with-unknown", "full elapsed horizon", "lt_purchased_topup_control",
 		"do not", "read-only", "revision conflict", "external MCP clients",
 	} {
 		if !strings.Contains(strings.ToLower(body), strings.ToLower(marker)) {

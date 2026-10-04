@@ -71,6 +71,7 @@ var lohiEvidenceJSON []byte
 type LohiAssertion struct {
 	Date       string `json:"date"`
 	Series     string `json:"series"`
+	Absent     bool   `json:"absent,omitempty"`
 	Value      any    `json:"value,omitempty"`
 	State      string `json:"state,omitempty"`
 	ReasonLike string `json:"reason_like,omitempty"`

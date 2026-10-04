@@ -193,11 +193,17 @@ WITH bound AS (
          coalesce(try_cast(json_extract_string(data, '$.pro_count') AS BIGINT), 0) AS pro_count,
          coalesce(try_cast(json_extract_string(data, '$.free_edge_count') AS BIGINT), 0) AS free_count
   FROM bound WHERE table_name = 'ar_lohi.tts_daily_v1'
+    AND try_cast(json_extract_string(data, '$.usage_date') AS DATE)
+      BETWEEN DATE '2026-09-01' AND DATE '2026-10-03'
 ), ledger AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
          coalesce(try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT), 0) AS amount_lt
   FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
     AND json_extract_string(data, '$.reason') = 'tts_pro'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), metrics AS (
   SELECT day, 'tts_listeners' AS series, count(DISTINCT user_id)::BIGINT AS value, 'people' AS unit, count(*)::BIGINT AS sample_size
   FROM tts WHERE pro_count + free_count > 0 GROUP BY 1
@@ -208,7 +214,10 @@ WITH bound AS (
 )
 SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
        CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
-       CASE WHEN series = 'tts_listeners' THEN 'request/usage evidence, not proof of playback' ELSE 'paid ledger use is separate from listener count' END AS reason
+       CASE WHEN day = DATE '2026-10-03' AND series = 'tts_listeners' THEN 'date-only source is bounded by the cutoff snapshot, partial HCM day, request/usage evidence not proof of playback'
+            WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, paid ledger use is separate from listener count'
+            WHEN series = 'tts_listeners' THEN 'request/usage evidence, not proof of playback'
+            ELSE 'paid ledger use is separate from listener count' END AS reason
 FROM metrics ORDER BY day, series
 ```
 
@@ -220,36 +229,82 @@ intent and neither source proves audio playback.
 <!-- recipe:R06 -->
 ```sql
 WITH bound AS (
-  SELECT data FROM external_rows
+  SELECT table_name, data FROM external_rows
   WHERE connector_id = '51515151-5151-4515-8515-515151515151'
-    AND table_name = 'ar_lohi.wallet_ledger_v1'
+    AND table_name IN ('ar_lohi.wallet_ledger_v1', 'ar_lohi.topups_v1')
 ), ledger AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
          json_extract_string(data, '$.user_id') AS user_id,
          try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
          json_extract_string(data, '$.reason') AS reason
-  FROM bound
-), daily AS (
+  FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+), topups AS (
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         try_cast(json_extract_string(data, '$.lt_amount') AS BIGINT) AS lt_amount
+  FROM bound WHERE table_name = 'ar_lohi.topups_v1'
+    AND json_extract_string(data, '$.payment_status') = 'completed'
+    AND try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)
+      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+), ledger_daily AS (
   SELECT day,
          sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END)::BIGINT AS issued_lt,
+         sum(CASE WHEN amount_lt > 0 AND reason = 'topup_purchase' THEN amount_lt ELSE 0 END)::BIGINT AS purchased_lt,
+         sum(CASE WHEN amount_lt > 0 AND reason IN ('refund', 'apple_refund') THEN amount_lt ELSE 0 END)::BIGINT AS refunded_lt,
+         sum(CASE WHEN amount_lt > 0 AND reason = 'grant' THEN amount_lt ELSE 0 END)::BIGINT AS granted_lt,
+         sum(CASE WHEN amount_lt > 0 AND coalesce(reason, '') NOT IN ('topup_purchase', 'refund', 'apple_refund', 'grant') THEN amount_lt ELSE 0 END)::BIGINT AS other_issued_lt,
          sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END)::BIGINT AS spent_lt,
          count(DISTINCT CASE WHEN amount_lt < 0 THEN user_id END)::BIGINT AS spenders,
          sum(CASE WHEN amount_lt < 0 AND reason = 'tts_pro' THEN -amount_lt ELSE 0 END)::BIGINT AS audio_spent_lt
   FROM ledger GROUP BY 1
+), topup_daily AS (
+  SELECT day, sum(lt_amount)::BIGINT AS topup_purchased_lt, count(*)::BIGINT AS topup_rows
+  FROM topups GROUP BY 1
+), daily AS (
+  SELECT coalesce(l.day, t.day) AS day,
+         coalesce(l.issued_lt, 0)::BIGINT AS issued_lt,
+         coalesce(l.purchased_lt, 0)::BIGINT AS purchased_lt,
+         coalesce(l.refunded_lt, 0)::BIGINT AS refunded_lt,
+         coalesce(l.granted_lt, 0)::BIGINT AS granted_lt,
+         coalesce(l.other_issued_lt, 0)::BIGINT AS other_issued_lt,
+         coalesce(l.spent_lt, 0)::BIGINT AS spent_lt,
+         coalesce(l.spenders, 0)::BIGINT AS spenders,
+         coalesce(l.audio_spent_lt, 0)::BIGINT AS audio_spent_lt,
+         coalesce(t.topup_purchased_lt, 0)::BIGINT AS topup_purchased_lt,
+         coalesce(t.topup_rows, 0)::BIGINT AS topup_rows
+  FROM ledger_daily l FULL OUTER JOIN topup_daily t USING (day)
 ), metrics AS (
   SELECT day, 'lt_issued' AS series, issued_lt::DOUBLE AS value, 'LT' AS unit, spenders AS sample_size FROM daily
+  UNION ALL SELECT day, 'lt_purchased_ledger', purchased_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_refunded', refunded_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_granted', granted_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_purchased_topup_control', topup_purchased_lt::DOUBLE, 'LT', topup_rows FROM daily
+  UNION ALL SELECT day, 'lt_purchase_reconciliation_delta', (purchased_lt-topup_purchased_lt)::DOUBLE, 'LT', topup_rows FROM daily
   UNION ALL SELECT day, 'lt_spent', spent_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_audio_spent', audio_spent_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_spenders', spenders::DOUBLE, 'people', spenders FROM daily
   UNION ALL SELECT day, 'lt_per_spender', CASE WHEN spenders = 0 THEN NULL ELSE round(spent_lt::DOUBLE / spenders, 2) END, 'LT/person', spenders FROM daily
 )
 SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
-       CASE WHEN value IS NULL THEN 'unavailable' ELSE 'complete' END AS state,
-       CASE WHEN value IS NULL THEN 'undefined denominator' WHEN series = 'lt_issued' THEN 'paid purchase, grant and refund issuance are not interchangeable' ELSE '' END AS reason
+       CASE WHEN value IS NULL THEN 'unavailable' WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN value IS NULL THEN 'undefined denominator'
+            WHEN series = 'lt_issued' THEN 'sum of purchased, refunded, granted and other positive ledger components'
+            WHEN series = 'lt_purchased_topup_control' THEN 'completed topups_v1.lt_amount control, compare with lt_purchased_ledger'
+            WHEN series = 'lt_purchase_reconciliation_delta' THEN 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile'
+            WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, partial HCM day'
+            ELSE '' END AS reason
 FROM metrics ORDER BY day, series
 ```
 
-A flow deficit does not prove current balances or the next purchase time.
+`lt_issued` must equal the four positive-ledger components. Reconcile
+`lt_purchased_ledger` to `lt_purchased_topup_control`; do not hide a nonzero
+delta. A flow deficit does not prove current balances or the next purchase time.
 
 ### R07 — reading controls
 
@@ -262,6 +317,8 @@ WITH source_bound AS (
 ), reader_days AS (
   SELECT try_cast(json_extract_string(data, '$.day') AS DATE) AS day,
          json_extract_string(data, '$.user_id') AS user_id FROM source_bound
+  WHERE try_cast(json_extract_string(data, '$.day') AS DATE)
+    BETWEEN DATE '2026-09-01' AND DATE '2026-10-03'
 ), covered_events AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', timestamp) AS DATE) AS day, canonical_id
   FROM events
@@ -274,8 +331,11 @@ WITH source_bound AS (
   UNION ALL SELECT day, 'chapter_view_people', count(DISTINCT canonical_id)::BIGINT, 'people', count(*)::BIGINT FROM covered_events GROUP BY 1
 )
 SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
-       'complete' AS state,
-       CASE WHEN series = 'reader_dau' THEN 'durable daily-active control, not an event count' ELSE 'only within declared event coverage' END AS reason
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN day = DATE '2026-10-03' AND series = 'reader_dau' THEN 'date-only source is bounded by the cutoff snapshot, partial HCM day, durable daily-active control not an event count'
+            WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, only within declared event coverage'
+            WHEN series = 'reader_dau' THEN 'durable daily-active control, not an event count'
+            ELSE 'only within declared event coverage' END AS reason
 FROM metrics ORDER BY day, series
 ```
 
@@ -298,11 +358,19 @@ WITH bound AS (
          json_extract_string(data, '$.source') AS source,
          json_extract_string(data, '$.ledger_reference_id') AS ledger_reference_id
   FROM bound WHERE table_name = 'ar_lohi.passes_v1'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), charges AS (
   SELECT json_extract_string(data, '$.reference_id') AS reference_id,
          try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
          json_extract_string(data, '$.reason') AS reason
   FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), paid AS (
   SELECT p.day, p.tier, p.id, c.amount_lt
   FROM passes p JOIN charges c ON c.reference_id = p.ledger_reference_id
@@ -311,8 +379,10 @@ WITH bound AS (
 )
 SELECT strftime(day, '%Y-%m-%d') AS date, 'paid_pass:' || tier AS series,
        count(DISTINCT id)::BIGINT AS value, 'passes' AS unit, count(*)::BIGINT AS sample_size,
-       'complete' AS state, 'excludes free grants, LT charge is not VND revenue' AS reason
-FROM paid GROUP BY 1, 2 ORDER BY 1, 2
+       CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, excludes free grants, LT charge is not VND revenue'
+            ELSE 'excludes free grants, LT charge is not VND revenue' END AS reason
+FROM paid GROUP BY 1, 2, day, tier ORDER BY 1, 2
 ```
 
 Current-state exports cannot reconstruct historical cancellations/switches
@@ -353,41 +423,57 @@ WITH source_bound AS (
   SELECT json_extract_string(data, '$.user_id') AS user_id,
          try_cast(json_extract_string(data, '$.registered_at') AS TIMESTAMPTZ) AS registered_at
   FROM source_bound WHERE table_name = 'ar_lohi.users_v1'
+    AND try_cast(json_extract_string(data, '$.registered_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), first_pay AS (
   SELECT json_extract_string(data, '$.user_id') AS user_id,
          min(try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)) AS first_completed_at
   FROM source_bound
   WHERE table_name = 'ar_lohi.topups_v1' AND json_extract_string(data, '$.payment_status') = 'completed'
+    AND try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
   GROUP BY 1
+), signup_events_ranked AS (
+  SELECT canonical_id AS user_id, nullif(utm_source, '') AS acquisition,
+         row_number() OVER (PARTITION BY canonical_id ORDER BY timestamp, event_id) AS touch_rank
+  FROM events WHERE event_name = 'user_registered'
+    AND timestamp < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), signup_events AS (
-  SELECT canonical_id AS user_id,
-         coalesce(nullif(arg_min(nullif(utm_source, ''), timestamp), ''), 'unknown') AS acquisition
-  FROM events WHERE event_name = 'user_registered' GROUP BY 1
+  SELECT user_id, coalesce(acquisition, 'unknown') AS acquisition
+  FROM signup_events_ranked WHERE touch_rank = 1
 ), people AS (
   SELECT u.user_id, u.registered_at, cast(timezone('Asia/Ho_Chi_Minh', u.registered_at) AS DATE) AS cohort_date,
-         date_diff('day', cast(timezone('Asia/Ho_Chi_Minh', u.registered_at) AS DATE), DATE '2026-10-03') AS cohort_age_days,
+         floor(date_diff('second', u.registered_at, TIMESTAMPTZ '2026-10-03 11:14:00+00')::DOUBLE / 86400)::BIGINT AS cohort_age_days,
          fp.first_completed_at,
          coalesce(se.acquisition, 'unknown') AS acquisition
   FROM users u LEFT JOIN first_pay fp USING (user_id) LEFT JOIN signup_events se USING (user_id)
 ), horizons AS (SELECT * FROM (VALUES (7), (14), (30)) AS h(days)), cohort AS (
   SELECT cohort_date, acquisition, days,
-         max(cohort_age_days)::BIGINT AS age_days,
-         count(*) FILTER (WHERE cohort_age_days >= days)::BIGINT AS eligible,
-         count(*) FILTER (WHERE cohort_age_days >= days AND first_completed_at < registered_at + days * INTERVAL 1 DAY)::BIGINT AS converted
+         min(cohort_age_days)::BIGINT AS age_days,
+         count(*)::BIGINT AS cohort_size,
+         count(*) FILTER (WHERE registered_at + days * INTERVAL 1 DAY <= TIMESTAMPTZ '2026-10-03 11:14:00+00')::BIGINT AS eligible,
+         count(*) FILTER (WHERE registered_at + days * INTERVAL 1 DAY <= TIMESTAMPTZ '2026-10-03 11:14:00+00'
+                           AND first_completed_at < registered_at + days * INTERVAL 1 DAY)::BIGINT AS converted
   FROM people CROSS JOIN horizons GROUP BY 1, 2, 3
 )
 SELECT strftime(cohort_date, '%Y-%m-%d') AS date,
        'conversion_' || cast(days AS VARCHAR) || 'd:' || acquisition AS series,
        CASE WHEN eligible = 0 THEN NULL ELSE round(100.0 * converted / eligible, 2) END AS value,
        'percent' AS unit, eligible AS sample_size,
-       CASE WHEN eligible = 0 THEN 'not_ready' ELSE 'complete' END AS state,
-       CASE WHEN eligible = 0 THEN 'cohort is younger than horizon' WHEN acquisition = 'unknown' THEN 'signup attribution unavailable' ELSE 'time alignment is association, not causation' END AS reason,
+       CASE WHEN eligible = 0 THEN 'not_ready' WHEN eligible < cohort_size THEN 'partial' ELSE 'complete' END AS state,
+       CASE WHEN eligible = 0 THEN 'no member has a full elapsed horizon at the exclusive cutoff'
+            WHEN eligible < cohort_size THEN 'only the elapsed-window-eligible subset is reported'
+            WHEN acquisition = 'unknown' THEN 'first registration touch has no source, later tagged touches are not promoted'
+            ELSE 'time alignment is association, not causation' END AS reason,
        strftime(cohort_date, '%Y-%m-%d') AS cohort_date, age_days, eligible, converted
 FROM cohort ORDER BY cohort_date, days, acquisition
 ```
 
 The campaign stop itself requires operator/ad-platform evidence. This recipe
-does not prove the seven-day allowance or causality.
+uses first-touch-with-unknown attribution: the first `user_registered` event is
+selected deterministically, and a missing source stays `unknown` even if a later
+registration retry is tagged. It does not prove the seven-day allowance or
+causality.
 
 ### R11 — scorecard and measurement-universe reconciliation
 
@@ -400,12 +486,19 @@ WITH source_bound AS (
 ), topups AS (
   SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)) AS DATE) AS day,
          json_extract_string(data, '$.user_id') AS user_id,
-         try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd
+         try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd,
+         try_cast(json_extract_string(data, '$.lt_amount') AS BIGINT) AS lt_amount
   FROM source_bound WHERE table_name = 'ar_lohi.topups_v1'
     AND json_extract_string(data, '$.payment_status') = 'completed'
+    AND try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), ledger AS (
-  SELECT try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
+         try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
+         json_extract_string(data, '$.reason') AS reason
   FROM source_bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
+    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
+      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), event_input AS (
   SELECT event_id, event_name, insert_id, timestamp, canonical_id, utm_source,
          try_cast(json_extract_string(properties, '$.amount') AS BIGINT) AS amount,
@@ -426,10 +519,13 @@ WITH source_bound AS (
   SELECT day, sum(amount_vnd)::BIGINT AS gross_vnd FROM topups GROUP BY 1
 ), first_pay AS (
   SELECT user_id, min(day) AS first_day FROM topups GROUP BY 1
+), signup_source_ranked AS (
+  SELECT canonical_id AS user_id, nullif(utm_source, '') AS acquisition,
+         row_number() OVER (PARTITION BY canonical_id ORDER BY timestamp, event_id) AS touch_rank
+  FROM event_input WHERE event_name = 'user_registered'
 ), signup_source AS (
-  SELECT canonical_id AS user_id,
-         coalesce(nullif(arg_min(nullif(utm_source, ''), timestamp), ''), 'unknown') AS acquisition
-  FROM event_input WHERE event_name = 'user_registered' GROUP BY 1
+  SELECT user_id, coalesce(acquisition, 'unknown') AS acquisition
+  FROM signup_source_ranked WHERE touch_rank = 1
 ), source_counts AS (
   SELECT coalesce(s.acquisition, 'unknown') AS acquisition, count(*)::BIGINT AS payers
   FROM first_pay f LEFT JOIN signup_source s USING (user_id) GROUP BY 1
@@ -443,14 +539,33 @@ WITH source_bound AS (
     coalesce(sum(gross_vnd) FILTER (WHERE day BETWEEN DATE '2026-09-13' AND DATE '2026-09-19'), 0)::DOUBLE / 7 AS baseline_daily,
     coalesce(sum(gross_vnd) FILTER (WHERE day BETWEEN DATE '2026-09-27' AND DATE '2026-10-02'), 0)::DOUBLE / 6 AS current_daily
   FROM daily
+), ledger_totals AS (
+  SELECT
+    coalesce(sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END), 0)::BIGINT AS issued_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND reason = 'topup_purchase' THEN amount_lt ELSE 0 END), 0)::BIGINT AS purchased_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND reason IN ('refund', 'apple_refund') THEN amount_lt ELSE 0 END), 0)::BIGINT AS refunded_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND reason = 'grant' THEN amount_lt ELSE 0 END), 0)::BIGINT AS granted_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND coalesce(reason, '') NOT IN ('topup_purchase', 'refund', 'apple_refund', 'grant') THEN amount_lt ELSE 0 END), 0)::BIGINT AS other_issued_lt,
+    coalesce(sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END), 0)::BIGINT AS spent_lt,
+    count(*)::BIGINT AS ledger_rows
+  FROM ledger WHERE day BETWEEN DATE '2026-09-01' AND DATE '2026-10-02'
+), topup_control AS (
+  SELECT coalesce(sum(lt_amount), 0)::BIGINT AS purchased_lt, count(*)::BIGINT AS topup_rows
+  FROM topups WHERE day BETWEEN DATE '2026-09-01' AND DATE '2026-10-02'
 ), rows AS (
   SELECT 'baseline_gross_vnd_daily_avg' AS series, round(baseline_daily, 2) AS value, 'VND/day' AS unit, 7::BIGINT AS sample_size, 'complete' AS state, 'Sep 13-19, covered zero days included' AS reason FROM score
   UNION ALL SELECT 'current_gross_vnd_daily_avg', round(current_daily, 2), 'VND/day', 6, 'complete', 'Sep 27-Oct 2, excludes partial Oct 3' FROM score
   UNION ALL SELECT 'gross_vnd_daily_loss', round(baseline_daily-current_daily, 2), 'VND/day', 13, 'complete', 'gross wallet topups, not booked net revenue' FROM score
   UNION ALL SELECT 'projected_30d_loss', round((baseline_daily-current_daily)*30, 2), 'VND/scenario', 13, 'qualified', 'scenario projection, not booked loss' FROM score
   UNION ALL SELECT 'net_event_revenue_vnd', value::DOUBLE, 'VND', 1, 'complete', 'deduplicated revenue minus revenue_reversed, separate universe' FROM event_net
-  UNION ALL SELECT 'lt_issued', coalesce(sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END), 0)::DOUBLE, 'LT', count(*), 'complete', 'LT is not VND' FROM ledger
-  UNION ALL SELECT 'lt_spent', coalesce(sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END), 0)::DOUBLE, 'LT', count(*), 'complete', 'LT is not VND' FROM ledger
+  UNION ALL SELECT 'lt_issued', issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 complete days, sum of purchased, refunded, granted and other issuance' FROM ledger_totals
+  UNION ALL SELECT 'lt_purchased_ledger', purchased_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as topup_purchase' FROM ledger_totals
+  UNION ALL SELECT 'lt_refunded', refunded_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as refund issuance' FROM ledger_totals
+  UNION ALL SELECT 'lt_granted', granted_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as grant issuance' FROM ledger_totals
+  UNION ALL SELECT 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows outside purchase, refund and grant classes' FROM ledger_totals
+  UNION ALL SELECT 'lt_purchased_topup_control', purchased_lt::DOUBLE, 'LT', topup_rows, 'complete', 'Sep 1-Oct 2 completed topups_v1.lt_amount control' FROM topup_control
+  UNION ALL SELECT 'lt_purchase_reconciliation_delta', (l.purchased_lt-t.purchased_lt)::DOUBLE, 'LT', t.topup_rows, 'complete', 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile' FROM ledger_totals l CROSS JOIN topup_control t
+  UNION ALL SELECT 'lt_spent', spent_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 complete days, LT is not VND' FROM ledger_totals
   UNION ALL SELECT 'known_payer_source_max_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*largest_known_source/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, unknown remains separate, 60 percent is a target' FROM source_mix
   UNION ALL SELECT 'payer_outside_tiktok_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*outside_tiktok/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, association not campaign proof' FROM source_mix
   UNION ALL SELECT 'cost_per_signup', NULL::DOUBLE, 'VND/person', 0, 'unavailable', 'approved campaign-cost binding not installed'

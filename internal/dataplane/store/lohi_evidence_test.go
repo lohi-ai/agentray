@@ -106,11 +106,77 @@ func TestLohiEvidenceV1RecipesExecuteAndRepeatExactly(t *testing.T) {
 	}
 }
 
+func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedLohiEvidenceFixture(t, d)
+	pool, ctx := newTestSandboxPool(t, d, nil)
+	recipes := workloads.LohiEvidenceRecipes()
+	run := func(ref string) []map[string]any {
+		t.Helper()
+		query, args, err := scopedReadonlySQL(recipes[ref], fixture.ProjectID, nil)
+		if err != nil {
+			t.Fatalf("scope %s: %v", ref, err)
+		}
+		rows, err := pool.query(ctx, fixture.ProjectID, query, args)
+		if err != nil {
+			t.Fatalf("execute %s: %v", ref, err)
+		}
+		return rows
+	}
+
+	r05, r06, r07, r08 := run("R05"), run("R06"), run("R07"), run("R08")
+	assertLohiRow(t, r05, querytest.LohiAssertion{Date: "2026-10-03", Series: "tts_listeners", Value: 1, State: "partial"})
+	assertLohiRow(t, r05, querytest.LohiAssertion{Date: "2026-10-04", Series: "tts_listeners", Absent: true})
+	assertLohiRow(t, r06, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 59, State: "partial"})
+	assertLohiRow(t, r06, querytest.LohiAssertion{Date: "2026-10-04", Series: "lt_spent", Absent: true})
+	assertLohiRow(t, r07, querytest.LohiAssertion{Date: "2026-10-03", Series: "reader_dau", Value: 1, State: "partial"})
+	assertLohiRow(t, r07, querytest.LohiAssertion{Date: "2026-10-04", Series: "reader_dau", Absent: true})
+	assertLohiRow(t, r08, querytest.LohiAssertion{Date: "2026-10-03", Series: "paid_pass:audio_pass", Value: 1, State: "partial"})
+	assertLohiRow(t, r08, querytest.LohiAssertion{Date: "2026-10-04", Series: "paid_pass:audio_pass", Absent: true})
+
+	r10 := run("R10")
+	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-26", Series: "conversion_7d:unknown", State: "not_ready", Eligible: 0, Converted: 0})
+	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-09", Series: "conversion_14d:unknown", Value: 100, Eligible: 1, Converted: 1})
+	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-09", Series: "conversion_14d:tiktok", Absent: true})
+
+	r11 := run("R11")
+	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 380, State: "complete"})
+	components := map[string]float64{}
+	for _, series := range []string{"lt_issued", "lt_purchased_ledger", "lt_refunded", "lt_granted", "lt_issued_other", "lt_purchased_topup_control", "lt_purchase_reconciliation_delta"} {
+		components[series] = lohiMetricValue(t, r11, series)
+	}
+	if components["lt_issued"] != components["lt_purchased_ledger"]+components["lt_refunded"]+components["lt_granted"]+components["lt_issued_other"] {
+		t.Fatalf("issuance components do not reconcile: %#v", components)
+	}
+	if components["lt_purchased_ledger"] != 7000 || components["lt_refunded"] != 40 || components["lt_granted"] != 500 || components["lt_purchased_topup_control"] != 17000 || components["lt_purchase_reconciliation_delta"] != -10000 {
+		t.Fatalf("issuance controls drifted: %#v", components)
+	}
+}
+
+func lohiMetricValue(t *testing.T, rows []map[string]any, series string) float64 {
+	t.Helper()
+	for _, row := range rows {
+		if fmt.Sprint(row["series"]) != series {
+			continue
+		}
+		value, err := strconv.ParseFloat(fmt.Sprint(row["value"]), 64)
+		if err != nil {
+			t.Fatalf("%s has nonnumeric value %v: %v", series, row["value"], err)
+		}
+		return value
+	}
+	t.Fatalf("missing series %s", series)
+	return 0
+}
+
 func assertLohiRow(t *testing.T, rows []map[string]any, want querytest.LohiAssertion) {
 	t.Helper()
 	for _, row := range rows {
 		if fmt.Sprint(row["date"]) != want.Date || fmt.Sprint(row["series"]) != want.Series {
 			continue
+		}
+		if want.Absent {
+			t.Fatalf("%s/%s unexpectedly present: %#v", want.Date, want.Series, row)
 		}
 		if want.Value != nil && !sameFixtureNumber(row["value"], want.Value) {
 			t.Fatalf("%s/%s value = %v (%T), want %v", want.Date, want.Series, row["value"], row["value"], want.Value)
@@ -127,6 +193,9 @@ func assertLohiRow(t *testing.T, rows []map[string]any, want querytest.LohiAsser
 		if want.Converted != nil && fmt.Sprint(row["converted"]) != fmt.Sprint(want.Converted) {
 			t.Fatalf("%s/%s converted = %v, want %v", want.Date, want.Series, row["converted"], want.Converted)
 		}
+		return
+	}
+	if want.Absent {
 		return
 	}
 	encoded, _ := json.Marshal(rows)
