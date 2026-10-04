@@ -22,6 +22,11 @@ and the exact body external MCP clients import.
    `revenue_reversed`, `revenue` with `kind=refund`, or negative money amount;
    subtract `abs(amount)` exactly once when forms overlap. Preserve exact integer
    money/counts and round only ratios.
+   For LT, positive reasons ending in `_refund` (and the legacy exact `refund`)
+   are reversal credits; negative refund reasons are clawbacks. Negative reasons
+   ending in `_hold` are escrow, not consumption. Keep all debits visible and
+   reconcile them exactly to consumption, holds, and clawbacks; only consumption
+   contributes to spender counts and LT/spender.
 5. Count event people by `canonical_id`. Join source users only on the approved
    `user_id`. Unknown signup attribution remains unknown; a payment rail is not
    an acquisition source. Never backfill TikTok from a later page view.
@@ -42,7 +47,7 @@ and the exact body external MCP clients import.
 | `ar_lohi.topups_v1` | `id` | `id,user_id,created_at,completed_at,expires_at,payment_status,provider,amount_vnd,lt_amount` | snapshot |
 | `ar_lohi.wallet_ledger_v1` | `id` | `id,user_id,created_at,amount_lt,reason,reference_id` | proven append-only cursor or snapshot |
 | `ar_lohi.tts_daily_v1` | `id` | `id,user_id,usage_date,pro_count,free_edge_count` | snapshot |
-| `ar_lohi.passes_v1` | `id` | `id,user_id,tier,created_at,status,source,ledger_reference_id` | snapshot; current-state limitation |
+| `ar_lohi.passes_v1` | `id` | `id,user_id,tier,created_at,status` | snapshot; current-state cross-check only |
 | `ar_lohi.reader_days_v1` | encoded composite | `id,user_id,day` | snapshot; coverage start from manifest |
 
 Timestamps are ISO-8601 with offsets. IDs are opaque strings. `signup_provider`
@@ -266,11 +271,15 @@ WITH bound AS (
   SELECT day,
          sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END)::BIGINT AS issued_lt,
          sum(CASE WHEN amount_lt > 0 AND reason = 'topup_purchase' THEN amount_lt ELSE 0 END)::BIGINT AS purchased_lt,
-         sum(CASE WHEN amount_lt > 0 AND reason IN ('refund', 'apple_refund') THEN amount_lt ELSE 0 END)::BIGINT AS refunded_lt,
+         sum(CASE WHEN amount_lt > 0 AND (reason = 'refund' OR reason LIKE '%_refund') THEN amount_lt ELSE 0 END)::BIGINT AS refunded_lt,
          sum(CASE WHEN amount_lt > 0 AND reason = 'grant' THEN amount_lt ELSE 0 END)::BIGINT AS granted_lt,
-         sum(CASE WHEN amount_lt > 0 AND coalesce(reason, '') NOT IN ('topup_purchase', 'refund', 'apple_refund', 'grant') THEN amount_lt ELSE 0 END)::BIGINT AS other_issued_lt,
-         sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END)::BIGINT AS spent_lt,
-         count(DISTINCT CASE WHEN amount_lt < 0 THEN user_id END)::BIGINT AS spenders,
+         sum(CASE WHEN amount_lt > 0 AND reason <> 'topup_purchase' AND reason <> 'grant'
+                       AND NOT (reason = 'refund' OR reason LIKE '%_refund') THEN amount_lt ELSE 0 END)::BIGINT AS other_issued_lt,
+         sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END)::BIGINT AS all_debits_lt,
+         sum(CASE WHEN amount_lt < 0 AND (reason = 'refund' OR reason LIKE '%_refund') THEN -amount_lt ELSE 0 END)::BIGINT AS clawed_back_lt,
+         sum(CASE WHEN amount_lt < 0 AND reason LIKE '%_hold' THEN -amount_lt ELSE 0 END)::BIGINT AS held_lt,
+         sum(CASE WHEN amount_lt < 0 AND NOT (reason = 'refund' OR reason LIKE '%_refund' OR reason LIKE '%_hold') THEN -amount_lt ELSE 0 END)::BIGINT AS spent_lt,
+         count(DISTINCT CASE WHEN amount_lt < 0 AND NOT (reason = 'refund' OR reason LIKE '%_refund' OR reason LIKE '%_hold') THEN user_id END)::BIGINT AS spenders,
          sum(CASE WHEN amount_lt < 0 AND reason = 'tts_pro' THEN -amount_lt ELSE 0 END)::BIGINT AS audio_spent_lt
   FROM ledger GROUP BY 1
 ), topup_daily AS (
@@ -283,6 +292,9 @@ WITH bound AS (
          coalesce(l.refunded_lt, 0)::BIGINT AS refunded_lt,
          coalesce(l.granted_lt, 0)::BIGINT AS granted_lt,
          coalesce(l.other_issued_lt, 0)::BIGINT AS other_issued_lt,
+         coalesce(l.all_debits_lt, 0)::BIGINT AS all_debits_lt,
+         coalesce(l.clawed_back_lt, 0)::BIGINT AS clawed_back_lt,
+         coalesce(l.held_lt, 0)::BIGINT AS held_lt,
          coalesce(l.spent_lt, 0)::BIGINT AS spent_lt,
          coalesce(l.spenders, 0)::BIGINT AS spenders,
          coalesce(l.audio_spent_lt, 0)::BIGINT AS audio_spent_lt,
@@ -297,6 +309,9 @@ WITH bound AS (
   UNION ALL SELECT day, 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_purchased_topup_control', topup_purchased_lt::DOUBLE, 'LT', topup_rows FROM daily
   UNION ALL SELECT day, 'lt_purchase_reconciliation_delta', (purchased_lt-topup_purchased_lt)::DOUBLE, 'LT', topup_rows FROM daily
+  UNION ALL SELECT day, 'lt_all_debits', all_debits_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_clawed_back', clawed_back_lt::DOUBLE, 'LT', spenders FROM daily
+  UNION ALL SELECT day, 'lt_held', held_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_spent', spent_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_audio_spent', audio_spent_lt::DOUBLE, 'LT', spenders FROM daily
   UNION ALL SELECT day, 'lt_spenders', spenders::DOUBLE, 'people', spenders FROM daily
@@ -305,15 +320,25 @@ WITH bound AS (
 SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
        CASE WHEN value IS NULL THEN 'unavailable' WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
        CASE WHEN value IS NULL THEN 'undefined denominator'
+            WHEN day = DATE '2026-10-03' AND series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'exclusive cutoff 18:14 HCM, partial HCM day, consumption only, excludes refund clawbacks and escrow holds'
+            WHEN day = DATE '2026-10-03' AND series = 'lt_all_debits' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, exact reconciliation total: consumption plus escrow holds plus refund clawbacks'
+            WHEN day = DATE '2026-10-03' AND series = 'lt_clawed_back' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, negative refund-reason reversals excluded from consumption'
+            WHEN day = DATE '2026-10-03' AND series = 'lt_held' THEN 'exclusive cutoff 18:14 HCM, partial HCM day, escrow holds excluded from consumption'
             WHEN series = 'lt_issued' THEN 'sum of purchased, refunded, granted and other positive ledger components'
             WHEN series = 'lt_purchased_topup_control' THEN 'completed topups_v1.lt_amount control, compare with lt_purchased_ledger'
             WHEN series = 'lt_purchase_reconciliation_delta' THEN 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile'
+            WHEN series = 'lt_all_debits' THEN 'exact reconciliation total: consumption plus escrow holds plus refund clawbacks'
+            WHEN series = 'lt_clawed_back' THEN 'negative refund-reason reversals, excluded from consumption and spender counts'
+            WHEN series = 'lt_held' THEN 'negative escrow-hold reasons, excluded from consumption and spender counts'
+            WHEN series IN ('lt_spent', 'lt_spenders', 'lt_per_spender') THEN 'consumption only, excludes refund clawbacks and escrow holds'
             WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, partial HCM day'
             ELSE '' END AS reason
 FROM metrics ORDER BY day, series
 ```
 
-`lt_issued` must equal the four positive-ledger components. Reconcile
+`lt_issued` must equal the four positive-ledger components. `lt_all_debits` must
+equal `lt_spent + lt_held + lt_clawed_back`; the latter two never contribute to
+spender counts or LT/spender. Reconcile
 `lt_purchased_ledger` to `lt_purchased_topup_control`; do not hide a nonzero
 delta. A flow deficit does not prove current balances or the next purchase time.
 
@@ -358,46 +383,60 @@ unavailable. Current reading history is not historical activity.
 <!-- recipe:R08 -->
 ```sql
 WITH bound AS (
-  SELECT table_name, data FROM external_rows
+  SELECT data FROM external_rows
   WHERE connector_id = '51515151-5151-4515-8515-515151515151'
-    AND table_name IN ('ar_lohi.passes_v1', 'ar_lohi.wallet_ledger_v1')
-), passes AS (
-  SELECT json_extract_string(data, '$.id') AS id,
-         json_extract_string(data, '$.tier') AS tier,
-         cast(timezone('Asia/Ho_Chi_Minh', try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)) AS DATE) AS day,
-         json_extract_string(data, '$.status') AS status,
-         json_extract_string(data, '$.source') AS source,
-         json_extract_string(data, '$.ledger_reference_id') AS ledger_reference_id
-  FROM bound WHERE table_name = 'ar_lohi.passes_v1'
-    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
-      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
-    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
-      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
-), charges AS (
-  SELECT json_extract_string(data, '$.reference_id') AS reference_id,
-         try_cast(json_extract_string(data, '$.amount_lt') AS BIGINT) AS amount_lt,
-         json_extract_string(data, '$.reason') AS reason
-  FROM bound WHERE table_name = 'ar_lohi.wallet_ledger_v1'
-    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
-      >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
-    AND try_cast(json_extract_string(data, '$.created_at') AS TIMESTAMPTZ)
-      < TIMESTAMPTZ '2026-10-03 11:14:00+00'
+    AND table_name = 'ar_lohi.passes_v1'
+), current_passes AS (
+  SELECT nullif(trim(json_extract_string(data, '$.user_id')), '') AS user_id,
+         coalesce(nullif(lower(trim(json_extract_string(data, '$.tier'))), ''), 'unknown') AS tier,
+         lower(trim(coalesce(json_extract_string(data, '$.status'), ''))) AS status
+  FROM bound
+), activation_ranked AS (
+  SELECT event_id, canonical_id AS user_id,
+         cast(timezone('Asia/Ho_Chi_Minh', timestamp) AS DATE) AS day,
+         coalesce(nullif(lower(trim(json_extract_string(properties, '$.tier'))), ''), 'unknown') AS tier,
+         lower(trim(coalesce(json_extract_string(properties, '$.source'), ''))) AS source,
+         try_cast(json_extract_string(properties, '$.lt_cost') AS BIGINT) AS lt_cost,
+         row_number() OVER (
+           PARTITION BY coalesce(nullif(insert_id, ''), cast(event_id AS VARCHAR))
+           ORDER BY timestamp DESC, event_id DESC
+         ) AS retry_rank
+  FROM events WHERE event_name = 'subscription_activated'
+    AND timestamp >= TIMESTAMPTZ '2026-09-01 00:00:00+07'
+    AND timestamp < TIMESTAMPTZ '2026-10-03 11:14:00+00'
 ), paid AS (
-  SELECT p.day, p.tier, p.id, c.amount_lt
-  FROM passes p JOIN charges c ON c.reference_id = p.ledger_reference_id
-  WHERE p.status = 'active' AND p.source = 'paid' AND c.amount_lt < 0
-    AND c.reason LIKE 'subscription_%'
+  SELECT day, tier, event_id,
+         EXISTS (
+           SELECT 1 FROM current_passes p
+           WHERE p.user_id = a.user_id AND p.tier = a.tier AND p.status = 'active'
+         ) AS current_active_match
+  FROM activation_ranked a
+  WHERE retry_rank = 1 AND source = 'paid' AND lt_cost > 0
+), metrics AS (
+  SELECT day, tier, 'paid_pass:' || tier AS series,
+         count(DISTINCT event_id)::BIGINT AS value, count(*)::BIGINT AS sample_size
+  FROM paid GROUP BY 1, 2
+  UNION ALL
+  SELECT day, tier, 'paid_pass_current_active_match:' || tier,
+         count(DISTINCT event_id) FILTER (WHERE current_active_match)::BIGINT, count(*)::BIGINT
+  FROM paid GROUP BY 1, 2
 )
-SELECT strftime(day, '%Y-%m-%d') AS date, 'paid_pass:' || tier AS series,
-       count(DISTINCT id)::BIGINT AS value, 'passes' AS unit, count(*)::BIGINT AS sample_size,
+SELECT strftime(day, '%Y-%m-%d') AS date, series, value, 'passes' AS unit, sample_size,
        CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
-       CASE WHEN day = DATE '2026-10-03' THEN 'exclusive cutoff 18:14 HCM, excludes free grants, LT charge is not VND revenue'
-            ELSE 'excludes free grants, LT charge is not VND revenue' END AS reason
-FROM paid GROUP BY 1, 2, day, tier ORDER BY 1, 2
+       CASE WHEN series LIKE 'paid_pass_current_active_match:%'
+              THEN 'non-authoritative current-state cross-check, cancellations and switches can reduce matches'
+            WHEN day = DATE '2026-10-03'
+              THEN 'event-backed paid activation with positive incremental LT charge, exclusive cutoff 18:14 HCM, LT is not VND revenue'
+            ELSE 'event-backed paid activation with positive incremental LT charge, excludes comps and renewals, LT is not VND revenue' END AS reason
+FROM metrics ORDER BY day, series
 ```
 
-Current-state exports cannot reconstruct historical cancellations/switches
-without dated snapshots; qualify that limitation.
+`subscription_activated` is the verified paid-pass mapping: it carries `source`,
+`tier`, and the actual incremental `lt_cost`. Wallet subscription rows have null
+`reference_id`, so never join them to a fabricated pass reference. Current-state
+pass exports are only a cross-check and cannot reconstruct historical
+cancellations/switches without dated snapshots. If activation-event coverage is
+not verified, the paid-pass claim is unavailable, never zero.
 
 ### R09 — checkout state
 
@@ -416,7 +455,8 @@ WITH bound AS (
 SELECT strftime(day, '%Y-%m-%d') AS date, 'checkout_status:' || status AS series,
        count(*)::BIGINT AS value, 'checkouts' AS unit, count(*)::BIGINT AS sample_size,
        CASE WHEN day = DATE '2026-10-03' THEN 'partial' ELSE 'complete' END AS state,
-       CASE WHEN status = 'pending' THEN 'pending is not abandoned, exact as-of needs an immutable dated export' ELSE '' END AS reason
+       CASE WHEN status = 'pending' THEN 'current snapshot status, pending is not abandoned, exact as-of needs an immutable dated export'
+            ELSE 'current snapshot status, exact as-of needs an immutable dated export' END AS reason
 FROM checkouts GROUP BY 1, 2, day, status ORDER BY 1, 2
 ```
 
@@ -563,10 +603,14 @@ WITH source_bound AS (
   SELECT
     coalesce(sum(CASE WHEN amount_lt > 0 THEN amount_lt ELSE 0 END), 0)::BIGINT AS issued_lt,
     coalesce(sum(CASE WHEN amount_lt > 0 AND reason = 'topup_purchase' THEN amount_lt ELSE 0 END), 0)::BIGINT AS purchased_lt,
-    coalesce(sum(CASE WHEN amount_lt > 0 AND reason IN ('refund', 'apple_refund') THEN amount_lt ELSE 0 END), 0)::BIGINT AS refunded_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND (reason = 'refund' OR reason LIKE '%_refund') THEN amount_lt ELSE 0 END), 0)::BIGINT AS refunded_lt,
     coalesce(sum(CASE WHEN amount_lt > 0 AND reason = 'grant' THEN amount_lt ELSE 0 END), 0)::BIGINT AS granted_lt,
-    coalesce(sum(CASE WHEN amount_lt > 0 AND coalesce(reason, '') NOT IN ('topup_purchase', 'refund', 'apple_refund', 'grant') THEN amount_lt ELSE 0 END), 0)::BIGINT AS other_issued_lt,
-    coalesce(sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END), 0)::BIGINT AS spent_lt,
+    coalesce(sum(CASE WHEN amount_lt > 0 AND reason <> 'topup_purchase' AND reason <> 'grant'
+                           AND NOT (reason = 'refund' OR reason LIKE '%_refund') THEN amount_lt ELSE 0 END), 0)::BIGINT AS other_issued_lt,
+    coalesce(sum(CASE WHEN amount_lt < 0 THEN -amount_lt ELSE 0 END), 0)::BIGINT AS all_debits_lt,
+    coalesce(sum(CASE WHEN amount_lt < 0 AND (reason = 'refund' OR reason LIKE '%_refund') THEN -amount_lt ELSE 0 END), 0)::BIGINT AS clawed_back_lt,
+    coalesce(sum(CASE WHEN amount_lt < 0 AND reason LIKE '%_hold' THEN -amount_lt ELSE 0 END), 0)::BIGINT AS held_lt,
+    coalesce(sum(CASE WHEN amount_lt < 0 AND NOT (reason = 'refund' OR reason LIKE '%_refund' OR reason LIKE '%_hold') THEN -amount_lt ELSE 0 END), 0)::BIGINT AS spent_lt,
     count(*)::BIGINT AS ledger_rows
   FROM ledger WHERE day BETWEEN DATE '2026-09-01' AND DATE '2026-10-02'
 ), topup_control AS (
@@ -590,7 +634,10 @@ WITH source_bound AS (
   UNION ALL SELECT 'lt_issued_other', other_issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows outside purchase, refund and grant classes' FROM ledger_totals
   UNION ALL SELECT 'lt_purchased_topup_control', purchased_lt::DOUBLE, 'LT', topup_rows, 'complete', 'Sep 1-Oct 2 completed topups_v1.lt_amount control' FROM topup_control
   UNION ALL SELECT 'lt_purchase_reconciliation_delta', (l.purchased_lt-t.purchased_lt)::DOUBLE, 'LT', t.topup_rows, 'complete', 'ledger purchased minus completed-topup control, nonzero means the covered extracts do not reconcile' FROM ledger_totals l CROSS JOIN topup_control t
-  UNION ALL SELECT 'lt_spent', spent_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 complete days, LT is not VND' FROM ledger_totals
+  UNION ALL SELECT 'lt_all_debits', all_debits_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 exact total: consumption plus escrow holds plus refund clawbacks' FROM ledger_totals
+  UNION ALL SELECT 'lt_clawed_back', clawed_back_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 negative refund-reason reversals, excluded from consumption' FROM ledger_totals
+  UNION ALL SELECT 'lt_held', held_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 escrow holds, excluded from consumption' FROM ledger_totals
+  UNION ALL SELECT 'lt_spent', spent_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 consumption only, excludes refund clawbacks and escrow holds, LT is not VND' FROM ledger_totals
   UNION ALL SELECT 'known_payer_source_max_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*largest_known_source/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, unknown remains separate, 60 percent is a target' FROM source_mix
   UNION ALL SELECT 'payer_outside_tiktok_share', CASE WHEN known_payers = 0 THEN NULL ELSE round(100.0*outside_tiktok/known_payers, 2) END, 'percent', known_payers, CASE WHEN known_payers = 0 THEN 'unavailable' ELSE 'qualified' END, 'known-source denominator, association not campaign proof' FROM source_mix
   UNION ALL SELECT 'cost_per_signup', NULL::DOUBLE, 'VND/person', 0, 'unavailable', 'approved campaign-cost binding not installed'

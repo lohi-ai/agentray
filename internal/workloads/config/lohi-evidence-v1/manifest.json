@@ -1,6 +1,6 @@
 {
   "version": "lohi-evidence-v1",
-  "skill_sha256": "39731ada71e518283bb4c6a1f6eea4bba773e7a7a15c8dfec2034e795e6bd331",
+  "skill_sha256": "35735ed1e614c8c5c1ff6769295eecd499dfa5f2aa532c97cb77b8388ccb7422",
   "connector_id": "51515151-5151-4515-8515-515151515151",
   "timezone": "Asia/Ho_Chi_Minh",
   "as_of_exclusive": "2026-10-03T11:14:00Z",
@@ -11,7 +11,9 @@
   },
   "normalizations": {
     "wallet_ledger_v1.reason": {
-      "topup_purchase": ["topup", "topup_apple_consented", "topup_purchase"]
+      "topup_purchase": ["topup", "topup_apple_consented", "topup_purchase"],
+      "refund_reversal": ["refund", "*_refund"],
+      "escrow_hold": ["*_hold"]
     }
   },
   "exports": [
@@ -19,7 +21,7 @@
     {"table":"ar_lohi.topups_v1","key":"id","mode":"snapshot","fields":["id","user_id","created_at","completed_at","expires_at","payment_status","provider","amount_vnd","lt_amount"]},
     {"table":"ar_lohi.wallet_ledger_v1","key":"id","mode":"append_only_proven_cursor_or_snapshot","fields":["id","user_id","created_at","amount_lt","reason","reference_id"]},
     {"table":"ar_lohi.tts_daily_v1","key":"id","mode":"snapshot","fields":["id","user_id","usage_date","pro_count","free_edge_count"]},
-    {"table":"ar_lohi.passes_v1","key":"id","mode":"snapshot_current_state","fields":["id","user_id","tier","created_at","status","source","ledger_reference_id"]},
+    {"table":"ar_lohi.passes_v1","key":"id","mode":"snapshot_current_state_cross_check","fields":["id","user_id","tier","created_at","status"]},
     {"table":"ar_lohi.reader_days_v1","key":"id","mode":"snapshot","fields":["id","user_id","day"]}
   ],
   "recipes": ["R01","R02","R03","R04","R05","R06","R07","R08","R09","R10","R11"],
@@ -29,12 +31,12 @@
     "R03":"a41904c03671517f3a9770f490ef4bcda21d49394c589fc8061717da8dffa492",
     "R04":"aef5f544ea274fc8f63b44d58c064faa93210833851b450c7b93c62cd1455080",
     "R05":"f4ff37e6ae18463eee582df93d09b4c5a2ee0972a2b216c476c0546e76df4a1f",
-    "R06":"70d2f9aa90ac6b682f29f5a74f1c5aa0b111b47b1a53ca4fed9163eb6a2b66e7",
+    "R06":"9877a2bc00a6766be260974c1f3e963d48bae3db5bdf1fb56f033a405eef2e21",
     "R07":"37e4d04391c19331c68a401e5b25ce96479e37aa9f6192a9e9191dcc6d9eddbd",
-    "R08":"babd79ec3ec2ee4dce94c1090449e489ad80d2163732569eccd671c8529499cd",
-    "R09":"39e61355cd909454f99902d3dceea9242059d23ce79538bb88f45c5c98d6a614",
+    "R08":"aefbb4a795e37b20c323e1b698e1c6a0d5def1852f3e0d812305ce11aadae846",
+    "R09":"c69e10bd3b3698d7210ac576f247581c34eb6d07a79a9d3bb8de4996c8a6b911",
     "R10":"1f1884d5d51591652804af8728f10ce19afbc2bf4324e65dc3cfdcf5a5bb961a",
-    "R11":"afc84d8598ff131a937168da47b807276874bc0666e33aad81227757e043a182"
+    "R11":"75341fd7be0ea32141e08ab7afdf72db048f21f540e3607ad656413c826b4aab"
   },
   "board": {
     "mode": "extend_existing_only",

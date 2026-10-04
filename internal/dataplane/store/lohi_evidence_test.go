@@ -133,6 +133,7 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	assertLohiRow(t, r07, querytest.LohiAssertion{Date: "2026-10-03", Series: "reader_dau", Value: 1, State: "partial"})
 	assertLohiRow(t, r07, querytest.LohiAssertion{Date: "2026-10-04", Series: "reader_dau", Absent: true})
 	assertLohiRow(t, r08, querytest.LohiAssertion{Date: "2026-10-03", Series: "paid_pass:audio_pass", Value: 1, State: "partial"})
+	assertLohiRow(t, r08, querytest.LohiAssertion{Date: "2026-09-27", Series: "paid_pass_current_active_match:audio_pass", Value: 1})
 	assertLohiRow(t, r08, querytest.LohiAssertion{Date: "2026-10-04", Series: "paid_pass:audio_pass", Absent: true})
 
 	r10 := run("R10")
@@ -154,8 +155,18 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	if components["lt_issued"] != components["lt_purchased_ledger"]+components["lt_refunded"]+components["lt_granted"]+components["lt_issued_other"] {
 		t.Fatalf("issuance components do not reconcile: %#v", components)
 	}
-	if components["lt_purchased_ledger"] != 17500 || components["lt_refunded"] != 40 || components["lt_granted"] != 500 || components["lt_issued_other"] != 0 || components["lt_purchased_topup_control"] != 17500 || components["lt_purchase_reconciliation_delta"] != 0 {
+	if components["lt_purchased_ledger"] != 17500 || components["lt_refunded"] != 215 || components["lt_granted"] != 500 || components["lt_issued_other"] != 0 || components["lt_purchased_topup_control"] != 17500 || components["lt_purchase_reconciliation_delta"] != 0 {
 		t.Fatalf("issuance controls drifted: %#v", components)
+	}
+	outflows := map[string]float64{}
+	for _, series := range []string{"lt_all_debits", "lt_spent", "lt_held", "lt_clawed_back"} {
+		outflows[series] = lohiMetricValue(t, r11, series)
+	}
+	if outflows["lt_all_debits"] != outflows["lt_spent"]+outflows["lt_held"]+outflows["lt_clawed_back"] {
+		t.Fatalf("debit components do not reconcile: %#v", outflows)
+	}
+	if outflows["lt_spent"] != 380 || outflows["lt_held"] != 200 || outflows["lt_clawed_back"] != 800 {
+		t.Fatalf("debit classification drifted: %#v", outflows)
 	}
 }
 
