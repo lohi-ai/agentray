@@ -133,11 +133,13 @@ func runCompletionsHTTP(ctx context.Context, acc *completionsAccumulator, rawMod
 	})
 }
 
-// Transport is shared by the two OpenAI APIs. Provider-specific accumulation
+// Transport is shared by the native OpenAI-compatible APIs. Provider-specific accumulation
 // stays in concrete callbacks, with no adapter to the legacy agent runtime.
 type openAIHTTPStream struct {
 	nonstreamObjectRequired bool
 	path                    string
+	endpoint                string
+	manualRedirect          bool
 	start                   func()
 	chunk                   func(json.RawMessage) error
 	finish                  func(context.Context)
@@ -189,6 +191,14 @@ func runOpenAIHTTP(ctx context.Context, rawModel json.RawMessage, options OpenAI
 		endpoint = "https://api.openai.com/v1"
 	}
 	endpoint = strings.TrimSuffix(endpoint, "/") + execution.path
+	if execution.endpoint != "" {
+		endpoint = execution.endpoint
+	}
+	if execution.manualRedirect {
+		copy := *client
+		copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &copy
+	}
 	retries := 0.0
 	_ = json.Unmarshal(controls["maxRetries"], &retries)
 	var maxDelay *float64
@@ -334,6 +344,10 @@ func completionsHeaders(rawModel json.RawMessage, transcript TranscriptContext, 
 }
 
 func openAIHeaders(rawModel json.RawMessage, transcript TranscriptContext, options map[string]json.RawMessage, affinityFormat string, sendAffinity, includeSessionAffinity bool, key string) (http.Header, error) {
+	return openAIHeadersFor(rawModel, transcript, options, affinityFormat, sendAffinity, includeSessionAffinity, key, false)
+}
+
+func openAIHeadersFor(rawModel json.RawMessage, transcript TranscriptContext, options map[string]json.RawMessage, affinityFormat string, sendAffinity, includeSessionAffinity bool, key string, azure bool) (http.Header, error) {
 	model, _ := samplingObject(rawModel)
 	// Object.assign merges by exact spelling first. Converting to HTTP headers
 	// only afterwards preserves the source's case-collision precedence.
@@ -354,7 +368,7 @@ func openAIHeaders(rawModel json.RawMessage, transcript TranscriptContext, optio
 	}
 	text("User-Agent", completionsUserAgent())
 	merge(model["headers"])
-	if samplingString(model["provider"]) == "github-copilot" {
+	if !azure && samplingString(model["provider"]) == "github-copilot" {
 		messages := transcript.Messages()
 		initiator := "user"
 		if len(messages) > 0 && messages[len(messages)-1].Role != "user" {
@@ -386,7 +400,12 @@ func openAIHeaders(rawModel json.RawMessage, transcript TranscriptContext, optio
 		}
 	}
 	merge(options["headers"])
-	headers := http.Header{"Accept": []string{"application/json"}, "Authorization": []string{strings.Trim("Bearer "+key, " \t\r\n")}, "X-Stainless-Retry-Count": []string{"0"}}
+	headers := http.Header{"Accept": []string{"application/json"}, "X-Stainless-Retry-Count": []string{"0"}}
+	if azure {
+		headers.Set("Api-Key", strings.Trim(key, " \t\r\n"))
+	} else {
+		headers.Set("Authorization", strings.Trim("Bearer "+key, " \t\r\n"))
+	}
 	if value := options["timeoutMs"]; samplingTruthy(value) {
 		var ms float64
 		_ = json.Unmarshal(value, &ms)

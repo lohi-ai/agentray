@@ -18,6 +18,7 @@ func TestPiPayloadControlsPreserveNativeFieldsAcrossDialects(t *testing.T) {
 	}{
 		{"openai-completions", `[{"type":"function","function":{"name":"write"}}]`, `{"type":"function","function":{"name":"write"}}`, "response_format"},
 		{"openai-responses", `[{"type":"function","name":"write"}]`, `{"type":"function","name":"write"}`, "text"},
+		{"azure-openai-responses", `[{"type":"function","name":"write"}]`, `{"type":"function","name":"write"}`, "text"},
 		{"anthropic-messages", `[{"name":"write"}]`, `{"type":"tool","name":"write","disable_parallel_tool_use":true}`, "output_config"},
 	} {
 		t.Run(tc.api, func(t *testing.T) {
@@ -53,7 +54,7 @@ func TestPiToolChoiceValidationAndToolFreeWrap(t *testing.T) {
 			t.Fatalf("invalid choice accepted: %+v", choice)
 		}
 	}
-	for _, api := range []string{"openai-completions", "openai-responses", "anthropic-messages"} {
+	for _, api := range []string{"openai-completions", "openai-responses", "anthropic-messages", "azure-openai-responses"} {
 		for _, mode := range []agentcore.ToolChoiceMode{agentcore.ToolChoiceAuto, agentcore.ToolChoiceNone, agentcore.ToolChoiceRequired} {
 			raw := json.RawMessage(`{"tools":[{"name":"write","function":{"name":"write"}}]}`)
 			result, err := piControlledPayload(api, raw, PiModelOptions{ToolChoice: agentcore.ToolChoice{Mode: mode}})

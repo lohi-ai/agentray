@@ -26,6 +26,24 @@ func TestNativeFailureHTTPMetadataKeepsWireUnchanged(t *testing.T) {
 		{"openai", "openai-completions", StreamOpenAICompletions},
 		{"openai", "openai-responses", StreamOpenAIResponses},
 		{"anthropic", "anthropic-messages", StreamAnthropic},
+		{"azure-openai-responses", "azure-openai-responses", StreamAzureResponses},
+		{"radius", "pi-messages", func(ctx context.Context, raw json.RawMessage, transcript TranscriptContext, options OpenAICompletionsStreamOptions) *AssistantMessageEventStream {
+			settings := PiMessagesStreamOptions{Values: catalogDecode(t, options.Options).(*Object), Now: func() float64 { return float64(options.Now()) }}
+			if options.OnPayload != nil {
+				settings.OnPayload = func(ctx context.Context, payload any, model *Object) (any, error) {
+					body, err := json.Marshal(payload)
+					if err != nil {
+						return nil, err
+					}
+					next, err := options.OnPayload(ctx, body, raw)
+					if err != nil || next == nil {
+						return Undefined, err
+					}
+					return catalogDecode(t, next), nil
+				}
+			}
+			return StreamPiMessages(ctx, catalogDecode(t, raw).(*Object), transcript, settings)
+		}},
 	} {
 		t.Run(tc.api, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

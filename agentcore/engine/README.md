@@ -653,12 +653,430 @@ parser resource limits and exhaustive malformed-input coverage remain unproven.
 
 ## Migration status
 
+Native model catalog projections now preserve source order, duplicate-ID
+replacement, explicit model-type filtering and shared model identity. A fixture
+generated from the unchanged pinned source checks 714 serialized inputs, three
+mutation cases and nine native-value cases. The provider name passed to these
+helpers does not rewrite model metadata. The concrete `InMemoryModelsStore`
+clones ordered data graphs on both write and read, including unknown metadata,
+shared/cyclic references and sparse arrays. Source traces verify clone failures
+and cancellation without replacing stored state; a race test checks concurrent
+provider isolation. These are foundations for the native Models collection,
+whose orchestration and provider-factory integration remain pending.
+Upstream provider catalog JSON is generated during hydration and is absent from
+the pinned source snapshot. Custom prototypes/conversion hooks and non-JSON
+structured-clone built-ins are not covered by these native data contracts.
+
+`ProviderModelCatalog` now implements the provider factory's static/dynamic
+overlay and refresh callback. It restores provider-scoped cached models before
+network access, replaces the first matching type/ID slot, retains model identity
+and publishes fetched snapshots before changing the visible catalog. Source
+fixtures cover 160 refresh scenarios, 14 dynamic-type cases and 19 model-helper
+rows including 361 equality comparisons. `ModelsPublisher` provides per-provider
+generation checks and persistence queues: canceling a caller does not release
+an unfinished store operation's queue slot. A controlled race against the source
+verifies that an old write cannot overtake the new generation and that another
+provider continues independently. Native integration checks cover successful,
+failed and superseded publication with `InMemoryModelsStore`; error and
+reentrant-update cases verify that callbacks do not poison the queue. These
+components are now joined by native Models.Refresh; provider dispatch wiring
+and the remaining auth lifecycle are still pending.
+
+The native `Models` registry now owns provider insertion/replacement/deletion,
+lookup, scoped and union catalog reads, model-type filtering and model lookup.
+It retains provider/model/list identity and best-effort callback error handling.
+Its live iteration matches additions, deletions, replacement and clear/reinsert
+inside provider callbacks; tombstones are removed when active readers finish.
+Fourteen source snapshots contain 154 provider probe sets, with another ten
+reentrant mutation cases and explicit sparse-list/identity checks. Registry
+changes invalidate refresh generations. Ten source lifecycle cases verify that
+`Finish` retires only the matching active controller: a completed scope keeps
+its uncanceled signal, stale publication returns false, and an old completion
+cannot retire a newer controller. Concurrent native registry tests run under
+the race detector. The registry now exposes auth lifecycle, availability and
+catalog refresh and request dispatch; concrete provider factories remain pending.
+It does not replace the workspace's legacy live-discovery `Collection`.
+
+The native credential store now retains Pi's live-reference semantics and
+ordered, secret-free metadata listing. One hundred source cases distinguish
+undefined/no-change from explicit-null writes and verify read/modify/delete
+results. Controlled source races cover an aborted modification, queued
+replacement, independent-provider progress, logout during refresh and canceled
+logout. Reading does not wait for a pending modification, and a callback's
+in-place mutations remain observable even when the callback fails. Snapshot
+publication and credential mutation now share one per-provider operation queue;
+cancellation never releases an unfinished callback's queue slot. `Models`
+constructs an independent default credential store or retains injected callback
+behavior. `EnvAPIKeyAuth` adds stored-key-first resolution, sequential environment
+fallback and secret-prompt login, with 97 source cases for values, errors,
+cancellation and mutation of the environment-variable list. Scoped config
+retains identity. `LazyOAuth` now shares one load across login, refresh and auth
+derivation, retaining both the loaded implementation and load rejection. Its 27
+source sequences cover retry after a synchronous loader throw, callback and
+loader replacement, result/error identity and pre-abort. Nine metadata cases
+verify construction-time values without loading the flow. Two concurrent traces
+check shared success/rejection and cancellation while loading; two integration
+traces connect the helper to the provider factory, Models and credential store.
+Availability checks do not load a flow, and logout/relogin reuses it. Concrete
+provider OAuth flows, malformed/thenable load results and synchronous loader
+reentrancy remain pending or unproven; app credential routing has not changed.
+
+Native OAuth device-code polling now retains the default/minimum interval,
+server `slow_down` intervals, deadline clipping and cancellation/error priority.
+Its 127 unchanged-source clock-controlled cases include first-poll delays,
+non-finite and JSON-shaped timing inputs, expired/aborted pending polls and live
+poll/signal replacement. An in-flight poll owns its completion even when the
+caller cancels; three source sleep cases and a native gated-poll test cover that
+boundary. `GeneratePKCE` uses 32 cryptographically random bytes and hashes the
+base64url verifier with SHA-256. Five source entropy vectors verify the exact
+verifier/challenge bytes, and native checks exercise real entropy. Exact
+simultaneous timer/abort ordering, malformed callbacks and platform entropy
+failures remain unproven; provider-specific OAuth flows are still pending.
+
+The native OAuth callback server now handles browser redirects, shared wait
+results, one-time code claims, cancellation, timeout and graceful listener close.
+Nine source page cases compare exact HTML, and 28 HTTP scenarios compare status,
+headers and body hashes. Eight controlled races prove that an admitted exchange
+continues after cancel/abort/timeout/close while the wait retains its first result.
+Twenty manual-input cases verify callback/manual failure priority, null versus
+undefined results and independent prompt cancellation; four HTTP integration
+flows exercise browser success/failure and manual fallback. Query decoding now
+shares Azure's existing WHATWG-compatible helper, including encoded plus signs.
+Exact JS microtask ordering for blocking Go prompt callbacks, cancellation during
+bind, platform-specific bind errors and malformed HTTP/JS inputs remain unproven.
+Provider-specific OAuth flows still need to be wired and verified.
+
+`OpenRouterOAuth` now connects PKCE, random callback paths, browser/manual
+coordination and native HTTP key exchange. Seventy-seven unchanged-source login
+cases compare notifications, prompts, exact request bytes, errors and retained
+cancellation signals; nine cases verify credential derivation and identity.
+Four local HTTP flows cover browser success/failure, missing keys and duplicate
+callbacks. A source/native registry trace verifies lazy loading, login storage,
+shared chat/image auth and logout. Permanent API keys retain the source expiry
+and refresh is an identity operation. Error/abort precedence includes ignored
+transport cancellation and failed JSON reads on non-success HTTP responses.
+The built-in OpenRouter provider/catalog/image API wiring, Bun-only environment
+fallback and exhaustive fetch/network/microtask edges remain pending or unproven.
+Other provider OAuth flows and the production default migration are unfinished.
+
+`AnthropicOAuth` implements browser and copy-code login, PKCE authorization,
+manual code/URL parsing, token exchange, refresh and credential derivation in Go.
+Its 112 source cases compare prompts, notifications, exact request bytes, token
+expiry, malformed responses and cancellation; seven diagnostic cases cover
+error metadata and nested causes, and six cover credential derivation. Three
+local HTTP browser flows verify success, failed exchange and duplicate callbacks.
+The manual prompt is aborted before token exchange, and the callback page can
+report success even when the later token exchange fails. A source/native Models
+trace verifies lazy loading and a single persisted refresh for concurrent auth
+requests. Expiry retains Pi's five-minute margin. Diagnostic fixtures declare a
+common host stack policy: default Go and Bun stacks are not byte-identical.
+Built-in provider/default runtime wiring, module-load environment timing and
+exhaustive fetch, malformed-value and scheduling behavior remain unfinished.
+
+`XaiOAuth` now implements device authorization, polling, refresh and auth
+credential derivation with native HTTP and the shared device-code poller. Its
+254 source cases cover exact form bytes, HTTPS verification URL validation,
+Unicode scalar conversion, polling/backoff/expiry, token defaults, retained
+refresh tokens, malformed responses and cancellation precedence. Ten local
+HTTP traces include BOM decoding; fixtures use byte-backed responses because
+Bun's string-backed `Response.json()` uses a different BOM path. Six credential
+cases verify auth derivation, and a source/native registry trace verifies lazy
+loading and a single persisted refresh for concurrent callers. The five-minute
+expiry skew and one-hour default lifetime match Pi. Built-in xAI provider/API
+wiring, exhaustive network/URL/malformed-JavaScript behavior and exact scheduling
+remain unfinished.
+
+`KimiCodingOAuth` now ports device login, polling, refresh retries and Bearer
+header derivation. Its 275 source cases cover host override priority, form bytes,
+Unicode, device/token validation, polling, timeout/cancellation and retry error
+precedence. Fifteen local HTTP traces include retries, unauthorized responses
+and BOM decoding; nine credential cases verify metadata and header derivation.
+A source/native Models trace checks lazy loading, one persisted concurrent
+refresh and retained credentials when an unauthorized refresh is wrapped in a
+Models error. Kimi retains the original verification URL after validation and
+uses the full token lifetime without expiry skew. Refresh transport/429/5xx
+failures retry after 1, 2 and 4 seconds. Poll cancellation uses its fixed message;
+retry sleep retains the abort cause. Form encoding is shared with xAI. Timeout
+snapshots are checked after shortened timers settle; exact scheduling, Bun-only
+environment fallback, exhaustive network/URL/JavaScript edges and built-in
+provider/default runtime wiring remain unfinished.
+
+`GitHubCopilotOAuth` ports enterprise domain normalization, device login, token
+exchange, account model discovery and policy enabling. Its 224 source cases
+verify Individual-only policy fallback, model filtering/deduplication, bounded
+429 retries and body cancellation, request/budget timeouts and error precedence.
+Twenty-four local HTTP traces and 33 auth-derivation cases cover endpoint and
+response behavior. A source/native Models trace verifies one concurrent refresh
+and no credential write when model discovery fails after token exchange. The
+source pin excludes generated Copilot model data, so the Go constructor requires
+an explicit `KnownModels` object. Differential fixtures declare their injected
+catalog keys; this does not establish production catalog parity. Standard HTTP
+and ISO Retry-After dates are implemented, but exhaustive JavaScript Date.parse
+forms, network/redirect/invalid-header diagnostics and exact scheduling remain
+unproven. Built-in catalog/provider/API wiring and default migration are pending.
+Kimi and Copilot share the native sleep helper that retains cancellation causes.
+
+`OpenAICodexOAuth` now ports browser/manual login, device login, token exchange,
+refresh and auth derivation. Its 246 source cases verify prompt/notification
+ordering, exact request bytes, callback bind fallback, immediate device polling,
+pending/slow_down/expiry and distinct login/refresh cancellation behavior. JWT
+account extraction preserves Pi's Latin-1 `atob` behavior, rejects URL-safe
+base64 characters and requires a nonempty string account ID. Token expiry has
+no early-refresh skew. Twenty-nine local HTTP device/refresh traces, three
+browser callback flows and six credential cases verify integration behavior.
+A source/native Models trace checks lazy loading, one persisted refresh for
+concurrent callers and retained account metadata. Notification precedes the
+browser cleanup scope in Pi: if a host notification throws, the retaining host
+owns callback cleanup. HTTP decoding and manual-input parsing are shared with
+Copilot and Anthropic. Built-in provider/default runtime wiring, Bun-only module
+behavior and exhaustive transport/URL/JavaScript/scheduling edges remain pending.
+
+`OpenAIChatGPTOAuth` ports the separate direct-token ChatGPT login and refresh
+flow. Its 214 source cases check installation UUIDs, dynamic client registration,
+manual callback origin/state/client ID validation, exact request bytes, token
+fields/scopes/expiry and failure precedence. Login requires an ID token; refresh
+retains the issued client ID and scopes, with a three-minute expiry margin.
+Twenty-four local token HTTP traces, six browser callback flows and six credential
+cases verify integration. Invalid callbacks keep authorization pending; duplicate
+valid callbacks still receive HTTP 200. The manual prompt stays live through token
+exchange and is cancelled during cleanup. A source/native Models trace verifies
+one persisted refresh across concurrent callers and retained credentials on an
+invalid-scope response. Idle HTTP connections close in both implementations.
+Go also closes accepted TCP sockets that have not sent HTTP; the Bun oracle can
+leave those open, so raw-socket lifecycle parity is not established. Built-in
+provider/default runtime wiring, module-load environment capture, synchronous
+prompt-throw cleanup boundaries, exact promise scheduling and exhaustive
+HTTP framing/transport/URL/JavaScript behavior remain pending or unproven.
+
+`MetaOAuth` ports device login and the separate identity-token-to-API-key mint
+step. The identity token remains the stored refresh value; refresh mints a new
+key with a 24-hour expiry and no skew. Its 294 source cases cover verification
+URL fallback/normalization, polling, token/key validation, exact requests, error
+detail priority, malformed responses, cancellation and request timeout lifetime.
+Forty-eight real local HTTP traces exercise all three endpoints, and nine cases
+check credential-to-auth conversion. A source/native Models trace verifies one
+persisted mint for concurrent callers and retained credentials after a 401;
+an expired identity requires a new login. JSON/body failures become null before
+provider validation, while fetch failures retain identity unless login has been
+aborted. Meta, Kimi and Copilot share native request-timeout contexts; Meta and
+Kimi share the object/array JSON reader. Built-in provider/catalog/API wiring,
+default migration and exhaustive transport/JavaScript/timing parity remain
+pending. Timeout fixtures observe settled, shortened timers, not exact event-loop
+ordering.
+
+`RadiusOAuth` ports gateway discovery, browser/device login and refresh. Its 363
+source cases verify exact requests, captured gateway versus live prompt name,
+PKCE/state, callback cleanup boundaries, immediate polling, OAuth error metadata,
+token numeric coercion and cancellation precedence. Token fields remain unvalidated
+and expiry carries a one-minute skew. Sixty-five real local HTTP traces and five
+source/native browser callback flows cover transport integration, including
+validation errors, exchange failure pages and duplicate rejection. Seven
+credential cases and ten gateway normalization cases cover helper behavior.
+A source/native Models trace checks one persisted refresh for concurrent callers,
+scope retention and unchanged credentials after invalid_grant. The fixtures
+also distinguish Bun's empty HTTP response (`fetch().json()` returns null) from
+an empty constructed Response (which throws); the native shared reader follows
+real fetch, while a BOM-only body remains a parse error. Browser notifications
+precede the source cleanup scope. Generated Radius baseline data, built-in
+provider construction, default migration and exhaustive
+JavaScript/transport/scheduling parity remain pending.
+
+Radius gateway config loading and provider catalog publication now run in Go.
+Eighty-six source config cases verify row filtering and field retention; identity
+traces verify shallow copies with shared nested values, non-finite numeric fields
+and sparse projection. Seventy-six source HTTP cases and forty local HTTP traces
+cover auth, URL resolution, malformed responses, cancellation and error-body
+truncation at 512 UTF-16 code units, including a split surrogate pair. Eighty
+provider cases cover baseline merging, stored/legacy restoration, duplicate IDs,
+publication rejection and cancellation. A source/native Models integration over
+local HTTP verifies offline restoration, a superseded response arriving late,
+persisted fresh models and cache retention after a 503. OAuth loading remains
+lazy; stream and streamSimple retain their arguments and returned source.
+`RadiusProvider` defaults to native Go `PiMessagesAPI` streams, with an optional
+concrete override. The default gateway still requires explicit pinned baseline
+models. The generated catalog is absent from the source pin, so fixtures declare
+their baseline; no current external catalog is substituted. Built-in provider
+construction and default runtime migration remain unfinished.
+
+The pi-messages SSE reader and event converter now have native Go implementations.
+One hundred twenty-seven traces through unchanged public `stream()` compare raw
+parsed events, snapshots at emission, retained live events and final messages.
+The reader uses the first data line, ignores `[DONE]`, handles CRLF across chunks,
+streaming UTF-8/BOM and EOF tails, and stops before later frames after a terminal
+event. Conversion preserves the shared partial message and tool block identities,
+progressive JSON repair, signatures, forwarded fields and rewrite diagnostics.
+Fixtures cover missing blocks, malformed JSON, callback mutation/failure,
+read failure and a terminal event followed by invalid data. All 127 cases now
+also run through the native HTTP producer and typed event adapter. Event extension
+fields, malformed/missing/null JSON values and Unicode surrogate values survive
+serialization; shared message and tool pointers retain their identity.
+
+`StreamPiMessages` and `StreamSimplePiMessages` implement native request building,
+HTTP and response diagnostics. Another 100 unchanged-source cases compare request
+bytes, URLs/debug queries, cache environment precedence, header casing/null
+handling, payload replacement, callback ordering/mutation, structured errors,
+8192-unit diagnostic truncation and fetch/read/callback failures. Fixture stacks
+use explicit source/native stack metadata; a Go stack is not a Bun source stack.
+The HTTP owner closes the body on success, early terminal and callback/error exits.
+A thrown failure creates a fresh empty message, leaving prior partial output intact.
+
+Real HTTP tests exercise Models plus the default Radius lazy factory in stream and
+simple modes, progressive text, mid-stream cancellation and concurrent snapshots.
+HTTP status/retry metadata is available to the host without changing event JSON;
+callback failures remain host failures. Full parity remains incomplete: consumer
+edits to typed message fields are not fed back into the ordered accumulator;
+live callback replacement, cyclic/prototype/accessor values, exhaustive native
+URL/header/network diagnostics and exact scheduling remain unproven. The Go
+HTTP owner closes its response body, while Bun releases the reader lock without
+canceling it. Built-in catalog construction and production default migration
+remain pending.
+
+The host `NativeProviderStream` now admits `pi-messages`. Its serialized adapter
+owns decoded model/options values, preserves nil-versus-null payload callbacks,
+and applies raw event replacements before protocol conversion. All 127 protocol
+fixtures also run through this boundary. Explicit `radius` and `pi-messages`
+ModelTier bindings select this wire with a resolved HTTP(S) endpoint; they do not
+construct an OpenAI client to determine the native route. Credentials stay bound
+to the provider row and endpoint, with explicit refresh failures remaining final.
+
+Gateway tool choices are nested under `options` and validated against current
+transcript tools, including removals. Tool-free wrap-up removes a forced choice.
+Parallel-tool-call and structured-output controls are rejected at binding because
+the pinned gateway protocol does not define them. Other generation controls and
+reasoning retain the provider's own semantics, including unmodified xhigh effort.
+Real runner tests verify refreshed keys, a tool turn and final answer, progressive
+tokens, signatures, usage/traces, credential exclusion and durable effects. Child
+and summary tests verify isolated histories, delegation limits and tool-free
+summaries. Truncated streams cannot execute finalized tool blocks without a
+terminal event, and resume does not replay those discarded calls. Host retries
+use HTTP status/Retry-After while callback errors never trigger provider retries.
+This enables the opt-in native host route; it does not complete the catalog or
+switch the production default.
+
+`Models.GetAuth` now resolves provider IDs and model objects in Go. Its 434
+unchanged-source cases cover request overrides, stored-credential ownership,
+ambient fallback, OAuth expiry boundaries, errors and model-header merging.
+OAuth refresh rechecks expiry under the credential lock and persists the rotated
+token before releasing it. Controlled source traces verify one refresh for
+concurrent callers, cancellation without a late write, retained signal lifetime
+and in-flight handler identity when a callback replaces the provider's handler.
+Header fixtures include dotted-I, contextual Greek sigma and serialized
+`__proto__` behavior. Another 20 cases check error cause detail, and 13 check
+default environment/filesystem context behavior. Native error/panic checks retain
+the original cause. Provider OAuth implementations remain
+pending, as do exhaustive JavaScript prototype, malformed-value, timing and
+Unicode-version behavior. These checks
+do not establish full port parity or change the production default.
+
+Native `Models.Refresh` now joins these components: restore cached provider
+state first, resolve refresh credentials, then fetch and publish online.
+Credential-read errors are surfaced after cache restoration, unknown stored
+model types are filtered, and `force` is forwarded only to the online phase.
+Unlike request auth, catalog refresh renews OAuth only at actual expiry and
+rechecks it under the credential lock. Its 253 unchanged-source cases cover
+selection, offline mode, expiry, credential replacement, storage/provider errors
+and malformed snapshots. Controlled source races cover superseding an active
+refresh and cancellation during a credential read that ignores the signal.
+Native integration verifies cache visibility before fetching, persistence before
+the final catalog update, and progress by independent providers. Provider
+factories remain pending. Exhaustive callback scheduling,
+mutation of readonly provider IDs during refresh and
+arbitrary JavaScript thrown values are not yet proven equivalent.
+
+Native `Models.Login` and `Logout` now persist interactive credentials through
+the shared store. Eighty-six unchanged-source cases cover provider/method
+selection, interaction and options forwarding, credential identity, malformed
+values, errors and pre-abort. Eight controlled source races distinguish
+cancellation before mutation admission from cancellation after the store starts
+the mutation: after admission, login waits for the store's actual settlement.
+Logout also waits for an admitted delete, including a store that ignores its
+signal. A ninth source race connects canceled login and queued logout through
+the real memory store. Native cause checks preserve provider errors and wrapped
+storage causes. Provider-specific OAuth login flows remain pending; JavaScript
+synchronous-throw versus rejected-Promise distinctions and exhaustive scheduling
+at simultaneous cancellation/mutation admission remain unproven.
+
+Native `CheckAuth` and the availability accessors now apply provider auth and
+credential-specific model filters. The 195 unchanged-source cases verify that
+OAuth availability does not refresh tokens, API-key checks bypass resolution,
+fallback resolution rereads credentials, and catalog/filter errors propagate.
+`filterAllModels` takes precedence; otherwise chat IDs filter only chat models
+while other model types remain available. Model references are retained and
+sparse union holes are skipped. Source traces cover concurrent auth checks,
+registry replacement during a pending read, caller cancellation with callbacks
+that continue, and ID-set equality for NaN, sparse holes and object identity.
+A native failure case verifies that one rejected check does not wait for a
+blocked provider and retains the original error cause. Custom prototypes,
+non-array callback results beyond the native Array boundary and exhaustive
+callback scheduling remain unproven; provider factories are still pending.
+
+Native request preparation now serves `CancelDeferred`, `GenerateImages` and
+`Classify`. It preserves explicit-null auth overrides, merges auth/model/request
+headers in order, runs the header transform last, merges scoped environment and
+applies an auth endpoint override through a shallow model copy. Provider options
+retain their fields while the Models-only transform is removed. Its 186 source
+cases cover override precedence, validation, error-result formatting, callback
+and registry replacement during auth, live options mutation and input/result
+identity. Twelve controlled source races verify that cancellation after auth
+does not stop waiting for a transform or provider callback that ignores the
+signal. Image/classifier failures retain original model metadata and the current
+abort state; deferred cancellation retains the original error cause. Concrete
+provider factories and exhaustive JavaScript callback, prototype and
+malformed-value behavior remain pending.
+
+Native `Models` chat/simple/deferred streams now use `LazyStream`, and completion
+methods await the forwarded result. Provider selection and explicit auth
+overrides are captured before returning the stream; later option edits still
+participate in final request preparation. Thirty-six source cases cover lazy
+setup/iteration/result failures, absent versus null results and terminal-event
+precedence. Forty-eight cover Models dispatch, normalization, auth and admission
+snapshots. Another 24 cover lazy API capability gates, repeated loads and load
+failure recovery. Controlled source traces verify live result mutation after a
+terminal event and continued iteration after request cancellation. Native local
+HTTP/SSE tests connect both standard and simple dispatch to Completions, including
+endpoint/header overrides, transcript normalization and the shared payload lock
+used by host snapshots. Concrete provider factories, arbitrary JavaScript
+iterables/getters, dynamic non-JSON metadata and exhaustive callback scheduling
+remain unproven or pending; the production default has not changed.
+
+`NewModelProvider` now ports the generic provider factory using concrete Go
+callbacks and the native catalog. Twenty-one unchanged-source construction
+cases and 90 dispatch cases cover single/mapped chat APIs, deferred operations,
+image/classifier routing, absent implementations, live map-entry replacement,
+error propagation and JSON-shaped API keys. A source trace checks retained auth,
+baseline and fetch references, construction-time capability fields and live input
+ID during stored-catalog restoration. Standard/simple local HTTP tests now run
+through this factory and Models, checking catalog identity and request behavior.
+Concrete built-in factories, provider catalog hydration and malformed JavaScript
+implementation objects/prototypes remain pending or unproven.
+
 This is not yet the default production agent. The native host now has a direct
 Go `openai-completions`, `openai-responses` and `anthropic-messages` providers, including `streamSimple`, HTTP/SSE, callbacks,
 retry and usage accounting. Other provider APIs and removal of the TypeScript
 bridge remain pending. Differential fixtures and local HTTP integration tests
 cover the implemented paths; they do not establish parity for every API or all
 SDK transport and numeric/Unicode edge cases.
+Azure Responses configuration and request construction are now native Go,
+with 289 unchanged-source cases covering explicit/scoped/process settings,
+deployment maps, Azure URL normalization, strict/grammar and dynamic tools,
+tool-call replay, reasoning and sampling overrides. Another 68 source cases
+check Azure HTTP/SSE requests, callbacks, retry and error behavior; 106 check `streamSimple`, and 36 compare exact SDK URLs.
+Native tests cover header timeout, cancellation and redirect policy, including
+retaining the caller HTTP client configuration. `NativeProviderStream` accepts
+explicit Azure models; a two-turn `NativeAgent` test verifies refreshed keys,
+deployment mapping, tool-result replay, model identity and credential-free
+request traces. Native `ModelTier` now binds Azure without creating a legacy
+Completions client. Explicit tier endpoints take precedence over environment
+route discovery; resolved endpoint, API version and deployment mapping are
+frozen for that binding. Host tests cover structured/tool controls, reasoning
+replay, refreshed credentials, durable effects, isolated child runs, summary
+requests and recovery without executing an unfinished tool call. Binding tests
+also cover process-env changes, endpoint mutation rejection and row-scoped
+credential refresh. Provider catalog/discovery remains pending; the app default
+has not changed. Its request builder shares the prompt-cache helper with OpenAI Responses; 34 source cases verify the
+64-code-point limit, raw surrogate units, null rejection and serialized
+array-like inputs. Custom iterators/prototype conversion and resource-limit
+behavior are not established by these fixtures.
 The native Responses provider now has 83 transcript/tool, 119 request/compat,
 98 event-time stream and 55 HTTP/callback/error differential cases. Its Go
 HTTP/SSE entry point covers reasoning backfill, unfinished tool rejection,

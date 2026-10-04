@@ -22,7 +22,7 @@ func TestAssistantStreamSnapshotDetachesEveryPublicField(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := &Message{Role: "user", Content: TextContent("original"), Extra: map[string]json.RawMessage{}}
-	source := AssistantMessageEvent{Type: "toolcall_end", Partial: &message, Message: text, Error: &message, ToolCall: message.Content.Blocks[0]}
+	source := AssistantMessageEvent{Extra: map[string]json.RawMessage{"extension": json.RawMessage(`{"value":10}`)}, Type: "toolcall_end", Partial: &message, Message: text, Error: &message, ToolCall: message.Content.Blocks[0]}
 	before, err := json.Marshal(source)
 	if err != nil {
 		t.Fatal(err)

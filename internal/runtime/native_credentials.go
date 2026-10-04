@@ -26,15 +26,19 @@ func (p BuildParams) nativeLadderOptions(tier ModelTier, options PiModelOptions)
 			if ai.NormalizeOAuthVendor(rung.Provider) == ai.VendorOpenAICodex && rung.TokenSource != nil {
 				continue
 			}
-			provider, err := rung.RawProvider()
-			if err != nil {
-				return nil, err
+			providerName := ai.NormalizeVendor(rung.Provider)
+			if providerName != ai.VendorAzureResponses && providerName != ai.VendorPiMessages && providerName != "radius" {
+				provider, err := rung.RawProvider()
+				if err != nil {
+					return nil, err
+				}
+				providerName = provider.Name()
 			}
 			bound := identity{rung.ProviderID, ai.NormalizeVendor(rung.Provider), strings.TrimRight(strings.TrimSpace(rung.BaseURL), "/")}
-			if previous, found := seen[provider.Name()]; found && previous != bound {
+			if previous, found := seen[providerName]; found && previous != bound {
 				return nil, errors.New("native fallback requires provider-row credential refresh for distinct rows sharing a vendor")
 			}
-			seen[provider.Name()] = bound
+			seen[providerName] = bound
 		}
 	}
 	return func(rung ModelTier) (PiModelOptions, error) { return p.nativeModelOptions(rung, options), nil }, nil

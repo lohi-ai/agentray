@@ -15,7 +15,7 @@ func validateNativeProviderModel(raw json.RawMessage) error {
 		return err
 	}
 	switch model.API {
-	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses":
+	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses", "pi-messages":
 		return nil
 	}
 	return fmt.Errorf("native Go provider for API %q is not ported", model.API)
@@ -92,8 +92,14 @@ func nativeProviderStream(ctx context.Context, model json.RawMessage, transcript
 		}
 		return ai.StreamCodexResponsesPooled(ctx, model, transcript, provider, pool)
 	}
+	if selected.API == ai.VendorPiMessages {
+		return ai.StreamPiMessagesJSON(ctx, model, transcript, provider)
+	}
 	if selected.API == "openai-codex-responses" {
 		return ai.StreamCodexResponsesSimple(ctx, model, transcript, provider)
+	}
+	if selected.API == "azure-openai-responses" {
+		return ai.StreamAzureResponsesSimple(ctx, model, transcript, provider)
 	}
 	if selected.API == "openai-responses" {
 		return ai.StreamOpenAIResponsesSimple(ctx, model, transcript, provider)

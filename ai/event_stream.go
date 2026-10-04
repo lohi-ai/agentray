@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 )
 
@@ -165,15 +166,17 @@ func (s *EventStream[T, R]) Result(ctx context.Context) (R, error) {
 // AssistantMessageEvent is Pi's event union. Type selects the fields emitted
 // on the wire; Partial is the live accumulator, not an event-time snapshot.
 type AssistantMessageEvent struct {
-	Type         string        `json:"type"`
-	ContentIndex int           `json:"contentIndex,omitempty"`
-	Delta        string        `json:"delta,omitempty"`
-	Content      string        `json:"content,omitempty"`
-	ToolCall     *ContentBlock `json:"toolCall,omitempty"`
-	Partial      *Message      `json:"partial,omitempty"`
-	Reason       string        `json:"reason,omitempty"`
-	Message      *Message      `json:"message,omitempty"`
-	Error        *Message      `json:"error,omitempty"`
+	encoding     *transcriptEncoding
+	Type         string                     `json:"type"`
+	ContentIndex int                        `json:"contentIndex,omitempty"`
+	Delta        string                     `json:"delta,omitempty"`
+	Content      string                     `json:"content,omitempty"`
+	ToolCall     *ContentBlock              `json:"toolCall,omitempty"`
+	Partial      *Message                   `json:"partial,omitempty"`
+	Reason       string                     `json:"reason,omitempty"`
+	Message      *Message                   `json:"message,omitempty"`
+	Error        *Message                   `json:"error,omitempty"`
+	Extra        map[string]json.RawMessage `json:"-"`
 }
 
 func (e AssistantMessageEvent) MarshalJSON() ([]byte, error) {
@@ -189,7 +192,8 @@ func (e AssistantMessageEvent) MarshalJSON() ([]byte, error) {
 	case "toolcall_end":
 		required["contentIndex"] = e.ContentIndex
 	}
-	return marshalTranscriptObject(plain(e), nil, required)
+	raw, err := marshalTranscriptObject(plain(e), e.Extra, required)
+	return restoreTranscriptEncoding(raw, err, e.encoding)
 }
 
 // AssistantMessageEventStream retains Pi's live message pointers. Producers

@@ -30,6 +30,7 @@ type responsesAccumulator struct {
 	resolveServiceTier      func(responseTier, requestTier json.RawMessage) json.RawMessage
 	applyServiceTierPricing func(*Usage, json.RawMessage)
 	formatFailure           func(string) string
+	missingStopReason       string
 }
 
 func newResponsesAccumulator(model completionsModel, grammar map[string]string, stream *AssistantMessageEventStream, timestamp int64) *responsesAccumulator {
@@ -490,7 +491,10 @@ func (a *responsesAccumulator) finish(ctx context.Context) {
 			if ctx.Err() != nil {
 				failure = "Request was aborted"
 			} else if a.output.StopReason == "pending" {
-				failure = "OpenAI Responses stream ended without a stop reason"
+				failure = a.missingStopReason
+				if failure == "" {
+					failure = "OpenAI Responses stream ended without a stop reason"
+				}
 			} else if a.output.StopReason == "error" || a.output.StopReason == "aborted" {
 				failure = "An unknown error occurred"
 				if a.output.ErrorMessage != nil && *a.output.ErrorMessage != "" {

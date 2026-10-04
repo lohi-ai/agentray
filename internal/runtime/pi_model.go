@@ -67,36 +67,29 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 	if !nativeCodexPool && (ai.IsOAuthVendor(t.Provider) || t.TokenSource != nil) {
 		return cfg, false, errors.New("Pi model binding requires explicit OAuth account-pool lifecycle integration")
 	}
-	var provider agentcore.LLMProvider
-	var err error
-	if nativeCodexPool {
-		p := ai.NewCodexProvider()
-		p.BaseURL = t.BaseURL
-		provider = p
-	} else {
-		provider, err = t.RawProvider()
+	options := map[string]json.RawMessage{}
+	if len(cfg.Options) > 0 {
+		if err := json.Unmarshal(cfg.Options, &options); err != nil || options == nil {
+			return cfg, false, errors.New("Pi options must be an object")
+		}
 	}
+	streamOptions := map[string]json.RawMessage{}
+	if raw := options["streamOptions"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &streamOptions); err != nil || streamOptions == nil {
+			return cfg, false, errors.New("Pi stream options must be an object")
+		}
+	}
+	wire, err := t.resolvePiWire(nativeCodexPool, streamOptions)
 	if err != nil {
 		return cfg, false, err
 	}
-	var api, endpoint string
-	var compat map[string]any
-	switch p := provider.(type) {
-	case *ai.CodexProvider:
-		api, endpoint = "openai-codex-responses", p.BaseURL
-		if endpoint == "" {
-			endpoint = "https://chatgpt.com/backend-api"
+	api, endpoint, providerName, compat := wire.api, wire.endpoint, wire.provider, wire.compat
+	if api == ai.VendorPiMessages {
+		if err := piMessagesValidateControls(opts); err != nil {
+			return cfg, false, err
 		}
-	case *ai.OpenAIProvider:
-		api, endpoint = "openai-completions", p.BaseURL
-		compat = map[string]any{"maxTokensField": p.Compat.MaxTokensField}
-	case *ai.OpenAIResponsesProvider:
-		api, endpoint = "openai-responses", strings.TrimSuffix(p.BaseURL, "/responses")
-	case *ai.AnthropicProvider:
-		api, endpoint = "anthropic-messages", p.BaseURL
-	default:
-		return cfg, false, fmt.Errorf("provider %q has no native Pi model binding", provider.Name())
 	}
+
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
 		return cfg, false, errors.New("Pi provider endpoint must be an HTTP(S) URL without embedded credentials")
@@ -127,18 +120,13 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 		cost[rate.name] = value
 		known = known && found
 	}
-	model := map[string]any{"id": t.Model, "name": t.Model, "api": api, "provider": provider.Name(), "baseUrl": endpoint,
+	model := map[string]any{"id": t.Model, "name": t.Model, "api": api, "provider": providerName, "baseUrl": endpoint,
 		"reasoning": t.Capabilities.ReasoningEffort != agentcore.CapabilityUnsupported,
 		"input":     input, "contextWindow": t.EffectiveWindow(), "maxTokens": maxTokens, "cost": cost}
 	if compat != nil {
 		model["compat"] = compat
 	}
-	options := map[string]json.RawMessage{}
-	if len(cfg.Options) > 0 {
-		if err := json.Unmarshal(cfg.Options, &options); err != nil || options == nil {
-			return cfg, false, errors.New("Pi options must be an object")
-		}
-	}
+
 	initial := map[string]json.RawMessage{}
 	if raw := options["initialState"]; len(raw) > 0 {
 		if err := json.Unmarshal(raw, &initial); err != nil || initial == nil {
@@ -164,12 +152,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 	}
 	options["initialState"], _ = json.Marshal(initial)
 	options["streamMode"] = json.RawMessage(`"native"`)
-	streamOptions := map[string]json.RawMessage{}
-	if raw := options["streamOptions"]; len(raw) > 0 {
-		if err := json.Unmarshal(raw, &streamOptions); err != nil || streamOptions == nil {
-			return cfg, false, errors.New("Pi stream options must be an object")
-		}
-	}
+
 	streamOptions["maxTokens"], _ = json.Marshal(maxTokens)
 	options["streamOptions"], _ = json.Marshal(streamOptions)
 	var callbacks []string
@@ -254,7 +237,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 				return nil, err
 			}
 			var requested string
-			if err := json.Unmarshal(params, &requested); err != nil || requested != provider.Name() {
+			if err := json.Unmarshal(params, &requested); err != nil || requested != providerName {
 				return nil, errors.New("Pi requested credentials for an unbound provider")
 			}
 			if nativeCodexPool {
@@ -271,7 +254,7 @@ func (t ModelTier) bindPi(cfg agentcore.PiConfig, opts PiModelOptions, nativeCod
 			if strings.TrimSpace(key) == "" {
 				// An explicitly configured refresh callback remains authoritative:
 				// its empty result must not silently select another identity.
-				if opts.RefreshKey == nil && api == "anthropic-messages" && ai.HasAnthropicFederationConfig(provider.Name(), options["streamOptions"]) {
+				if opts.RefreshKey == nil && api == "anthropic-messages" && ai.HasAnthropicFederationConfig(providerName, options["streamOptions"]) {
 					return json.RawMessage(`null`), nil
 				}
 				return nil, errors.New("Pi provider credential is empty")

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 )
 
 func piValidateToolChoice(choice agentcore.ToolChoice, names []string) error {
@@ -27,6 +28,9 @@ func piValidateToolChoice(choice agentcore.ToolChoice, names []string) error {
 // hook. Pi still owns all message encoding, signatures, caching, and streaming.
 // Raw fields preserve extension values and numbers without a float64 roundtrip.
 func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (json.RawMessage, error) {
+	if api == ai.VendorPiMessages {
+		return piMessagesControlledPayload(raw, opts)
+	}
 	payload := map[string]json.RawMessage{}
 	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
 		return nil, errors.New("Pi provider payload must be an object")
@@ -66,7 +70,7 @@ func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (
 		}
 		choice := opts.ToolChoice
 		switch api {
-		case "openai-completions", "openai-responses", "openai-codex-responses":
+		case "openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses":
 			if choice.Mode == agentcore.ToolChoiceNamed {
 				value := map[string]any{"type": "function", "name": choice.Name}
 				if api == "openai-completions" {
@@ -120,7 +124,7 @@ func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (
 		switch api {
 		case "openai-completions":
 			err = set("response_format", map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": name, "strict": spec.Strict, "schema": spec.Schema}})
-		case "openai-responses", "anthropic-messages", "openai-codex-responses":
+		case "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses":
 			key := "text"
 			if api == "anthropic-messages" {
 				key = "output_config"
@@ -144,5 +148,57 @@ func piControlledPayload(api string, raw json.RawMessage, opts PiModelOptions) (
 			return nil, err
 		}
 	}
+	return json.Marshal(payload)
+}
+
+// Gateway controls are nested and tools are declared by transcript system
+// messages. Do not add OpenAI fields which this protocol does not forward.
+func piMessagesValidateControls(opts PiModelOptions) error {
+	if opts.ParallelToolCalls != nil {
+		return errors.New("Pi Messages does not support parallel tool-call controls")
+	}
+	if opts.OutputSchema != nil {
+		return errors.New("Pi Messages does not support structured-output controls")
+	}
+	return nil
+}
+func piMessagesControlledPayload(raw json.RawMessage, opts PiModelOptions) (json.RawMessage, error) {
+	if err := piMessagesValidateControls(opts); err != nil {
+		return nil, err
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
+		return nil, errors.New("Pi provider payload must be an object")
+	}
+	var transcript ai.Context
+	if err := json.Unmarshal(payload["context"], &transcript); err != nil {
+		return nil, err
+	}
+	controls := map[string]json.RawMessage{}
+	if raw := payload["options"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &controls); err != nil || controls == nil {
+			return nil, errors.New("Pi Messages options must be an object")
+		}
+	}
+	tools := ai.GetCurrentTools(transcript.Messages)
+	if len(tools) == 0 {
+		if opts.ToolChoice.Mode != agentcore.ToolChoiceDefault {
+			delete(controls, "toolChoice")
+		}
+	} else {
+		names := make([]string, len(tools))
+		for i, tool := range tools {
+			names[i] = tool.Name
+		}
+		if err := piValidateToolChoice(opts.ToolChoice, names); err != nil {
+			return nil, err
+		}
+		if opts.ToolChoice.Mode == agentcore.ToolChoiceNamed {
+			controls["toolChoice"], _ = json.Marshal(map[string]any{"type": "function", "function": map[string]string{"name": opts.ToolChoice.Name}})
+		} else if opts.ToolChoice.Mode != agentcore.ToolChoiceDefault {
+			controls["toolChoice"], _ = json.Marshal(opts.ToolChoice.Mode)
+		}
+	}
+	payload["options"], _ = json.Marshal(controls)
 	return json.Marshal(payload)
 }

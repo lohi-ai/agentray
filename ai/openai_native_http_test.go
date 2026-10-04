@@ -27,7 +27,7 @@ func TestPiAnthropicHTTPOracle(t *testing.T) {
 }
 func testOpenAIHTTPOracle(t *testing.T, fixturePath string, count int, streamFn func(context.Context, json.RawMessage, TranscriptContext, OpenAICompletionsStreamOptions) *AssistantMessageEventStream) {
 	clearAnthropicFederationEnv(t)
-	for _, name := range []string{"OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "PI_CACHE_RETENTION"} {
+	for _, name := range []string{"OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "PI_CACHE_RETENTION", "AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_RESOURCE_NAME", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT_NAME_MAP"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", "")
@@ -88,7 +88,7 @@ func testOpenAIHTTPOracle(t *testing.T, fixturePath string, count int, streamFn 
 				}
 				mu.Lock()
 				request := map[string]any{"path": r.URL.Path, "headers": headers, "body": payload}
-				if samplingString(fixture.Model["api"]) == "anthropic-messages" {
+				if samplingString(fixture.Model["api"]) == "anthropic-messages" || samplingString(fixture.Model["api"]) == "azure-openai-responses" {
 					request["query"] = r.URL.RawQuery
 				}
 				requests = append(requests, request)
@@ -289,7 +289,7 @@ func testOpenAIHTTPTimeoutAndAbort(t *testing.T, api string, streamFn func(conte
 					_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"finished\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n")
 					return
 				}
-				if api == "openai-responses" {
+				if api == "openai-responses" || api == "azure-openai-responses" {
 					_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[{\"type\":\"output_text\",\"text\":\"finished\"}]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
 					return
 				}

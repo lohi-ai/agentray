@@ -25,6 +25,7 @@ func snapshotAssistantEvent(event AssistantMessageEvent) AssistantMessageEvent {
 	event.Message = copy.message(event.Message)
 	event.Error = copy.message(event.Error)
 	event.ToolCall = copy.block(event.ToolCall)
+	event.Extra = snapshotJSONFields(event.Extra)
 	return event
 }
 

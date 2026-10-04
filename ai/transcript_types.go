@@ -48,6 +48,7 @@ type Message struct {
 // A nil slot represents an array hole; decoded null entries retain a distinct
 // sentinel. Both serialize as null within an array, but filtering distinguishes them.
 type ContentBlock struct {
+	encoding          *transcriptEncoding
 	null              bool
 	Type              string                     `json:"type"`
 	Text              string                     `json:"text,omitempty"`
@@ -352,7 +353,8 @@ func (b ContentBlock) MarshalJSON() ([]byte, error) {
 	case "toolCall":
 		required["id"], required["name"], required["arguments"] = b.ID, b.Name, b.Arguments
 	}
-	return marshalTranscriptObject(plain(b), b.Extra, required)
+	raw, err := marshalTranscriptObject(plain(b), b.Extra, required)
+	return restoreTranscriptEncoding(raw, err, b.encoding)
 }
 func (t Tool) MarshalJSON() ([]byte, error) {
 	type plain Tool

@@ -13,6 +13,7 @@ import (
 )
 
 func TestPiModelBindingPreservesResolvedWireAndEndpoint(t *testing.T) {
+	clearNativeAzureEnv(t)
 	for _, tc := range []struct {
 		name, provider, base, api, identity, endpoint string
 		caps                                          agentcore.ModelCapabilities
@@ -20,6 +21,7 @@ func TestPiModelBindingPreservesResolvedWireAndEndpoint(t *testing.T) {
 		{name: "openai", provider: "openai", base: "https://example.test/v1", api: "openai-completions", identity: "openai", endpoint: "https://example.test/v1"},
 		{name: "model responses", provider: "openai", base: "https://example.test/v1", api: "openai-responses", identity: "openai", endpoint: "https://example.test/v1", caps: agentcore.ModelCapabilities{StatefulResponses: agentcore.CapabilitySupported}},
 		{name: "explicit responses endpoint", provider: ai.VendorOpenAIResponses, base: "https://example.test/v1/responses", api: "openai-responses", identity: ai.VendorOpenAIResponses, endpoint: "https://example.test/v1"},
+		{name: "azure responses", provider: ai.VendorAzureResponses, base: "https://resource.openai.azure.com", api: ai.VendorAzureResponses, identity: ai.VendorAzureResponses, endpoint: "https://resource.openai.azure.com/openai/v1"},
 		{name: "anthropic", provider: "anthropic", base: "https://example.test/anthropic", api: "anthropic-messages", identity: "anthropic", endpoint: "https://example.test/anthropic"},
 		{name: "google configured proxy", provider: "google", base: "https://example.test/gemini", api: "openai-completions", identity: "google", endpoint: "https://example.test/gemini"},
 		{name: "compatible", provider: "private-router", base: "https://example.test/router", api: "openai-completions", identity: "private-router", endpoint: "https://example.test/router"},

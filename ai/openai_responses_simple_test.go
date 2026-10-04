@@ -14,8 +14,15 @@ import (
 )
 
 func TestPiResponsesSimpleOracle(t *testing.T) {
+	testResponsesSimpleOracle(t, "testdata/pi-responses-simple.json", 103, BuildOpenAIResponsesSimpleOptions, StreamOpenAIResponsesSimple)
+}
+func testResponsesSimpleOracle(t *testing.T, fixturePath string, count int, build func(json.RawMessage, TranscriptContext, json.RawMessage) (json.RawMessage, error), streamFn func(context.Context, json.RawMessage, TranscriptContext, OpenAIResponsesStreamOptions) (*AssistantMessageEventStream, error)) {
+	for _, key := range []string{"AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_RESOURCE_NAME", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT_NAME_MAP"} {
+		t.Setenv(key, "")
+	}
+
 	t.Setenv("PI_CACHE_RETENTION", "")
-	raw, err := os.ReadFile("testdata/pi-responses-simple.json")
+	raw, err := os.ReadFile(fixturePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +41,7 @@ func TestPiResponsesSimpleOracle(t *testing.T) {
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 103 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != count {
 		t.Fatal("unexpected Responses simple oracle revision/coverage")
 	}
 	for _, tc := range fixture.Cases {
@@ -54,7 +61,7 @@ func TestPiResponsesSimpleOracle(t *testing.T) {
 			rawModel, _ := json.Marshal(model)
 			rawOptions, _ := json.Marshal(controls)
 			transcript := NormalizeContext(tc.Input.Context)
-			prepared, err := BuildOpenAIResponsesSimpleOptions(rawModel, transcript, rawOptions)
+			prepared, err := build(rawModel, transcript, rawOptions)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +84,7 @@ func TestPiResponsesSimpleOracle(t *testing.T) {
 			})}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			stream, admissionErr := StreamOpenAIResponsesSimple(ctx, rawModel, transcript, OpenAIResponsesStreamOptions{Options: rawOptions, Client: client, Now: func() int64 { return 100 }, OnPayload: func(_ context.Context, payload, _ json.RawMessage) (json.RawMessage, error) {
+			stream, admissionErr := streamFn(ctx, rawModel, transcript, OpenAIResponsesStreamOptions{Options: rawOptions, Client: client, Now: func() int64 { return 100 }, OnPayload: func(_ context.Context, payload, _ json.RawMessage) (json.RawMessage, error) {
 				params = append(json.RawMessage(nil), payload...)
 				return nil, nil
 			}})

@@ -3,10 +3,11 @@ package ai
 import (
 	"encoding/json"
 	"errors"
-	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 const OpenAIPromptCacheKeyMaxLength = 64

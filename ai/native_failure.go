@@ -52,6 +52,7 @@ func recordNativeFailure(ctx context.Context, provider string, cause error, call
 			var openAI *completionsRequestError
 			var codex *codexHTTPError
 			var anthropic *AnthropicClientError
+			var piMessages *PiMessagesResponseError
 			var transport net.Error
 			switch {
 			case errors.As(cause, &openAI):
@@ -60,6 +61,8 @@ func recordNativeFailure(ctx context.Context, provider string, cause error, call
 				failure = agentcore.NewProviderError(provider, &http.Response{StatusCode: codex.Status, Header: codex.Headers.Clone()}, codex.Message)
 			case errors.As(cause, &anthropic):
 				failure = agentcore.NewProviderError(provider, &http.Response{StatusCode: anthropic.Status, Header: anthropic.Headers.Clone()}, anthropic.Message)
+			case errors.As(cause, &piMessages):
+				failure = agentcore.NewProviderError(provider, &http.Response{StatusCode: piMessages.Status, Header: piMessages.Headers.Clone()}, piMessages.Message)
 			case errors.As(cause, &transport):
 				failure = &agentcore.ProviderError{Provider: provider, Message: cause.Error()}
 			}

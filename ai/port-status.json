@@ -47,7 +47,21 @@
     {
       "source": "src/api/azure-openai-responses.ts",
       "git_blob": "9089fd0e8d8ea5c4567aa9d62fb232b0735948e7",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/azure_responses_params.go",
+        "ai/azure_responses_http.go",
+        "ai/azure_responses_simple.go",
+        "ai/openai_prompt_cache.go",
+        "ai/openai_responses_native_messages.go",
+        "ai/openai_native_http.go",
+        "internal/runtime/native_provider.go",
+        "internal/runtime/pi_model_wire.go",
+        "internal/runtime/pi_controls.go",
+        "ai/url_query.go"
+      ],
+      "verification": "TestPiAzureResponsesParams (289 unchanged-source configuration/request cases); TestPiAzureResponsesHTTP (68 full HTTP/callback/event cases); TestPiAzureResponsesEndpoints (36 exact SDK URL cases); TestPiAzureResponsesSimple (106 option/admission cases); TestAzureResponsesHTTPTimeoutAndAbort; TestAzureResponsesRedirectPolicy; TestNativeFailureHTTPMetadataKeepsWireUnchanged; TestNativeAzureDefaultDispatcher; TestNativeAzureModelTierHTTPControlsAndDurability; TestNativeAzureInheritedByChildrenAndSummary; TestNativeAzureUnfinishedToolHasNoEffect; TestAzureModelBindingFreezesResolvedConfiguration; TestAzureModelBindingRejectsInvalidRoutesAndRefresh; TestAzureModelBindingRowRefreshIsRequiredForSiblingRows",
+      "remaining": "Native endpoint configuration and request construction are implemented. Fixtures cover scoped/process/explicit setting precedence, deployment-map parsing, Azure host/path normalization, WHATWG URL serialization, strict and grammar tools, additional tools/tool search, replayed call IDs, reasoning maps, token floor, sampling overrides and cache keys. Native HTTP/SSE and streamSimple are implemented, including API-key-only admission, api-key headers, SDK api-version query merging/escaping, callback sequencing, retries, timeouts, cancellation and manual redirects when api-key is present. The shared HTTP path uses a client copy for redirect policy. Responses accumulation retains Azure identity, error prefix and service-tier behavior. Explicit Azure model bindings run through NativeProviderStream and NativeAgent; a two-turn host test checks refreshed keys, deployment mapping, tool result replay, final model identity, request traces and credential exclusion. Native ModelTier binding now resolves Azure directly, without constructing a legacy Completions client. An explicit tier endpoint is authoritative; otherwise scoped/process Azure configuration supplies it. Endpoint, API version and deployment mapping are captured for the binding. Runner HTTP tests cover structured/tool controls, refreshed credentials, reasoning replay, durable effects, child/summary inheritance and unfinished-tool rejection/recovery. Host binding tests cover environment drift, endpoint mutation, failing refresh and sibling-row credential ownership. Provider catalog/discovery remains pending; the default app runtime has not changed. Dynamic non-serializable values, exhaustive malformed typed options, URL edge cases and SDK transport diagnostics remain unproven. SDK platform diagnostic headers are excluded from HTTP fixtures."
     },
     {
       "source": "src/api/bedrock-converse-stream.lazy.ts",
@@ -122,7 +136,13 @@
     {
       "source": "src/api/lazy.ts",
       "git_blob": "55a564cdbc23c259e737536170fd32fca1da3acd",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/lazy_stream.go",
+        "ai/event_stream.go"
+      ],
+      "verification": "TestPiLazyStream (36 unchanged-source cases); TestPiLazyAPI (24 cases); TestPiLazyStreamLateResultPreservesLiveMessage; TestPiModelsStreamCancellationDoesNotCancelForwarding; TestModelsStreamNativeHTTPIntegration",
+      "remaining": "LazyStream forwards concrete ProviderEventSource iteration/result callbacks without a JavaScript runtime. Setup, iteration and result failures become source-shaped zero-usage error messages. Optional/undefined results stay pending, explicit null settles, and the first terminal event retains its result when a later iterator/result callback fails. Controlled source traces verify retained live message identity after a late result failure and continued forwarding after request cancellation. LazyAPI preserves capability-gated deferred methods and calls the loader per request, including retry after a failed load. Native streams share the host payload lock through context, verified against real local Completions HTTP/SSE in standard and simple mode. Arbitrary JavaScript iterables, result getters, synchronous throws versus Promise rejection, non-error thrown values, null-model unhandled-rejection diagnostics and exhaustive scheduling remain unproven. Setup-error metadata uses the native message encoding boundary; dynamic non-JSON metadata and getter/serialization timing remain unproven."
     },
     {
       "source": "src/api/llama-cpp-classify.lazy.ts",
@@ -203,7 +223,12 @@
     {
       "source": "src/api/openai-prompt-cache.ts",
       "git_blob": "1c3355d52eeb79fab3924127559f533a59c1d34d",
-      "status": "pending"
+      "status": "ported-with-fixture-tests",
+      "go_files": [
+        "ai/openai_prompt_cache.go"
+      ],
+      "verification": "TestPiOpenAIPromptCache (34 unchanged-source cases) and TestPiAzureResponsesParams; existing OpenAI Responses request/HTTP tests verify shared adoption",
+      "remaining": "The native helper exports the 64-code-point limit, preserves short keys and raw lone-surrogate units, rejects null and supports serialized array-like values. Azure and OpenAI Responses share it. Custom iterators, accessors, prototype conversion and huge array-like resource failures are outside the verified serialized boundary; adoption by remaining providers is pending."
     },
     {
       "source": "src/api/openai-responses-shared.ts",
@@ -251,12 +276,33 @@
     {
       "source": "src/api/pi-messages.lazy.ts",
       "git_blob": "41af9ee58926bff19d8fe61778be32d8b18b4817",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/pi_messages_http.go",
+        "ai/lazy_stream.go"
+      ],
+      "verification": "PiMessagesAPI composes the shared LazyAPI with the native stream/simple implementation; TestRadiusNativePiMessagesHTTP exercises both paths through Models and Radius. Shared LazyAPI has existing source differential stream/load failure coverage.",
+      "remaining": "Native lazy factory and Radius default stream wiring exist. Exhaustive direct pi-messages factory admission/import timing parity and built-in catalog/production default runtime integration remain unproven."
     },
     {
       "source": "src/api/pi-messages.ts",
       "git_blob": "2137b551f8f8e8c58d3bf0ebb5cf840e5b04183b",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/pi_messages_protocol.go",
+        "ai/pi_messages_http.go",
+        "ai/pi_messages_typed.go",
+        "ai/event_stream.go",
+        "ai/transcript_types.go",
+        "ai/stream_snapshot.go",
+        "ai/native_failure.go",
+        "ai/pi_messages_json.go",
+        "internal/runtime/native_provider.go",
+        "internal/runtime/pi_model_wire.go",
+        "internal/runtime/pi_controls.go"
+      ],
+      "verification": "TestPiMessagesProtocol: 127 traces through unchanged public stream(), with a recording event-stream subclass and injected fetch bodies. Source/native checks compare raw parsed events, emission-time snapshots, retained live events and final messages. Cases cover text/thinking/tool deltas and endings, streaming JSON repair, sparse/named/typed indices, duplicate/replaced blocks, tool map key identity, rewrite diagnostics, terminal optional fields, callback mutation/failure/cancellation, unknown/primitive events, missing blocks, first-data-line SSE behavior, LF/CRLF chunk boundaries, EOF tails, BOM/invalid UTF-8, read failures and early terminal stop. TestPiMessagesHTTPProtocol replays all 127 cases through the HTTP producer and typed Go adapter, comparing emission-time snapshots, retained events and results. TestPiMessagesHTTP adds 100 unchanged-source request/callback/error cases, including exact JSON request bytes, URL/debug queries, explicit/scoped/process cache retention, header casing/null overrides, payload replacement and mutation, callback ordering/model mutation, response diagnostics, UTF-16 truncation, transport/read errors and cancellation. Diagnostic stacks use an explicit source/native fixture policy. TestRadiusNativePiMessagesHTTP exercises Models plus the default Radius stream/simple over actual local HTTP; TestPiMessagesHTTPStreamingAndCancellation checks progressive output, stable partial identity, detached concurrent snapshots and fresh aborted messages. TestPiMessagesHTTPFailureMetadata and TestNativeFailureHTTPMetadataKeepsWireUnchanged cover body closure, retry metadata and callback failure provenance, including real HTTP 503. TestPiMessagesJSONProtocol replays the 127 source protocol cases through the serialized host adapter and compares raw callbacks, retained event graphs and final results. TestNativePiMessagesDispatcherCallbacks verifies actual HTTP callback ordering, model metadata, null payload replacement, raw event mutation/primitive replacement and host failure provenance. TestNativePiMessagesModelTierHTTPControlsAndDurability covers radius/pi-messages bindings through the runner, per-request key refresh, gateway tool-choice controls, reasoning/signature replay, progressive tokens, exact usage/traces, credential exclusion and durable tool effects. TestNativePiMessagesInheritedByChildrenAndSummary covers child isolation, delegation limits and tool-free summary calls. TestNativePiMessagesTruncatedStreamHasNoEffect covers terminal-less finalized tool blocks, no effect journal entries and safe resume without replay. TestPiMessagesModelBindingAndControls and TestPiMessagesSiblingRowsRequireBoundRefresh cover route/model binding, active transcript tool choices, unsupported controls and row-owned credentials. TestNativeRungRetriesUseProviderHTTPMetadata now exercises Pi Messages HTTP retries and callback-error exclusion.",
+      "remaining": "Native request building, HTTP/SSE, stream/streamSimple, typed event adaptation and lazy PiMessagesAPI/Radius wiring are implemented. Headers preserve source case-sensitive spread over defaults after case-insensitive override deduplication; onResponse precedes status/body validation; onPayload can mutate or replace with null. HTTP errors retain structured diagnostics and truncate unstructured bodies at 8192 UTF-16 units. Terminal protocol events keep the live partial message; thrown errors create a fresh empty message. The HTTP owner closes bodies on all exits. Typed events preserve forwarded extras and malformed/missing/null JSON fields with immutable encoding metadata; message/block pointers remain stable, and snapshots detach exported extension data. This does not establish complete parity: consumer edits to typed messages are not fed back into the ordered protocol accumulator, replacement of callback functions during a request and arbitrary JavaScript prototypes/accessors/cyclic values remain unproven. Go stack/network/header diagnostics, exhaustive URL/Unicode/typed live-value behavior and exact scheduling remain unproven. ErrorStack provides explicit host stack metadata rather than fabricating Bun source locations. Bun releases its reader lock without canceling the response; Go closes its owned body. The native host dispatcher and explicit radius/pi-messages ModelTier bindings are implemented. Bindings require a resolved HTTP(S) endpoint, retain per-row credential ownership and validate tool choices against current transcript tools. Parallel-tool-call and structured-output controls are rejected because this protocol does not define them; no OpenAI control fields are invented. The serialized host adapter owns decoded input objects and permits raw callback event replacement before conversion. Built-in catalog construction and production default migration remain pending."
     },
     {
       "source": "src/api/simple-options.ts",
@@ -297,42 +343,96 @@
     {
       "source": "src/auth/context.ts",
       "git_blob": "30e088bfac82a5aca05a8a6a564c2ae26ab3358f",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/auth_context.go"
+      ],
+      "verification": "TestPiDefaultProviderAuthContext (seven process-environment and six filesystem cases from unchanged source)",
+      "remaining": "Native process environment lookup preserves ECMAScript whitespace filtering and raw nonempty values. Filesystem checks include literal leading-tilde expansion and best-effort failure handling. Browser-only context behavior, platform-specific home-directory fallback and exhaustive filesystem/environment edge cases remain unproven."
     },
     {
       "source": "src/auth/credential-store.ts",
       "git_blob": "fc17f6cc6e4f0442f80848cce6a07407f150e024",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/credential_store.go",
+        "ai/provider_operation_queue.go",
+        "ai/models_registry.go"
+      ],
+      "verification": "TestPiInMemoryCredentialStore (100 unchanged-source cases); TestPiCredentialStoreLiveReferencesAndOrder; TestPiCredentialStoreCanceledModifyKeepsQueue (controlled source race); TestPiCredentialStoreDeleteDuringRefresh (two source races); TestCredentialStoreCancellationAndReentrantRead; TestModelsCredentialStorageOwnership; existing model publication and registry regression tests",
+      "remaining": "Native InMemoryCredentialStore preserves live credential references, undefined/no-change versus explicit-null writes, post-write return values, insertion-ordered secret-free metadata and immediate reads during pending writes. Modify/Delete use a shared per-provider queue also adopted by ModelsPublisher. Cancellation stops the caller's wait while active callbacks retain the queue until settlement; failure/panic releases the chain without losing error identity. Source races cover cross-provider progress, a canceled refresh callback's live-object mutations, a queued replacement and logout/canceled logout during refresh. Models owns a default independent store or an injected concrete callback store whose method replacement remains observable. Models.GetAuth now integrates native credential resolution; catalog refresh and login/logout orchestration are also integrated. Custom JavaScript getters/prototypes, non-error thrown values and exhaustive malformed typed inputs remain unproven; shared credential object mutations require caller synchronization in Go."
     },
     {
       "source": "src/auth/helpers.ts",
       "git_blob": "980963e79061a448812214642189cf45b0a757f1",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/auth_helpers.go",
+        "ai/auth_lazy.go"
+      ],
+      "verification": "TestPiEnvAPIKeyAuth (60 source cases); TestPiEnvAPIKeyLogin (32 source cases); TestPiEnvAPIKeyFailureAndLiveVariableList (five source cases); TestEnvAPIKeyStoredMetadataIdentity; TestPiLazyOAuth (27 unchanged-source sequences with four calls each); TestPiLazyOAuthMetadata (nine source cases); TestPiLazyOAuthConcurrentLoadIgnoresOperationCancellation (two controlled source traces); TestPiLazyOAuthModelsIntegration (two source/native registry, credential, login, refresh and logout traces)",
+      "remaining": "EnvAPIKeyAuth is ported with stored-key precedence, truthiness rather than trimming, sequential environment fallback, live variable-list iteration, raw key/scoped-config retention, secret prompt construction and admission/post-callback cancellation checks. Environment and prompt rejections retain their error identity and priority over subsequent cancellation checks. Optional env retains own-property presence even when undefined. Concrete callback structs replace auth interfaces. LazyOAuth now shares its first load across login, refresh and toAuth, caches the implementation or returned load error, retains live implementation callbacks and preserves metadata captured at construction. Loader replacement before first use is observed; replacement after a settled load is ignored. A native panic models a synchronous loader throw before promise assignment and permits retry. Operation cancellation does not abandon the shared load or prevent the loaded callback from running. Controlled source traces cover concurrent success/rejection and cancellation; integration traces verify CheckAuth does not load a flow, login and expiry refresh share one load, refreshed credentials retain identity and logout/relogin reuses the loaded flow. Provider-specific OAuth implementations, dynamic non-string variable names/prototype behavior, invalid or thenable loader results and synchronous loader reentrancy remain pending or unproven. Models.GetAuth, Refresh, Login, Logout and availability checks now use the native auth and credential callbacks."
     },
     {
       "source": "src/auth/oauth/anthropic.ts",
       "git_blob": "35215061399bb803d730be645c89a6f50cc5e536",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_anthropic.go",
+        "ai/oauth_diagnostics.go",
+        "ai/oauth_input.go"
+      ],
+      "verification": "TestPiAnthropicOAuthLoginAndRefresh (112 unchanged-source login/refresh cases: browser and copy-code input parsing, exact prompts/notifications/request bytes, token fields/expiry, HTTP/JSON failures and cancellation); TestPiAnthropicOAuthDiagnosticMetadata (7 source error metadata/cause cases); TestPiAnthropicOAuthMetadataAndToAuth (metadata and 6 credential shapes); TestPiAnthropicOAuthBrowserHTTP (3 local HTTP browser success/failure/duplicate flows); TestPiAnthropicOAuthModelsConcurrentRefresh (source/native lazy loading, concurrent registry auth resolution, one refresh and persisted token rotation). Diagnostic stack fixtures use an explicit common host stack policy, not default Go/Bun stacks.",
+      "remaining": "Native browser/copy-code login, token exchange, refresh and auth derivation are implemented with concrete callbacks and net/http. Source callback bind failures fall back to manual input; manual prompt cancellation precedes browser token exchange, and the callback page can succeed even when the subsequent exchange fails. Token expiry includes the source five-minute margin. Error details preserve code/errno/cause/explicit stack fields. Default native Go and Bun stack traces are not byte-identical; fixture stack policy is explicit. Built-in provider/catalog/default runtime wiring, exhaustive fetch/network/redirect and JavaScript scheduling/malformed-value edges, Bun-only environment fallback and module-load versus constructor capture timing remain unproven or pending."
     },
     {
       "source": "src/auth/oauth/callback-server.ts",
       "git_blob": "00aa6aea1edd71edc095626eccc08227cf74793b",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_callback.go",
+        "ai/oauth_page.go",
+        "ai/url_query.go"
+      ],
+      "verification": "TestPiOAuthCallbackHTTP (28 unchanged-source local HTTP scenarios with exact body SHA-256 and response headers); TestPiOAuthCallbackClaimedRaces (eight controlled source completion/cancel/abort/timeout/close races); TestPiOAuthManualInputPriority (20 controlled source cases); TestPiOAuthBrowserManualIntegration (four source/native browser/manual HTTP flows); TestOAuthCallbackPortInUse; race detector",
+      "remaining": "Native callback server binds the requested TCP address and retains a shared result/error identity. Route/state validation precedes claimed/settled rejection; only the first valid code invokes completion. Duplicate parameters retain their first value, plus is replaced before percent decoding, malformed escapes remain literal and UTF-8 decoding follows URLSearchParams replacement. Completion errors render the source 502 page and propagate the original cause. Cancel leaves a claimed completion running; abort/timeout/close settle the wait without canceling the active exchange, which still returns its success/failure page. Close drains active HTTP handlers. Manual input has its own cancellation context, cancels an unclaimed browser wait and is aborted on exit. Callback rejection precedes manual rejection; after a successful callback wait an already-observed manual failure wins, while successful manual input cannot replace a claimed browser result. Undefined callback completion falls back to manual input; explicit null remains a callback result. Native option/callback mutation requires caller synchronization. Exact JS microtask ordering versus blocking Go prompt invocation, abort during bind/listener-registration, platform-specific bind errors, malformed request targets/callback values and exhaustive HTTP/timer/abort scheduling remain unproven. OpenRouter now uses this server and manual-input helper in full native login flows. Cancel observes an already-aborted signal before resolving an unclaimed wait, matching synchronous AbortSignal listener precedence even when Go AfterFunc is delayed. Other provider-specific OAuth flows remain pending."
     },
     {
       "source": "src/auth/oauth/device-code.ts",
       "git_blob": "a078155c89a9322f04f8eca11be82296dc358714",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_device_code.go"
+      ],
+      "verification": "TestPiOAuthDeviceCodeFlow (127 unchanged-source controlled-clock cases); TestPiOAuthAbortableSleep (three source cancellation/completion cases); TestOAuthDeviceCodeWaitsForInFlightPoll; race detector",
+      "remaining": "Native polling preserves the five-second default, one-second minimum, floored milliseconds, optional first wait, numeric-only expiry and finite positive server intervals. slow_down adds five seconds unless the server supplies an interval, which can reduce the previous interval. Sleeps stop at the captured deadline; timeout after slow_down retains the source clock-drift diagnostic. Cancellation is checked at loop/sleep boundaries, not raced against an in-flight poll: completion, failure and provider errors retain source precedence even after abort or expiry. Poll and signal replacement remain live while initial interval/deadline are captured. Fixtures include null/undefined, numeric strings, arrays, non-finite values, callback mutation and synchronous/asynchronous poll errors. AbortableSleep uses native cancellable timers and replaces the original abort cause with the caller message. Exact JS event-loop ordering for simultaneous timer/abort, malformed callback results/accessors and resource-exhaustion behavior remain unproven. Provider-specific OAuth flows and their HTTP integration remain pending."
     },
     {
       "source": "src/auth/oauth/github-copilot.ts",
       "git_blob": "5a17d07f059141b032829a75aaf6f223551eda74",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_copilot.go",
+        "ai/oauth_form.go",
+        "ai/oauth_sleep.go",
+        "ai/oauth_http.go"
+      ],
+      "verification": "TestPiCopilotOAuth (224 unchanged-source flow cases with explicit fixture catalog keys: enterprise domain normalization, device polling, token exchange, account model selection/Individual fallback, best-effort policy enabling, deduplication, bounded 429 retry/body cancellation, request/retry-budget timeouts and cancellation/error precedence); TestPiCopilotOAuthHTTP (24 real local HTTP traces); TestPiCopilotOAuthMetadataAndToAuth (metadata and 33 credential endpoint/auth cases); TestPiCopilotOAuthModelsConcurrentRefresh (source/native lazy loading, single refresh across concurrent callers, and no credential write when catalog fetch fails after token exchange). The absent generated GITHUB_COPILOT_MODELS dependency is replaced by declared own keys for the source fixtures, not reconstructed from current external catalogs.",
+      "remaining": "Native device login, access-token exchange, account model discovery, model policy enabling, refresh and credential-specific API base URL derivation are implemented. Construction requires a supplied KnownModels object because the pinned repository excludes the generated model data; no default or current catalog is silently substituted. Source data/provider/API wiring and default runtime migration remain unfinished. HTTP-date and ISO date Retry-After values are supported, but exhaustive JavaScript Date.parse forms, native network/redirect/invalid-header diagnostics, malformed JavaScript objects and exact timer/microtask scheduling remain unproven. Fixtures use byte-backed responses matching fetch and explicitly shorten request/budget timeouts."
     },
     {
       "source": "src/auth/oauth/kimi-coding.ts",
       "git_blob": "6c5bd49532fc39bc4df280b79a8f3f909f3ee0a3",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_kimi.go",
+        "ai/oauth_form.go",
+        "ai/oauth_sleep.go",
+        "ai/oauth_input.go",
+        "ai/oauth_http.go"
+      ],
+      "verification": "TestPiKimiOAuth (275 unchanged-source cases: device/token validation, original verification URI preservation, form bytes/Unicode, polling/pending/slow_down/expiry, refresh retries and exhaustion, environment host priority, HTTP/JSON errors, request timeouts and cancellation); TestPiKimiOAuthHTTP (15 real local HTTP traces including retry, unauthorized responses and BOM decoding); TestPiKimiOAuthMetadataAndToAuth (metadata and 9 credential shapes); TestPiKimiOAuthModelsConcurrentRefresh (source/native lazy loading, one persisted refresh for concurrent callers, header auth and preserved credential on unauthorized refresh). Timeout signal snapshots are taken after the shortened native timers settle, not at an asserted JS microtask boundary.",
+      "remaining": "Native device login, refresh and Authorization header derivation are implemented with net/http and the shared Go poller. The source keeps verification URI text after validation, accepts empty device/user codes, uses default device timing, requires all token fields without expiry skew, retries refresh transport/429/5xx failures with 1/2/4-second delays, and retains the stored credential when Models wraps an unauthorized refresh error. Request timeout signals remain live after a completed request. Built-in Kimi provider/catalog/API wiring and production default migration remain pending. Bun-only environment fallback, exhaustive URL/network redirects/diagnostics, malformed JavaScript objects and precise timer/microtask scheduling remain unproven."
     },
     {
       "source": "src/auth/oauth/load.ts",
@@ -342,42 +442,108 @@
     {
       "source": "src/auth/oauth/meta.ts",
       "git_blob": "b9f331cc80c6c2d61a143511e840947958f2be0e",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_meta.go",
+        "ai/oauth_device_code.go",
+        "ai/oauth_form.go",
+        "ai/oauth_http.go",
+        "ai/oauth_input.go"
+      ],
+      "verification": "TestPiMetaOAuth (294 unchanged-source cases: device response and trusted verification URL fallback/normalization, positive timing fields, pending/slow_down/expiry, identity-token to API-key minting, exact form/JSON/header bytes, refresh identity retention, error-detail priority, malformed HTTP/JSON, timeout signal lifetime and cancellation/error precedence); TestPiMetaOAuthHTTP (48 real local HTTP traces across device, token and mint endpoints); TestPiMetaOAuthMetadataAndToAuth (metadata and 9 credential shapes); TestPiMetaOAuthModelsConcurrentRefresh (source/native lazy loading, one persisted mint across concurrent callers and preserved identity credential on 401). Timeout snapshots are taken after shortened native timers settle, not at an asserted JavaScript microtask boundary.",
+      "remaining": "Native device login, identity-token exchange for an API key, refresh by re-minting and API-key derivation are implemented. The identity token is retained as refresh, while minted access keys expire after 24 hours with no skew. Only the first trusted complete/base verification URI is used and normalized. Polling waits before its first request and uses the shared poller; 401/403 mint failures require a new login and do not erase the stored credential. Response-body/JSON failures become null before provider validation, whereas fetch failures retain identity unless login has been aborted. Request timeout signals remain linked after fetch completes. HTTP decoding and timeout contexts are shared with other native OAuth flows. Built-in Meta provider/catalog/API wiring and production default migration remain pending. Native network/redirect/invalid-header diagnostics, exhaustive malformed JavaScript/URL/Unicode behavior and precise timer/microtask scheduling remain unproven."
     },
     {
       "source": "src/auth/oauth/openai-chatgpt.ts",
       "git_blob": "c6b049139800f767a9db1dbf452fa4b73ac277d5",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_chatgpt.go",
+        "ai/oauth_chatgpt_callback.go",
+        "ai/oauth_http.go",
+        "ai/oauth_input.go",
+        "ai/oauth_form.go",
+        "ai/oauth_page.go",
+        "ai/oauth_pkce.go",
+        "ai/url_query.go"
+      ],
+      "verification": "TestPiChatGPTOAuth (214 unchanged-source cases: device UUID validation, authorization URL/form bytes, manual callback origin/state/client ID validation, token fields/scopes/expiry, ID-token presence on login, refresh credential validation, malformed HTTP/JSON, bind/entropy failures and cancellation/error precedence); TestPiChatGPTOAuthHTTP (24 real local token HTTP traces); TestPiChatGPTOAuthBrowserHTTP (6 source/native callback flows: success, non-settling validation failures, duplicate valid callbacks, provider errors, token failure and idle HTTP connection closure; exact page hashes/status/content type); TestPiChatGPTOAuthMetadataAndToAuth (metadata and 6 credential shapes); TestPiChatGPTOAuthModelsConcurrentRefresh (lazy loading, one persisted refresh across concurrent callers, issued client ID/scopes retention and no credential write on invalid scope).",
+      "remaining": "Native browser/manual login, dynamic client registration callback, code exchange, refresh and API-key derivation are implemented. Login requires an installation UUID and an ID token; refresh retains the issued client ID without requiring an ID token. Tokens require the direct-use scope and expire three minutes early. Invalid callbacks do not settle authorization; duplicate valid callbacks still receive HTTP 200, while the first result wins. The manual prompt remains live through token exchange and is aborted in cleanup. Native callback cleanup closes all accepted sockets; the Bun oracle can leave a pre-HTTP TCP socket open, so exact raw-socket lifecycle parity is not established. Built-in provider/catalog/default-runtime wiring, environment capture at module load versus Go construction, synchronous prompt-throw cleanup boundaries, precise promise/microtask scheduling, HTTP framing/platform diagnostics and exhaustive malformed JavaScript/network/URL behavior remain pending or unproven."
     },
     {
       "source": "src/auth/oauth/openai-codex.ts",
       "git_blob": "d2917f1e1d9d4f2b7d2d68f4d5f71a100d7ffa0f",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_codex.go",
+        "ai/oauth_http.go",
+        "ai/oauth_input.go",
+        "ai/oauth_form.go"
+      ],
+      "verification": "TestPiCodexOAuth (246 unchanged-source browser/manual/device/refresh cases: prompt/notify ordering, exact form/JSON request bytes, PKCE/state injection, callback bind fallback, immediate device polling, pending/slow_down/expiry, token field truthiness, numeric expiry and strict string account IDs, Latin-1 atob JWT decoding, standard/base64url distinctions, malformed responses and cancellation precedence); TestPiCodexOAuthHTTP (29 real local HTTP device/refresh traces); TestPiCodexOAuthBrowserHTTP (3 source/native browser success/failure/duplicate flows); TestPiCodexOAuthMetadataAndToAuth (metadata and 6 credential shapes); TestPiCodexOAuthModelsConcurrentRefresh (source/native lazy loading, one persisted refresh for concurrent callers and account metadata).",
+      "remaining": "Native browser/manual login, headless device flow, code exchange, refresh and auth derivation are implemented. Device polling starts immediately; 403/404 are pending without reading the body, and nested OAuth error codes retain slow_down behavior. Token expiry has no early-refresh skew. JWT identity extraction follows source atob Latin-1 decoding and requires a nonempty string account ID. Browser callback errors fall back to manual input; notification occurs before the source cleanup scope, so a throwing notification leaves callback cleanup to a retaining host. Shared HTTP decoding and manual-input parsing now also serve Copilot and Anthropic. Built-in provider/catalog/default-runtime wiring, Bun-only environment/module-load behavior, exhaustive network/redirect/URL and malformed JavaScript cases, and precise async scheduling remain unproven or pending."
     },
     {
       "source": "src/auth/oauth/openrouter.ts",
       "git_blob": "7d6e2863cb4bb2557bb14b7112c47013213e3d08",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_openrouter.go",
+        "ai/oauth_pkce.go",
+        "ai/oauth_callback.go",
+        "ai/url_query.go"
+      ],
+      "verification": "TestPiOpenRouterOAuthLogin (77 unchanged-source full-login cases with exact notification/prompt/request traces); TestPiOpenRouterOAuthMetadataAndCredentials (metadata and nine credential cases); TestPiOpenRouterOAuthBrowserHTTP (four source/native local HTTP flows, including duplicate callbacks); TestPiOpenRouterOAuthModelsIntegration (source/native factory, lazy auth, login persistence, chat/image auth and logout trace); race detector",
+      "remaining": "Native OpenRouterOAuth now owns PKCE login, a random UUID callback path, auth URL/progress notifications, browser/manual coordination and the code-for-key HTTP exchange. Source fixtures fix entropy while retaining original OAuth and callback implementations. Manual parsing preserves URL/query/bare-code precedence, JS whitespace and URLSearchParams decoding. Exchange sends exact JSON fields and headers, accepts only non-empty string keys and produces the permanent-key credential with MAX_SAFE_INTEGER expiry. Error details retain source priority, including empty strings masking lower-priority messages. Body parse failures on successful responses become invalid-JSON errors; failures on non-success HTTP responses are ignored in favor of the HTTP status. Abort/timeout conversion occurs only at the source catch boundary: a transport that ignores cancellation can still return a successful credential or HTTP error. Parent cancellation and timer listeners are detached after exchange; the retained request context is not cancelled on successful return. Refresh preserves credential identity and toAuth exposes access without implicit refreshing. Browser tests verify actual local token POST/callback HTTP, failure pages, one exchange for duplicate callbacks and prompt cancellation. Registry integration persists one lazily-loaded flow and resolves its key for chat and image models. Concrete built-in OpenRouter provider/catalog/image API wiring, Bun sandbox environment fallback, exhaustive fetch redirect/compression/network error differences, JS microtask ordering and malformed URL/prototype cases remain pending or unproven. The app default is unchanged."
     },
     {
       "source": "src/auth/oauth/pkce.ts",
       "git_blob": "bf7ac7d587326333a4e5cd2429b8e682a15ac6d4",
-      "status": "pending"
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/oauth_pkce.go"
+      ],
+      "verification": "TestPiOAuthPKCE (five unchanged-source 32-byte entropy vectors); TestGeneratePKCEUsesFreshEntropy",
+      "remaining": "GeneratePKCE obtains 32 bytes from crypto/rand, encodes an unpadded base64url verifier and computes an unpadded base64url SHA-256 challenge over that verifier. Fixtures patch only source entropy, retaining the actual Web Crypto hash implementation. The real native entropy path verifies fresh values and encoding sizes. Platform-specific Web Crypto versus OS entropy failure modes are not established by these fixtures; OpenRouter login now uses this helper; other provider flow integration remains pending."
     },
     {
       "source": "src/auth/oauth/radius.ts",
       "git_blob": "0b82b9d7890954233dd643153f9f6ab1bed3cb15",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_radius.go",
+        "ai/radius_config.go",
+        "ai/oauth_callback.go",
+        "ai/oauth_device_code.go",
+        "ai/oauth_form.go",
+        "ai/oauth_http.go",
+        "ai/oauth_pkce.go"
+      ],
+      "verification": "TestPiRadiusOAuth (363 unchanged-source browser/device/refresh cases: prompt and notification ordering, captured gateway/live display name, endpoint/discovery behavior, exact form/JSON/header bytes, immediate polling, pending/slow_down/expiry, weak token/device field validation and JS numeric coercion, response error metadata, callback failure/cleanup boundaries, malformed JSON and cancellation precedence); TestPiRadiusOAuthHTTP (65 real local HTTP traces); TestPiRadiusOAuthBrowserHTTP (5 unchanged-callback/native browser flows: success, exchange failure, provider error, validation and duplicate callback, with exact HTML hashes/status/content type/cache headers); TestPiRadiusOAuthMetadataAndHelpers (metadata, 7 credential shapes and 10 gateway normalization cases); TestPiRadiusOAuthModelsConcurrentRefresh (lazy loading, one persisted refresh across concurrent callers, scope retention and unchanged stored credential on invalid_grant). Flow fixtures inject the callback boundary; browser fixtures execute the unchanged callback server. Empty successful bodies use real source loopback fetch because Bun Response constructors have different empty-body JSON behavior.",
+      "remaining": "Native browser/device login, gateway discovery, token exchange, refresh and API-key derivation are implemented. Gateway text and advertised name are captured at construction, while prompts read the current name. Browser authorization replaces the query, preserves fragments and uses fixed localhost port 1456 with PKCE and UUID state; notifications precede the cleanup scope. Device polling starts immediately and slow_down ignores any response interval. Token fields are passed through without extra validation, expiry follows JavaScript numeric coercion with a one-minute skew, and structured OAuth error fields drive polling. Fetch failure plus cancellation becomes Login cancelled only in token/device request catch scopes; discovery and body errors retain their own failures. Shared JSON decoding now matches real Bun fetch for empty HTTP bodies (null) and BOM-only bodies (parse failure). Gateway catalog/config and provider publication are implemented; native pi-messages transport and Radius stream wiring are implemented. Generated baseline data, built-in/default provider construction and production default migration remain pending. Exhaustive malformed JavaScript/URL/header/network diagnostics, platform bind behavior and exact callback/microtask scheduling remain unproven."
     },
     {
       "source": "src/auth/oauth/xai.ts",
       "git_blob": "bf999c34cfe68eb85bf4f834bef7bca420e091b8",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/oauth_xai.go",
+        "ai/oauth_form.go"
+      ],
+      "verification": "TestPiXaiOAuth (254 unchanged-source cases: device fields, trusted HTTPS verification URLs, form bytes and USVString conversion, polling intervals/pending/slow_down/expiry, token parsing, optional refresh rotation/lifetime, HTTP/JSON errors and cancellation); TestPiXaiOAuthHTTP (10 real local HTTP traces including BOM decoding); TestPiXaiOAuthMetadataAndToAuth (metadata and 6 credential shapes); TestPiXaiOAuthModelsConcurrentRefresh (source/native lazy loading and single persisted refresh for concurrent callers). Source fixtures use byte-backed responses matching fetch; Bun string-backed Response.json has a different BOM fast path.",
+      "remaining": "Native device authorization, polling, refresh and auth derivation are implemented using net/http and the shared Go device-code poller. Exact request order/encoding, five-minute expiry skew, one-hour default lifetime, retained refresh tokens and cancellation/error precedence are verified. Built-in xAI provider/catalog/API wiring and the production default switch remain pending. Exhaustive fetch redirects/network diagnostics, platform URL cases, malformed JavaScript objects and timer/microtask scheduling remain unproven."
     },
     {
       "source": "src/auth/resolve.ts",
       "git_blob": "9f9117b9e5bbb8d2e352edbcf39e0004bc8143dd",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/auth_resolve.go",
+        "ai/models_auth.go",
+        "ai/models_registry.go"
+      ],
+      "verification": "TestPiProviderAuthResolution (434 unchanged-source cases); TestPiOAuthResolutionConcurrentRefresh; TestPiOAuthResolutionCancellationDoesNotCommit; TestPiAuthResolutionRetainsInFlightHandler; TestAuthResolutionFailureCauseAndPanicBoundary",
+      "remaining": "Native resolution supports explicit API-key and environment overrides, stored-credential ownership, ambient fallback only without a stored credential, OAuth expiry checks before and under the credential lock, rotated-token persistence and explicit minimum-validity enforcement. Controlled source races verify a single shared refresh, cancellation without a late credential commit and retained refresh-signal lifetime. In-flight provider ID and OAuth handler identity survive callback replacement. Models.GetAuth resolves provider IDs and model objects, preserves unknown-provider behavior and merges model headers case-insensitively. Fixtures cover dotted-I, contextual Greek sigma, serialized __proto__ behavior, malformed auth results, storage/provider errors and pre-abort. Timeout duration is checked against source, but exhaustive timing/scheduling behavior remains unproven. Full provider OAuth login/refresh implementations and lazy loading remain pending. Custom JavaScript prototypes/getters, arbitrary thrown values, exhaustive malformed typed inputs and Unicode-version differences remain unproven; concurrent mutation of live provider/credential objects requires caller synchronization in Go."
     },
     {
       "source": "src/auth/types.ts",
@@ -442,12 +608,22 @@
     {
       "source": "src/model-catalog.ts",
       "git_blob": "5edea990f4ace9dfb9bdd1661fa3490abf7d8cd6",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/model_catalog.go"
+      ],
+      "verification": "TestPiModelCatalog (714 unchanged-source serialized cases and three mutation/identity cases); TestPiModelCatalogNativeValues (nine source cases for undefined, sparse/named arrays, non-finite and recursive IDs)",
+      "remaining": "All three catalog projections are implemented for ordered Object/Array data graphs. They retain exact model values and shared identity, filter explicit type only, preserve numeric-key enumeration and duplicate-ID position, define __proto__ as an own key, and reproduce serialized malformed-input/coercion diagnostics and evaluation order. Provider arguments remain compile-time metadata and do not rewrite models. Accessors, symbols, custom prototypes and callable primitive-conversion hooks are not represented. Provider data is generated by upstream hydration and is absent from the pinned source snapshot; provider factories and catalog hydration/discovery remain pending."
     },
     {
       "source": "src/models-store.ts",
       "git_blob": "7cb1d04c4e40d7ec9af9f3e5b180ed8a60cebe38",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/models_store.go"
+      ],
+      "verification": "TestPiInMemoryModelsStore (nine source read/write/delete traces); TestPiModelsStoreSnapshotAndFailure (source trace for detached snapshots, shared/cyclic references, sparse/undefined values, rejected serializer hooks and aborted operations); TestModelsStoreConcurrentProviderIsolation",
+      "remaining": "The concrete concurrency-safe memory store mirrors synchronous mutation boundaries with context cancellation checked at operation admission. Write/read clone ordered Object/Array graphs without serialization, preserve unknown entry fields and aliases/cycles, and reject functions with DataCloneError before replacing existing state. Aborted reads/writes/deletes retain the original cancellation cause and leave state untouched. Built-in structuredClone types outside model JSON data (Date, Map, Set, typed buffers and transferable objects), getters/prototypes and clone resource limits remain unported. Native Models.Refresh now integrates this store through cache restoration and guarded publication; TestModelsRefreshCatalogIntegrationAndIndependentProviders verifies the connected path."
     },
     {
       "source": "src/models.generated.ts",
@@ -460,10 +636,26 @@
       "status": "partial",
       "go_files": [
         "ai/simple_options.go",
-        "ai/openai_native_stream.go"
+        "ai/openai_native_stream.go",
+        "ai/provider_model_catalog.go",
+        "ai/models_publication.go",
+        "ai/models_registry.go",
+        "ai/provider_operation_queue.go",
+        "ai/credential_store.go",
+        "ai/models_auth.go",
+        "ai/auth_resolve.go",
+        "ai/auth_context.go",
+        "ai/models_error.go",
+        "ai/models_refresh.go",
+        "ai/models_login.go",
+        "ai/models_availability.go",
+        "ai/models_request.go",
+        "ai/models_stream.go",
+        "ai/lazy_stream.go",
+        "ai/provider_factory.go"
       ],
-      "verification": "TestPiSimpleOptionsOracle; TestPiOpenAICompletionsStreamOracle tiered usage cases",
-      "remaining": "Supported thinking levels, clampThinkingLevel and Completions usage cost calculation are ported. The model catalog/collection API and remaining model helpers are not fully ported."
+      "verification": "TestPiSimpleOptionsOracle; TestPiOpenAICompletionsStreamOracle tiered usage cases; TestPiProviderModelCatalogRefresh (160 unchanged-source cases); TestPiProviderModelCatalogDynamicTypes (14 cases); TestPiModelTypeAndIdentity (19 helper rows including 361 equality comparisons); TestProviderModelCatalogLiveReferences; TestPiModelsPublication (six source publication steps); TestModelsPublicationCanceledWriteCannotOvertakeNewGeneration (controlled source race); TestModelsPublicationUpdateCanInvalidateItself (source reentrant cancellation); TestModelsPublicationCloneAndUpdateFailureDoNotPoisonQueue; TestProviderCatalogPersistencePrecedesVisibleRefresh; TestPiModelsRegistry (14 snapshots, 154 provider probe sets); TestPiModelsRegistryReentrantMutation (10 source cases); TestPiModelsRegistryReferences; TestPiModelsRefreshScopeLifecycle (10 source cases); TestModelsRegistryConcurrentAndFailingProviders; TestPiModelsStoreCallbackReplacement; TestPiProviderAuthResolution (434 unchanged-source cases); controlled OAuth concurrency/cancellation and handler-replacement source traces; TestPiModelsRefresh (253 unchanged-source cases); TestPiModelsRefreshSuperseded; TestPiModelsRefreshCanceledReadStillRestores; TestModelsRefreshCatalogIntegrationAndIndependentProviders; TestPiModelsLoginLogout (86 unchanged-source cases); TestPiModelsLoginCancellationBoundary (eight source races); TestPiModelsLoginQueuedStoreAndLogout; TestModelsLoginLogoutRetainsErrorCause; TestPiModelsAvailability (195 unchanged-source cases); TestPiModelsAvailabilityConcurrentSnapshot; TestPiModelsAvailabilityCancellationObservesRemainingWork; TestPiModelsAvailabilityIDSet; TestModelsAvailabilityFailureDoesNotWaitForOtherProvider; TestPiModelsRequestDispatch (186 unchanged-source cases); TestPiModelsRequestCancellationAfterAuth (12 controlled source races); TestModelsRequestCancelDeferredRetainsCause; TestPiModelsStreamDispatch (48 unchanged-source cases); TestPiModelsStreamCancellationDoesNotCancelForwarding; TestModelsStreamNativeHTTPIntegration (standard and simple Completions HTTP/SSE); TestPiProviderFactoryConstruction (21 unchanged-source cases); TestPiProviderFactoryDispatch (90 unchanged-source cases); TestPiProviderFactoryReferences (captured references, fixed capability fields and live cached-model ownership); TestModelsStreamNativeHTTPIntegration now uses NewModelProvider",
+      "remaining": "Supported thinking levels, clampThinkingLevel and Completions usage cost calculation are ported. ProviderModelCatalog implements createProvider's baseline/dynamic model overlay, shared model identity, first-match replacement by type/id, chat filtering, cached-state restoration and fetch publication. Fixtures cover offline, rejected publication, fetch/persistence failure, pre-abort and abort-after-fetch. ModelsPublisher implements per-provider publication queues, generation replacement/invalidation, persistence cloning, the post-write generation guard and synchronous update callbacks. Canceled callers stop waiting while active persistence keeps its queue slot, preventing a late old write from overwriting a newer snapshot. Controlled source/native cases cover independent-provider progress and reentrant invalidation; native integration tests connect catalog refresh to publication and InMemoryModelsStore. Native Models now owns ordered provider registration/replacement/deletion/clear, provider lookup, scoped/union chat and all-model reads, model-type filtering and model lookup. Read callbacks run outside locks and retain source best-effort failure behavior. Live Map-style iteration includes additions and skips deletions made by callbacks; completed iterators compact tombstones. Scoped list/model/provider identity and union hole materialization are retained. Registry lifecycle invalidates publication generations. Injected persistence retains its source object semantics: callbacks replaced between operations are observed. Finish retires only the matching active controller: completed scopes remain uncanceled when superseded and their stale publications return false; an old Finish cannot retire a newer controller. Models.Refresh now connects credential reads, offline cache restoration, auth resolution and online catalog publication. It restores cached state before surfacing credential read failures, filters unknown stored model types, forwards force only online, selects dynamic providers and preserves per-provider error identity. Refresh OAuth uses actual expiry rather than the request-auth five-minute window, with a second check under the credential lock. Source races verify superseded publication rejection and continued offline restoration after an ignored cancellation. A native integration test connects real catalog/store/publication components and checks independent-provider progress. Models.Login and Logout now own native interactive credential persistence. Login preserves provider-returned credential identity and forwards interaction callbacks/options. Unknown and unsupported providers retain source errors; logout can delete credentials after provider removal. Queued login cancellation stops waiting, while an admitted mutation waits for its store to settle. Controlled source races include stores that ignore cancellation, post-start success/failure, provider-login cancellation and delayed deletion; a real memory-store race checks canceled login followed by logout. Storage failures retain their original cause and cancellation takes precedence at the source catch boundary. CheckAuth, GetAvailable, GetAllAvailable and GetAvailableOfType now use native auth checks and concrete provider filter callbacks. OAuth availability checks configuration without refreshing; API-key Check takes precedence over fallback resolution, whose second credential read remains observable. Availability waits for concurrent auth checks in registry snapshot order, propagates catalog/filter failures, preserves model identity, skips union holes and retains filterAllModels precedence. Empty provider IDs select the union. Source traces cover registry replacement during pending checks, continued work after caller cancellation and SameValueZero ID membership including NaN, sparse holes and shared object IDs. Concrete provider factories remain pending. JavaScript synchronous-throw versus rejected-Promise distinctions and exhaustive scheduling at simultaneous cancellation/mutation admission remain unproven. Reentrant mutation of readonly provider IDs during refresh, exhaustive callback scheduling and arbitrary JavaScript thrown values remain unproven. Credential storage is now constructed by Models with independent defaults or live injected callbacks. Publication and credential mutation share the same per-provider queue implementation. Models.GetAuth now uses the native resolver for stored/API-key/OAuth auth and case-insensitive model-header overrides. Native request preparation now applies auth, preserves explicit null API-key/environment overrides, merges auth/model/request headers case-insensitively, runs the Models-only header transform last, merges scoped environment, applies auth baseUrl by shallow model copy and forwards remaining provider options. CancelDeferred, GenerateImages and Classify now dispatch through concrete callbacks. Type assertions and image/classifier error results preserve source validation order, metadata, abort classification and timestamps. Fixtures cover provider/method replacement during auth, live option/header-transform mutation, context/result identity, malformed auth/model values and error priority. Controlled races prove that after auth, cancellation alone does not stop waiting for a header transform or provider callback that ignores it; returned errors retain their source error text and category. Models.Stream, StreamSimple, Complete, CompleteSimple, StreamDeferred and FetchDeferred now use native lazy forwarding and shared auth preparation. Transcript normalization precedes dispatch. Provider selection and explicit auth overrides are captured at admission; a controlled fixture deletes the provider and changes request options while auth is pending, preserving the captured provider/credential and later option precedence. Completion waits for the stream result rather than independently cancelling the result wait. Lazy setup failures keep source error messages and zero usage; terminal events win over later source failures. Native HTTP integration exercises auth endpoint overrides, auth/model/request header precedence, header transforms, system/user normalization, live event snapshots and shared payload synchronization for both standard and simple streams. NewModelProvider now composes catalog, auth and chat/deferred/image/classifier callbacks. Dispatch retains stream/result and error identity, captures implementation maps while observing entry replacement, fixes optional capabilities at construction and keeps input ID live in diagnostic text and stored-model ownership. Auth objects retain identity; baseline and fetch callback replacements do not replace captured references. Provider metadata does not override request settings. Source cases include missing and removed implementations, pre-abort, numeric/array/object/null/undefined API keys, implementation failures and single-API dispatch. Existing native HTTP integration now exercises the factory plus Models and catalog identity. Concrete provider factory wiring and provider catalog hydration remain pending; malformed implementation objects, inherited map keys, JavaScript getters and arbitrary callback values remain unproven; exhaustive Go/JavaScript callback scheduling and caller mutation outside the native synchronization contract remain unproven. Custom prototypes/accessors, dynamic non-array callback returns beyond the native Array boundary and exhaustive callback scheduling remain unproven. Custom prototypes/accessors, arbitrary thrown JavaScript values and exhaustive malformed typed inputs remain unproven."
     },
     {
       "source": "src/oauth.ts",
@@ -818,7 +1010,13 @@
     {
       "source": "src/providers/radius-config.ts",
       "git_blob": "a2715aaec31ec99afe9b302d1d289546319a97f4",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/radius_config.go",
+        "ai/oauth_http.go"
+      ],
+      "verification": "TestPiRadiusConfig (86 unchanged-source shape/filter cases); TestPiRadiusConfigIdentityAndNativeValues (shallow copy and nested reference identity, non-finite numeric fields, sparse map semantics); TestPiRadiusConfigHTTP (76 source request/error/cancellation traces); TestPiRadiusConfigRealHTTP (40 actual local HTTP traces including empty body, BOM-only body and UTF-16 truncation through a surrogate pair). Ten source URL normalization cases remain covered by TestPiRadiusOAuthMetadataAndHelpers.",
+      "remaining": "All exported config operations have native implementations: default gateway/normalization, credential config sanitization, model projection and HTTP config loading. Invalid rows are filtered, valid rows are shallow-copied, nested references and arbitrary extra fields remain live, and projection overrides api/provider/baseUrl. Numeric fields accept non-finite values as source typeof number does. HTTP failures trim JS whitespace and truncate at 512 UTF-16 code units, including a lone high surrogate at the cut. Direct sparse projection preserves holes; filtered configuration compacts valid rows. Generated baseline catalog data and built-in/default runtime wiring, exhaustive malformed typed/prototype/accessor cases and native URL/header/network diagnostic parity remain pending or unproven."
     },
     {
       "source": "src/providers/radius.models.ts",
@@ -828,7 +1026,19 @@
     {
       "source": "src/providers/radius.ts",
       "git_blob": "78596256031e8f217b4b9e7f99a889a4d438a345",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/provider_radius.go",
+        "ai/radius_config.go",
+        "ai/auth_lazy.go",
+        "ai/auth_helpers.go",
+        "ai/models_publication.go",
+        "ai/pi_messages_http.go",
+        "internal/runtime/pi_model_wire.go",
+        "internal/runtime/native_credentials.go"
+      ],
+      "verification": "TestPiRadiusProvider (80 unchanged-source cases with declared fixture baseline and injected stream/OAuth loaders: default/custom gateways, captured options, stored/legacy restoration, network fetch, rejected/failed publication, duplicates and cancellation); TestPiRadiusProviderWiring (lazy OAuth metadata/load capture and unmodified stream/simple dispatch); TestRadiusProviderRequiresMissingDependencies (explicit native dependency admission); TestPiRadiusProviderModelsHTTP (source/native Models registry integration through real local HTTP: offline restoration, superseded request completing late, publication persistence and retained cache after 503). The absent generated Radius model catalog is represented by explicit fixture models, not current external data. TestRadiusNativePiMessagesHTTP verifies that omitted Streams selects the native lazy pi-messages factory for both Models.Stream and Models.StreamSimple, including API-key resolution, payload callbacks and real HTTP streaming. Native host tests now cover explicit radius ModelTier binding, per-request/row credential refresh, parent/child/summary requests, transcript controls, durable effects, retry metadata and recovery after a truncated stream.",
+      "remaining": "Native provider composition, API-key/environment auth, lazy Radius OAuth, baseline/dynamic model merging and two-phase catalog refresh are implemented. Stored catalogs restore only rows owned by this provider; legacy OAuth gatewayConfig imports only when no stored entry exists. Publication rejection prevents later network work, persistence precedes update, and cancellation is checked after HTTP before publication. Dynamic models replace the first matching baseline ID, preserving source order and object identity. Provider construction now defaults to native Go pi-messages streams and accepts an explicit override. The default gateway still requires supplied pinned baseline data because generated model data is absent from the source pin. Explicit radius bindings now select the native pi-messages host dispatcher with a supplied resolved endpoint. Generated model data, automatic built-in catalog construction and production default migration remain pending. JavaScript prototype/accessor and malformed typed-input behavior, exhaustive URL/network diagnostics and precise scheduling remain unproven; callers synchronize mutations of live model objects."
     },
     {
       "source": "src/providers/together.models.ts",
@@ -1020,12 +1230,23 @@
     {
       "source": "src/utils/model-operations.ts",
       "git_blob": "bdf510f9ccbd3e2ad4ca4b2e2ed6139eb0bd24af",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/provider_model_catalog.go",
+        "ai/models_request.go"
+      ],
+      "verification": "TestPiModelTypeAndIdentity; TestPiProviderModelCatalogDynamicTypes; TestPiModelsRequestDispatch (type validation and image/classifier failure results); TestPiModelsRequestCancellationAfterAuth",
+      "remaining": "GetModelType and IsModelType retain nullish chat fallback, strict type comparison and original null/undefined property errors. HasAPI and ModelsAreEqual from models.ts use the same behavior, including shared-object identity and malformed scalar models. AssertChatModel, AssertImageModel and AssertClassifierModel now retain provider-category error formatting. Image/classifier failure-result construction is used by native Models dispatch, including empty output/answers, original model metadata, abort/error stop reason and injected timestamps. Null models retain the failure-result construction error boundary. Arbitrary JavaScript thrown values, getters/prototypes and exhaustive malformed typed inputs remain unproven."
     },
     {
       "source": "src/utils/models-error.ts",
       "git_blob": "4d79ee5b379b8fcf812caff9202ee022a71616ec",
-      "status": "pending"
+      "status": "partial",
+      "go_files": [
+        "ai/models_error.go"
+      ],
+      "verification": "TestPiModelsErrorCauseDetail (20 unchanged-source cases); TestAuthResolutionFailureCauseAndPanicBoundary",
+      "remaining": "Native ModelsError retains code, message and original Go error cause, appending trimmed cause detail only when not already present. Source cases cover empty detail, duplicate detail and ECMAScript whitespace. Arbitrary JavaScript thrown values, custom Error names/prototypes and stack formatting remain unproven."
     },
     {
       "source": "src/utils/node-http-proxy.ts",
@@ -1035,7 +1256,12 @@
     {
       "source": "src/utils/oauth-page.ts",
       "git_blob": "2cf0ea4556865c5507423061541ab41a07abd942",
-      "status": "pending"
+      "status": "ported-with-differential-tests",
+      "go_files": [
+        "ai/oauth_page.go"
+      ],
+      "verification": "TestPiOAuthPages (nine unchanged-source cases, exact success/error HTML strings); callback HTTP fixture body SHA-256 checks",
+      "remaining": "Success/error HTML preserves the source SVG, CSS, whitespace, fixed headings, conditional details and five-character HTML escaping. Fixtures include empty strings, absent/empty details, Unicode, newlines and markup-like strings. Non-string JavaScript inputs and malformed UTF-16 transported through HTTP remain outside the verified native string contract."
     },
     {
       "source": "src/utils/overflow.ts",

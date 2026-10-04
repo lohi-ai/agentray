@@ -15,6 +15,12 @@ import (
 )
 
 func TestNativeRungRetriesUseProviderHTTPMetadata(t *testing.T) {
+	for _, api := range []string{"openai-completions", "pi-messages"} {
+		t.Run(api, func(t *testing.T) { testNativeRungRetriesUseProviderHTTPMetadata(t, api) })
+	}
+}
+
+func testNativeRungRetriesUseProviderHTTPMetadata(t *testing.T, api string) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -23,7 +29,7 @@ func TestNativeRungRetriesUseProviderHTTPMetadata(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"busy"}}`))
 	}))
 	defer server.Close()
-	model, _ := json.Marshal(map[string]any{"id": "fixture", "api": "openai-completions", "provider": "openai", "baseUrl": server.URL, "maxTokens": 100, "contextWindow": 1000})
+	model, _ := json.Marshal(map[string]any{"id": "fixture", "api": api, "provider": "gateway", "baseUrl": server.URL, "maxTokens": 100, "contextWindow": 1000})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	waits, observed := 0, 0

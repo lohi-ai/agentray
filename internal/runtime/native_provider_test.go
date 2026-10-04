@@ -79,6 +79,8 @@ func TestNativeAnthropicFederationScopedBinding(t *testing.T) {
 }
 func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses bool, provider string, federated bool) {
 	anthropic := provider == "anthropic"
+	azure := provider == ai.VendorAzureResponses
+	piMessages := provider == "radius" || provider == ai.VendorPiMessages
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var requests, effects, refreshes atomic.Int32
@@ -94,10 +96,19 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 		}
 		n := requests.Add(1)
 		path := "/v1/chat/completions"
+		if piMessages {
+			path = "/v1/messages"
+		}
 		if responses {
 			path = "/v1/responses"
 		}
 		header, credential := "Authorization", fmt.Sprintf("Bearer refreshed-%d", n)
+		if azure {
+			header, credential = "Api-Key", fmt.Sprintf("refreshed-%d", n)
+			if r.URL.Query().Get("api-version") != "v1" {
+				t.Error("Azure API version missing")
+			}
+		}
 		if anthropic {
 			path, header, credential = "/v1/messages", "X-Api-Key", fmt.Sprintf("refreshed-%d", n)
 		}
@@ -116,6 +127,11 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 			return
 		}
 		historyKey, formatKey := "messages", "response_format"
+		var gatewayOptions map[string]json.RawMessage
+		if piMessages {
+			historyKey = "context"
+			_ = json.Unmarshal(payload["options"], &gatewayOptions)
+		}
 		if responses {
 			historyKey, formatKey = "input", "text"
 		}
@@ -126,6 +142,9 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 			t.Error("lost native history")
 		}
 		effort := payload["reasoning_effort"]
+		if piMessages {
+			effort = gatewayOptions["reasoning"]
+		}
 		if responses {
 			var reasoning map[string]json.RawMessage
 			_ = json.Unmarshal(payload["reasoning"], &reasoning)
@@ -142,10 +161,12 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 			if thinking.Type != "enabled" || thinking.Budget != ceiling-1024 {
 				t.Errorf("thinking budget not clamped: %s cap=%d", payload["thinking"], ceiling)
 			}
-		} else if string(effort) != `"high"` {
+		} else if piMessages && string(effort) != `"xhigh"` {
+			t.Errorf("gateway reasoning changed: %s", effort)
+		} else if !piMessages && string(effort) != `"high"` {
 			t.Errorf("simple thinking clamp missing: %s", effort)
 		}
-		if len(payload[formatKey]) == 0 {
+		if !piMessages && len(payload[formatKey]) == 0 {
 			t.Error("onPayload lost structured-output control")
 		}
 		if n == 1 {
@@ -158,14 +179,21 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 				if choice.Type != "any" || !choice.Disable {
 					t.Errorf("lost Anthropic tool controls: %s", payload["tool_choice"])
 				}
+			} else if piMessages {
+				if string(gatewayOptions["toolChoice"]) != `"required"` {
+					t.Errorf("gateway tool choice lost: %s", payload["options"])
+				}
 			} else if string(payload["tool_choice"]) != `"required"` || string(payload["parallel_tool_calls"]) != "false" {
 				t.Error("onPayload lost tool controls")
 			}
 		} else {
-			if len(payload["tool_choice"]) > 0 || len(payload["parallel_tool_calls"]) > 0 {
+			if len(payload["tool_choice"]) > 0 || len(payload["parallel_tool_calls"]) > 0 || len(gatewayOptions["toolChoice"]) > 0 {
 				t.Error("tool-free ceiling wrap retained forced controls")
 			}
 			signature := `"reasoning_content":"private reasoning"`
+			if piMessages {
+				signature = `"thinkingSignature":"opaque"`
+			}
 			if responses {
 				signature = `"encrypted_content":"opaque"`
 			}
@@ -177,6 +205,19 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if piMessages {
+			if n == 1 {
+				writeNativePiMessagesEvents(w,
+					map[string]any{"type": "thinking_start", "contentIndex": 0},
+					map[string]any{"type": "thinking_end", "contentIndex": 0, "content": "private reasoning", "contentSignature": "opaque"},
+					map[string]any{"type": "toolcall_start", "contentIndex": 1, "id": "call", "toolName": "write"},
+					map[string]any{"type": "toolcall_end", "contentIndex": 1, "toolCall": map[string]any{"type": "toolCall", "id": "call", "name": "write", "arguments": map[string]any{}}},
+					nativePiMessagesTerminal("toolUse", 3, 1))
+			} else {
+				writeNativePiMessagesAnswer(w, `{"ok":true}`, 9, 2)
+			}
+			return
+		}
 		if anthropic {
 			if n == 1 {
 				writeNativeAnthropicEvents(w,
@@ -221,6 +262,9 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 	parallel := false
 	p.ParallelToolCalls = &parallel
 	p.OutputSchema = &agentcore.OutputSchema{Name: "answer", Strict: true, Schema: map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}, "required": []string{"ok"}, "additionalProperties": false}}
+	if piMessages {
+		p.ParallelToolCalls, p.OutputSchema = nil, nil
+	}
 	p.RefreshKey = func(context.Context, string) (string, error) {
 		return fmt.Sprintf("refreshed-%d", refreshes.Add(1)), nil
 	}
@@ -271,6 +315,9 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 	if !strings.Contains(string(result.NativeState), `"extension":{"opaque":"keep"}`) || !strings.Contains(string(result.NativeState), "private reasoning") || len(result.NativeTelemetry) == 0 {
 		t.Fatal("native artifacts lost")
 	}
+	if piMessages && strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "refreshed-") {
+		t.Fatal("gateway credential leaked into artifacts")
+	}
 	if federated && (strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "native-federated-access") || strings.Contains(string(result.NativeState)+string(result.NativeTelemetry), "native-fixture-assertion")) {
 		t.Fatal("federation credential leaked into artifacts")
 	}
@@ -314,18 +361,18 @@ func testNativeRunnerHTTPProviderControlsAndDurability(t *testing.T, responses b
 }
 
 func TestNativeDefaultHTTPProviderInheritedByChildrenAndSummary(t *testing.T) {
-	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, false, false)
+	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, false, false, false, false)
 }
 func TestNativeResponsesHTTPProviderInheritedByChildrenAndSummary(t *testing.T) {
-	testNativeHTTPProviderInheritedByChildrenAndSummary(t, true, false, false)
+	testNativeHTTPProviderInheritedByChildrenAndSummary(t, true, false, false, false, false)
 }
 func TestNativeAnthropicHTTPProviderInheritedByChildrenAndSummary(t *testing.T) {
-	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, true, false)
+	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, true, false, false, false)
 }
 func TestNativeAnthropicFederationInheritedByChildrenAndSummary(t *testing.T) {
-	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, true, true)
+	testNativeHTTPProviderInheritedByChildrenAndSummary(t, false, true, true, false, false)
 }
-func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses, anthropic, federated bool) {
+func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses, anthropic, federated, azure, piMessages bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var parentCalls, childCalls, effects, summaryCalls, exchanges atomic.Int32
@@ -340,6 +387,11 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			t.Error("child/summary lost federation auth")
 		}
 		var body struct {
+			Context ai.Context
+			Options struct {
+				SessionID  string
+				ToolChoice json.RawMessage
+			}
 			Messages []json.RawMessage
 			Input    []json.RawMessage
 			System   json.RawMessage
@@ -347,13 +399,28 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 				Name     string
 				Function struct{ Name string }
 			}
-			ToolChoice json.RawMessage `json:"tool_choice"`
+			ToolChoice     json.RawMessage `json:"tool_choice"`
+			PromptCacheKey string          `json:"prompt_cache_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Error(err)
 			return
 		}
 		path := "/v1/chat/completions"
+		if piMessages {
+			path = "/v1/messages"
+			body.Messages = nil
+			for _, message := range body.Context.Messages {
+				body.Messages = append(body.Messages, passiveNativeJSON(message))
+			}
+			body.ToolChoice = body.Options.ToolChoice
+			for _, tool := range ai.GetCurrentTools(body.Context.Messages) {
+				body.Tools = append(body.Tools, struct {
+					Name     string
+					Function struct{ Name string }
+				}{Name: tool.Name})
+			}
+		}
 		if responses {
 			path = "/v1/responses"
 			body.Messages = body.Input
@@ -363,6 +430,9 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 		}
 		if r.URL.Path != path {
 			t.Errorf("wrong API endpoint: %s", r.URL.Path)
+		}
+		if azure && (r.Header.Get("Api-Key") != "key" || r.Header.Get("Authorization") != "" || r.URL.Query().Get("api-version") != "v1") {
+			t.Error("Azure child/summary lost auth or API version")
 		}
 		messages := string(passiveNativeJSON(body.Messages))
 		delta := map[string]any{}
@@ -396,8 +466,14 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			if responses {
 				header = "Session_id"
 			}
-			if !anthropic && r.Header.Get(header) == "" {
+			if !anthropic && !azure && !piMessages && r.Header.Get(header) == "" {
 				t.Error("child lost provider session affinity")
+			}
+			if piMessages && body.Options.SessionID == "" {
+				t.Error("gateway child lost session affinity")
+			}
+			if azure && body.PromptCacheKey == "" {
+				t.Error("Azure child lost prompt cache key")
 			}
 			if childCalls.Add(1) == 1 {
 				call("write", `{}`)
@@ -406,6 +482,15 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		if piMessages {
+			if calls, ok := delta["tool_calls"].([]any); ok {
+				function := calls[0].(map[string]any)["function"].(map[string]any)
+				writeNativePiMessagesCall(w, function["name"].(string), function["arguments"].(string), 1, 1)
+			} else {
+				writeNativePiMessagesAnswer(w, delta["content"].(string), 1, 1)
+			}
+			return
+		}
 		if anthropic {
 			if calls, ok := delta["tool_calls"].([]any); ok {
 				function := calls[0].(map[string]any)["function"].(map[string]any)
@@ -441,6 +526,9 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 	runtime := PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker", Runtime: "/missing/runtime"}
 	runner := NewRunner(nil, WithPiRuntime(runtime))
 	tier := ModelTier{TierConfig: TierConfig{Provider: "openrouter", Model: "native-http", BaseURL: server.URL + "/v1", APIKey: "key"}}
+	if piMessages {
+		tier.Provider = "radius"
+	}
 	if anthropic {
 		tier.Provider, tier.BaseURL = "anthropic", server.URL
 	}
@@ -449,6 +537,9 @@ func testNativeHTTPProviderInheritedByChildrenAndSummary(t *testing.T, responses
 	}
 	if responses {
 		tier.Provider = "openai"
+		if azure {
+			tier.Provider = ai.VendorAzureResponses
+		}
 		tier.Capabilities.StatefulResponses = agentcore.CapabilitySupported
 	}
 	result, err := runner.runModelLoop(ctx, p, RunOptions{Prompt: "PARENT-ONLY", NativeHistory: json.RawMessage(`[{"role":"user","content":"parent private history","timestamp":1}]`)}, tier, nil)
@@ -523,12 +614,12 @@ func writeNativeResponsesAnswer(w http.ResponseWriter, text, id string, input, o
 }
 
 func TestNativeResponsesUnfinishedToolHasNoEffect(t *testing.T) {
-	testNativeStreamFailureHasNoEffect(t, false)
+	testNativeStreamFailureHasNoEffect(t, false, false, false)
 }
 func TestNativeAnthropicTruncatedStreamHasNoEffect(t *testing.T) {
-	testNativeStreamFailureHasNoEffect(t, true)
+	testNativeStreamFailureHasNoEffect(t, true, false, false)
 }
-func testNativeStreamFailureHasNoEffect(t *testing.T, anthropic bool) {
+func testNativeStreamFailureHasNoEffect(t *testing.T, anthropic, azure, piMessages bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var requests, effects atomic.Int32
@@ -542,17 +633,28 @@ func testNativeStreamFailureHasNoEffect(t *testing.T, anthropic bool) {
 				return
 			}
 			history, callType := "input", `"type":"function_call"`
+			if piMessages {
+				history, callType = "context", `"type":"toolCall"`
+			}
 			if anthropic {
 				history, callType = "messages", `"type":"tool_use"`
 			}
 			if strings.Contains(string(payload[history]), callType) {
 				t.Error("rejected call replayed to provider")
 			}
-			if anthropic {
+			if piMessages {
+				writeNativePiMessagesAnswer(w, "recovered", 1, 1)
+			} else if anthropic {
 				writeNativeAnthropicAnswer(w, "recovered", 1, 1)
 			} else {
 				writeNativeResponsesAnswer(w, "recovered", "recovered", 1, 1)
 			}
+			return
+		}
+		if piMessages {
+			writeNativePiMessagesEvents(w,
+				map[string]any{"type": "toolcall_start", "contentIndex": 0, "id": "partial", "toolName": "write"},
+				map[string]any{"type": "toolcall_end", "contentIndex": 0, "toolCall": map[string]any{"type": "toolCall", "id": "partial", "name": "write", "arguments": map[string]any{}}})
 			return
 		}
 		if anthropic {
@@ -582,7 +684,14 @@ func testNativeStreamFailureHasNoEffect(t *testing.T, anthropic bool) {
 	p.Tools = []agentcore.Tool{nativeChildWrite{&effects}}
 	runner := NewRunner(nil, WithPiRuntime(PiRuntimeConfig{NativeGo: true, Worker: "/missing/worker", Runtime: "/missing/runtime"}))
 	tier := ModelTier{TierConfig: TierConfig{Provider: ai.VendorOpenAIResponses, Model: "native-http", BaseURL: server.URL + "/v1", APIKey: "key"}}
+	if azure {
+		tier.Provider = ai.VendorAzureResponses
+	}
 	wantError := "OpenAI Responses stream completed with an unfinished tool call: write (partial|fc_partial)"
+	if piMessages {
+		tier.Provider = "radius"
+		wantError = "radius stream ended without a terminal event"
+	}
 	if anthropic {
 		tier.Provider, tier.BaseURL = "anthropic", server.URL
 		wantError = "Anthropic stream ended before message_stop"
