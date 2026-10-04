@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,10 +12,58 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
+	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+type snapshotAdmissionProbe struct {
+	admissions   int
+	publications int
+}
+
+func (p *snapshotAdmissionProbe) AdmitDataPublication() error {
+	p.admissions++
+	return storage.ErrDataCapacity
+}
+func (p *snapshotAdmissionProbe) RecordPublication(context.Context, storage.PublicationObservation) error {
+	p.publications++
+	return nil
+}
+
+func TestSnapshotPublicationRespectsCapacityAdmission(t *testing.T) {
+	ctx := context.Background()
+	url := startBroker(t)
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	streams, err := EnsureStreams(ctx, nc, testConfig("snapshot-admission"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Batches []connector.SnapshotEnvelope `json:"batches"`
+	}
+	raw, err := os.ReadFile(filepath.Join("testdata", "c1-wire-v1.json"))
+	if err != nil || json.Unmarshal(raw, &fixture) != nil || len(fixture.Batches) == 0 {
+		t.Fatalf("fixture err=%v batches=%d", err, len(fixture.Batches))
+	}
+	probe := &snapshotAdmissionProbe{}
+	queue := NewJetStreamQueue(streams.JS, streams.Subject, streams.ConnectorSubject).WithPublicationObserver(probe)
+	if err := queue.PublishSnapshotEnvelope(ctx, fixture.Batches[0]); !errors.Is(err, storage.ErrDataCapacity) {
+		t.Fatalf("snapshot admission error=%v", err)
+	}
+	info, err := streams.Ingest.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.admissions != 1 || probe.publications != 0 || info.State.Msgs != 0 {
+		t.Fatalf("admissions=%d publications=%d broker_messages=%d", probe.admissions, probe.publications, info.State.Msgs)
+	}
+}
 
 func TestSnapshotFrozenWireFixture(t *testing.T) {
 	localPath := filepath.Join("testdata", "c1-wire-v1.json")

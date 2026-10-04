@@ -18,7 +18,7 @@ func TestStagingRetentionRequiresAuthoritativeTerminalEligibility(t *testing.T) 
 		"resumable":        func(g *StagingGenerationDescriptor) { g.Resumable = true },
 		"active":           func(g *StagingGenerationDescriptor) { g.IsActiveOnThisStore = true },
 		"outbox":           func(g *StagingGenerationDescriptor) { g.HasUnpublishedOutbox = true },
-		"sealed":           func(g *StagingGenerationDescriptor) { g.State = "sealed" },
+		"capturing":        func(g *StagingGenerationDescriptor) { g.State = "capturing" },
 		"unknown terminal": func(g *StagingGenerationDescriptor) { g.TerminalAt = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -28,6 +28,11 @@ func TestStagingRetentionRequiresAuthoritativeTerminalEligibility(t *testing.T) 
 				t.Fatalf("unsafe eligibility: %+v", g)
 			}
 		})
+	}
+	sealed := base
+	sealed.State = "sealed"
+	if !EligibleForStagingCleanup(sealed, time.Now().Add(-7*24*time.Hour)) {
+		t.Fatal("superseded sealed generation was not eligible")
 	}
 }
 

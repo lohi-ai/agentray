@@ -491,3 +491,62 @@ VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sy
 		}
 	}
 }
+
+func TestStagingCleanupRetiresSupersededSealedPayload(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.duck = openTestDuckDB(t)
+	old := time.Now().UTC().Add(-10 * 24 * time.Hour)
+	oldGeneration, activeGeneration := uuid.NewString(), uuid.NewString()
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch)
+VALUES($1,$2,$3,$4,$5,1,$6,'sealed',$7,$7,$7,$8,'retention-test',1)`, projectID, sync.ConnectorID, sync.SourceTable,
+		syncID, oldGeneration, strings.Repeat("a", 64), old, uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_outbox
+(project_id,connector_id,table_name,generation,batch_id,batch_index,kind,payload,published,published_at)
+VALUES($1,$2,$3,$4,'old-batch',0,'batch',$5,true,now())`, projectID, sync.ConnectorID, sync.SourceTable,
+		oldGeneration, []byte("published-payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.duck.Write(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_rows
+(project_id,connector_id,table_name,generation,batch_id,row_key,data) VALUES(?,?,?,?,?,?,?)`,
+			projectID, sync.ConnectorID, sync.SourceTable, oldGeneration, "old-batch", "1", `{}`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_promotions
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,expected_batches,expected_rows,batch_manifest_sha256,capture_started_at,capture_finished_at,promoted_at)
+VALUES(?,?,?,?,?,2,?,0,0,?,?,?,?)`, projectID, sync.ConnectorID, sync.SourceTable, syncID, activeGeneration,
+			strings.Repeat("b", 64), strings.Repeat("c", 64), old.Add(time.Hour), old.Add(2*time.Hour), old.Add(2*time.Hour))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	candidates, err := s.ListStagingGenerations(ctx, cutoff, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, candidate := range candidates {
+		found = found || candidate.Generation == oldGeneration
+	}
+	if !found {
+		t.Fatal("superseded sealed generation was not discovered")
+	}
+	deleted, eligible, err := s.DeleteEligibleStagingChunk(ctx, oldGeneration, cutoff, stagingDeleteChunk)
+	if err != nil || !eligible || deleted != 1 {
+		t.Fatalf("sealed cleanup deleted=%d eligible=%v err=%v", deleted, eligible, err)
+	}
+	var outbox int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM connector_snapshot_outbox WHERE generation=$1`, oldGeneration).Scan(&outbox); err != nil || outbox != 0 {
+		t.Fatalf("sealed cleanup retained outbox=%d err=%v", outbox, err)
+	}
+}

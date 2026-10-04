@@ -143,7 +143,9 @@ func (c *colour) status(t *testing.T) ReplayVerdict {
 }
 
 // waitReady polls the same predicate /readyz serves until the colour is caught
-// up, which is when a deploy would be allowed to switch to it.
+// up, which is when a deploy would be allowed to switch to it. Tests that
+// immediately inspect DuckDB separately wait on the rows they expect because
+// production readiness deliberately permits in-flight writes.
 func (c *colour) waitReady(t *testing.T, within time.Duration) ReplayVerdict {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -169,6 +171,21 @@ func (c *colour) externalRowKeys(t *testing.T, table string) []string {
 	return duckRowKeys(t, c.duck, table)
 }
 
+func (c *colour) waitExternalRowKeys(t *testing.T, table string, within time.Duration, ok func([]string) bool) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var last []string
+	for time.Now().Before(deadline) {
+		last = c.externalRowKeys(t, table)
+		if ok(last) {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s rows never satisfied the condition: %v", c.name, last)
+	return nil
+}
+
 func (c *colour) eventIDs(t *testing.T) []string {
 	t.Helper()
 	var ids []string
@@ -192,6 +209,21 @@ func (c *colour) eventIDs(t *testing.T) []string {
 		t.Fatalf("read events from %s: %v", c.name, err)
 	}
 	return ids
+}
+
+func (c *colour) waitEventIDs(t *testing.T, within time.Duration, ok func([]string) bool) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var last []string
+	for time.Now().Before(deadline) {
+		last = c.eventIDs(t)
+		if ok(last) {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s events never satisfied the condition: %v", c.name, last)
+	return nil
 }
 
 const (
@@ -255,9 +287,10 @@ func TestBlueGreenConnectorParity(t *testing.T) {
 		t.Fatalf("publish events A: %v", err)
 	}
 	blue.waitReady(t, 20*time.Second)
-	if got := blue.externalRowKeys(t, parityTable); len(got) != 3 {
+	if got := blue.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == 3 }); len(got) != 3 {
 		t.Fatalf("blue rows after batch A = %v, want 3 rows", got)
 	}
+	blue.waitEventIDs(t, 20*time.Second, func(ids []string) bool { return len(ids) == 2 })
 
 	// Phase B — blue is parked (the switch window) while rows are still
 	// accepted: a batch that replaces one row and adds another, plus an event.
@@ -290,7 +323,7 @@ func TestBlueGreenConnectorParity(t *testing.T) {
 	}
 
 	wantKeys := []string{"k1", "k2", "k3", "k4"}
-	gotKeys := green.externalRowKeys(t, parityTable)
+	gotKeys := green.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == len(wantKeys) })
 	if len(gotKeys) != len(wantKeys) {
 		t.Fatalf("green rows after the switch = %v, want %v", gotKeys, wantKeys)
 	}
@@ -299,7 +332,7 @@ func TestBlueGreenConnectorParity(t *testing.T) {
 			t.Fatalf("green rows after the switch = %v, want %v", gotKeys, wantKeys)
 		}
 	}
-	if got := len(green.eventIDs(t)); got != 3 {
+	if got := len(green.waitEventIDs(t, 20*time.Second, func(ids []string) bool { return len(ids) == 3 })); got != 3 {
 		t.Fatalf("green events after the switch = %d, want 3", got)
 	}
 
@@ -307,9 +340,10 @@ func TestBlueGreenConnectorParity(t *testing.T) {
 	// from its own durable and must converge on exactly what green has.
 	blue.serve(t)
 	blue.waitReady(t, 20*time.Second)
-	if blueKeys := blue.externalRowKeys(t, parityTable); len(blueKeys) != len(wantKeys) {
+	if blueKeys := blue.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == len(wantKeys) }); len(blueKeys) != len(wantKeys) {
 		t.Fatalf("blue rows after its replay = %v, want %v", blueKeys, wantKeys)
 	}
+	blue.waitEventIDs(t, 20*time.Second, func(ids []string) bool { return len(ids) == 3 })
 	if blueEvents, greenEvents := blue.eventIDs(t), green.eventIDs(t); len(blueEvents) != len(greenEvents) {
 		t.Fatalf("colours disagree: blue has %d events, green has %d", len(blueEvents), len(greenEvents))
 	}
@@ -382,6 +416,9 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 		}
 	}
 	waitVerdict(t, serving, 20*time.Second, func(v ReplayVerdict) bool { return v.Ready })
+	if got := waitDuckRowKeys(t, duck, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == 3 }); len(got) != 3 {
+		t.Fatalf("serving rows = %v, want the 3 published rows", got)
+	}
 	if err := worker.Stop(); err != nil {
 		t.Fatalf("stop serving worker: %v", err)
 	}
@@ -422,7 +459,7 @@ func TestBlueGreenRetentionGapRefusesReady(t *testing.T) {
 	if after.Ready || after.Reason != ReplayPurgedGap {
 		t.Fatalf("verdict = %+v, want the refusal to hold after the replay drained", after)
 	}
-	if got := duckRowKeys(t, duck, parityTable); len(got) != 4 {
+	if got := waitDuckRowKeys(t, duck, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == 4 }); len(got) != 4 {
 		t.Fatalf("rows = %v, want the 3 it applied plus the one retained message", got)
 	}
 
@@ -533,6 +570,7 @@ func TestFreshColourIsNotHeldToAnotherColoursGap(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 	blue.waitReady(t, 20*time.Second)
+	blue.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == 1 && keys[0] == "k1" })
 	blue.park()
 
 	// Drop the backlog the way an explicit purge does, then land one row after it.
@@ -548,7 +586,9 @@ func TestFreshColourIsNotHeldToAnotherColoursGap(t *testing.T) {
 	if v := fresh.waitReady(t, 20*time.Second); v.Reason != ReplayCaughtUp {
 		t.Fatalf("fresh colour verdict = %+v, want caught-up", v)
 	}
-	if got := fresh.externalRowKeys(t, parityTable); len(got) != 1 || got[0] != "k2" {
+	if got := fresh.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool {
+		return len(keys) == 1 && keys[0] == "k2"
+	}); len(got) != 1 || got[0] != "k2" {
 		t.Fatalf("fresh colour rows = %v, want only what the stream still holds", got)
 	}
 }
@@ -696,6 +736,21 @@ func duckRowKeys(t *testing.T, duck *storage.DuckDB, table string) []string {
 	return keys
 }
 
+func waitDuckRowKeys(t *testing.T, duck *storage.DuckDB, table string, within time.Duration, ok func([]string) bool) []string {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var last []string
+	for time.Now().Before(deadline) {
+		last = duckRowKeys(t, duck, table)
+		if ok(last) {
+			return last
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("rows never satisfied the condition: %v", last)
+	return nil
+}
+
 // TestConnectorDeadLetterCarriesOriginAndReleasesGate is acceptance 6, in two
 // halves: a poison connector batch is dead-lettered with the subject that
 // decodes it, and a dead-lettered message does not hold the consumer's ack floor
@@ -720,8 +775,10 @@ func TestConnectorDeadLetterCarriesOriginAndReleasesGate(t *testing.T) {
 		t.Fatalf("publish good batch: %v", err)
 	}
 
-	blue.waitReady(t, 20*time.Second)
-	if got := blue.externalRowKeys(t, parityTable); len(got) != 1 || got[0] != "k1" {
+	waitVerdict(t, blue.ss, 20*time.Second, func(v ReplayVerdict) bool { return v.Ready })
+	if got := blue.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool {
+		return len(keys) == 1 && keys[0] == "k1"
+	}); len(got) != 1 || got[0] != "k1" {
 		t.Fatalf("blue rows = %v, want just the good batch's row", got)
 	}
 

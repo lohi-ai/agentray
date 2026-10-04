@@ -235,19 +235,19 @@ func (b *EventBatcher) poison(msg msgHandle, source *storage.SourceReceiptMark, 
 		}
 		return
 	}
-	// The position is recorded BEFORE the dead-letter and the terminate: both of
-	// those leave the delivery behind, and a store that fell behind the floor
-	// they advance would refuse this colour as store-behind on its next boot.
-	if err := b.recordSettled(msg); err != nil {
-		b.retrySettlement(msg, err)
-		return
-	}
 	if err := b.publishDeadLetter(msg); err != nil {
 		log.Printf("ingestion batcher: dead-letter failed, will retry: %v", err)
 		_ = msg.nak(b.nakDelay)
 		if b.metrics != nil {
 			b.metrics.recordNak()
 		}
+		return
+	}
+	// Publication has succeeded, so this attempt can now durably cross the
+	// original delivery. Recording earlier would clear replay evidence even
+	// when the DLQ write failed and the poison message remained unapplied.
+	if err := b.recordSettled(msg); err != nil {
+		b.retrySettlement(msg, err)
 		return
 	}
 	delivery := msg.delivery()
@@ -289,7 +289,7 @@ func (b *EventBatcher) recordSettled(msg msgHandle) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), b.insertTO)
 	defer cancel()
-	mark := storage.AppliedMark{Durable: b.durable, Seq: msg.seq(), Deliveries: []storage.DeliveryReceiptMark{msg.delivery()}}
+	mark := storage.AppliedMark{Durable: b.durable, Seq: msg.seq(), Deliveries: []storage.DeliveryReceiptMark{msg.delivery()}, SettlementOnly: true}
 	if err := b.record(ctx, mark); err != nil {
 		return fmt.Errorf("record applied position %d for durable %q: %w", mark.Seq, b.durable, err)
 	}
@@ -432,19 +432,16 @@ func (b *EventBatcher) settleFailure(items []queued, cause error) {
 			continue
 		}
 		if it.msg.deliveries() >= uint64(b.maxDeliver) && (b.deadLetter != nil || b.deadLetterWithReceipt != nil) {
-			// Recorded before the dead-letter and the terminate, like the poison
-			// path: settling moves the ack floor, and a store that could not take
-			// the record must not be left behind it.
-			if err := b.recordSettled(it.msg); err != nil {
-				b.retrySettlement(it.msg, err)
-				continue
-			}
 			if derr := b.publishDeadLetter(it.msg); derr != nil {
 				// Couldn't dead-letter (DLQ unreachable); keep the message alive by
 				// asking for another redelivery rather than losing it.
 				log.Printf("ingestion batcher: dead-letter failed, will retry: %v", derr)
 				_ = it.msg.nak(b.nakDelay)
 				b.metrics.recordNak()
+				continue
+			}
+			if err := b.recordSettled(it.msg); err != nil {
+				b.retrySettlement(it.msg, err)
 				continue
 			}
 			delivery := it.msg.delivery()
@@ -471,6 +468,12 @@ func eventSource(events []storage.Event) *storage.SourceReceiptMark {
 		return nil
 	}
 	projectID := events[0].ProjectID
+	if _, err := uuid.Parse(projectID); err != nil {
+		// Invalid identity cannot be stored in the UUID-scoped readiness journal.
+		// Leave the hole unattributed so poison settlement remains durable and
+		// conservatively suppresses readiness for every project on this store.
+		return nil
+	}
 	for _, event := range events[1:] {
 		if event.ProjectID != projectID {
 			return nil

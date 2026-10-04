@@ -51,6 +51,11 @@ type AppliedMark struct {
 	// envelope. Legacy messages omit it and therefore never manufacture a
 	// complete/readiness claim.
 	Source *SourceReceiptMark
+	// SettlementOnly distinguishes an ack/term that advances the durable
+	// position without applying business data. A replay-marked poison delivery
+	// retains its original identity for the DLQ, but that identity must not give
+	// this rowless write authority to clear the original readiness hole.
+	SettlementOnly bool
 	// suppressSourceMutation keeps an idempotent envelope replay from advancing
 	// the per-source readiness state. Delivery identity and durable position are
 	// still recorded, but the already-applied source transition is not repeated.

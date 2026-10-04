@@ -258,6 +258,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, true)`, d.StreamID, d.Subject, d.StreamSeq, d.Paylo
 			}
 			continue
 		}
+		// A delivery receipt proves that the consumer position was settled, not
+		// that missing business data was applied. Only a replay carrying the
+		// original DLQ identity has authority to repair its exact hole.
+		if mark.SettlementOnly || !d.Replayed {
+			continue
+		}
 		var holeProject, holeConnector, holeTable sql.NullString
 		holeErr := tx.QueryRowContext(ctx, `SELECT project_id::VARCHAR, connector_id::VARCHAR, table_name
 FROM data_receipt_holes WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleared_at IS NULL AND NOT unverifiable`,
@@ -329,6 +335,24 @@ WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleare
 	if superseded {
 		return nil
 	}
+	priorIncrementalIncomplete := false
+	priorOrderingAmbiguous := false
+	if s.GenerationSeq == 0 {
+		var priorKey string
+		var priorSeq, priorBatches uint64
+		var priorCompletion bool
+		var priorExpected sql.Null[uint64]
+		err := tx.QueryRowContext(ctx, `SELECT s.generation_key,s.generation_seq,s.completion_seen,s.expected_batches,
+(SELECT count(*) FROM data_receipt_batches b WHERE b.project_id=s.project_id AND b.connector_id=s.connector_id
+ AND b.table_name=s.table_name AND b.generation_key=s.generation_key),coalesce(s.ordering_ambiguous,false)
+FROM data_receipt_sources s WHERE s.project_id=? AND s.connector_id=? AND s.table_name=?`,
+			pid, cid, s.Table).Scan(&priorKey, &priorSeq, &priorCompletion, &priorExpected, &priorBatches, &priorOrderingAmbiguous)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		priorIncrementalIncomplete = err == nil && priorSeq == 0 && priorKey != generationKey &&
+			(!priorCompletion || !priorExpected.Valid || priorBatches != priorExpected.V)
+	}
 	if s.BatchID != "" {
 		var prior string
 		err := tx.QueryRowContext(ctx, `SELECT payload_sha256 FROM data_receipt_batches
@@ -389,11 +413,21 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pid, cid, s.Table, generationKey, s.BatchID, b
 		sourceLandedAt = landedAt
 		landedGenerationKey = generationKey
 	}
+	locallyComplete := false
+	if s.Promoted && s.Complete && s.ExpectedBatches != nil {
+		var applied uint64
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_batches
+WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key=?`,
+			pid, cid, s.Table, generationKey).Scan(&applied); err != nil {
+			return err
+		}
+		locallyComplete = applied == *s.ExpectedBatches && !priorIncrementalIncomplete && !priorOrderingAmbiguous
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO data_receipt_sources
 (project_id, connector_id, table_name, sync_id, run_id, generation, generation_key, generation_seq, binding_digest,
  capture_started_at, capture_finished_at, published_at, landed_at, landed_generation_key, last_complete_at,
  expected_batches, expected_rows, completion_seen, ordering_ambiguous, mutation_seq, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, false, 1, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
 ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
  sync_id = coalesce(excluded.sync_id, data_receipt_sources.sync_id),
  run_id = CASE WHEN excluded.generation_key <> data_receipt_sources.generation_key THEN excluded.run_id ELSE coalesce(excluded.run_id, data_receipt_sources.run_id) END,
@@ -415,22 +449,22 @@ ON CONFLICT (project_id, connector_id, table_name) DO UPDATE SET
 		 AND (data_receipt_sources.landed_generation_key IS NULL
 		      OR data_receipt_sources.landed_generation_key <> excluded.landed_generation_key)
 		THEN false
-	ELSE coalesce(data_receipt_sources.ordering_ambiguous, false)
+	ELSE excluded.ordering_ambiguous OR coalesce(data_receipt_sources.ordering_ambiguous, false)
  END,
  mutation_seq = data_receipt_sources.mutation_seq + 1,
  updated_at = excluded.updated_at`,
 		pid, cid, s.Table, syncID, runID, generation, generationKey, s.GenerationSeq, s.BindingDigest,
 		s.CaptureStartedAt, s.CaptureFinishedAt, publishedAt, sourceLandedAt, landedGenerationKey,
 		func() any {
-			if s.Promoted && s.Complete {
+			if locallyComplete {
 				return landedAt
 			}
 			return nil
 		}(), expectedBatches, expectedRows,
-		s.Complete, landedAt); err != nil {
+		s.Complete, priorIncrementalIncomplete, landedAt); err != nil {
 		return err
 	}
-	if s.Complete {
+	if locallyComplete {
 		// A completed current identity subsumes older per-batch detail. Keep the
 		// latest complete generation/run and every unresolved hole; discard only
 		// history that can no longer affect readiness.
@@ -474,6 +508,13 @@ WHERE project_id = ? AND connector_id = ? AND table_name = ?`, s.ProjectID, s.Co
 		return false, err
 	}
 	if s.GenerationSeq < priorGenerationSeq {
+		// A deliberate snapshot-to-incremental mode transition restarts the
+		// ordering domain. The capture boundary, not the old snapshot sequence,
+		// decides whether the first delta is newer.
+		if s.GenerationSeq == 0 && priorGenerationSeq > 0 && s.CaptureStartedAt != nil &&
+			(!priorCaptureStarted.Valid || s.CaptureStartedAt.UTC().After(priorCaptureStarted.Time.UTC())) {
+			return false, nil
+		}
 		return true, nil
 	}
 	if s.GenerationSeq > 0 && s.GenerationSeq == priorGenerationSeq && generationKey != priorGenerationKey {
@@ -616,8 +657,8 @@ mutation_seq, completion_seen, expected_batches, coalesce(ordering_ambiguous, fa
  AND b.generation_key = coalesce(s.generation::VARCHAR, s.run_id::VARCHAR, 'legacy-unknown')),
 EXISTS (SELECT 1 FROM ingest_position WHERE refused_missing > 0) OR EXISTS (SELECT 1 FROM data_receipt_holes h WHERE h.cleared_at IS NULL AND
  (h.project_id IS NULL OR (h.project_id = s.project_id AND (h.connector_id IS NULL OR h.connector_id = s.connector_id) AND (h.table_name IS NULL OR h.table_name = s.table_name))))
-FROM data_receipt_sources s WHERE project_id = ? AND connector_id = ? AND table_name = ?`,
-				projectID, source.ConnectorID, source.Table).Scan(&published, &landed, &complete, &started, &finished,
+FROM data_receipt_sources s WHERE project_id = ? AND connector_id = ? AND table_name = ? AND sync_id = ?`,
+				projectID, source.ConnectorID, source.Table, source.SyncID).Scan(&published, &landed, &complete, &started, &finished,
 				&generation, &runID, &r.GenerationKey, &r.GenerationSeq, &r.MutationSeq, &r.CompletionSeen, &expected, &r.OrderingAmbiguous, &r.AppliedBatches, &r.HasHole)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue

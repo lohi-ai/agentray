@@ -23,7 +23,11 @@ type StagingGenerationDescriptor struct {
 }
 
 func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) bool {
-	if g.State != "failed" && g.State != "cancelled" {
+	// A sealed generation is terminal too. Once a newer promotion supersedes it
+	// on this serving store and every outbox item is published, its full staging
+	// payload has no remaining local authority and must be retired by the same
+	// bounded path as failed/cancelled attempts.
+	if g.State != "sealed" && g.State != "failed" && g.State != "cancelled" {
 		return false
 	}
 	if g.TerminalAt == nil || g.TerminalAt.After(cutoff) {

@@ -109,9 +109,9 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 		host string
 		port uint16
 	}
-	endpoints := []endpoint{{cfg.Host, cfg.Port}}
+	endpoints := []endpoint{{host: cfg.Host, port: cfg.Port}}
 	for _, fallback := range cfg.Fallbacks {
-		endpoints = append(endpoints, endpoint{fallback.Host, fallback.Port})
+		endpoints = append(endpoints, endpoint{host: fallback.Host, port: fallback.Port})
 	}
 	approvedByHost := make(map[string][]endpoint)
 	for _, ep := range endpoints {

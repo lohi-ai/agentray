@@ -30,7 +30,7 @@ func (s *Store) ListStagingGenerations(ctx context.Context, cutoff time.Time, li
 	rows, err := s.pg.Query(ctx, `SELECT generation::text,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g
-WHERE state IN ('failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
+WHERE state IN ('sealed','failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
   AND ($3::uuid IS NULL OR NOT EXISTS (
 	SELECT 1 FROM connector_snapshot_cleanup_receipts c WHERE c.generation=g.generation AND c.store_id=$3
   ))

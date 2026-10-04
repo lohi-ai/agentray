@@ -167,6 +167,9 @@ type envelopeRetention struct {
 	ProbeLogicalBytes        int64         `json:"probe_logical_bytes"`
 	StagingDiskGrowthBytes   int64         `json:"staging_disk_growth_bytes"`
 	PostPromotionGrowthBytes int64         `json:"post_promotion_growth_bytes"`
+	CleanupCycles            int           `json:"cleanup_cycles"`
+	RecoveryCycles           int           `json:"recovery_cycles"`
+	CleanupRows              int           `json:"cleanup_rows"`
 	CleanupVerified          bool          `json:"cleanup_verified"`
 }
 
@@ -1153,8 +1156,19 @@ func runStagingProbe(ctx context.Context, t *testing.T, store *storage.Store, cf
 	t.Helper()
 	namespace := uuid.MustParse(projectID)
 	connectorID, syncID := uuid.NewSHA1(namespace, []byte("staging-connector")).String(), uuid.NewSHA1(namespace, []byte("staging-sync")).String()
-	generation, runID := uuid.NewSHA1(namespace, []byte("staging-generation")).String(), uuid.NewSHA1(namespace, []byte("staging-run")).String()
-	started := time.Now().UTC().Add(-time.Minute)
+	pg, err := pgxpool.New(ctx, cfg.PostgresURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.Close()
+	if _, err := pg.Exec(ctx, `INSERT INTO data_connectors(id,project_id,name,kind)
+VALUES($1,$2,'capacity-staging','postgres') ON CONFLICT(id) DO NOTHING`, connectorID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pg.Exec(ctx, `INSERT INTO connector_syncs(id,connector_id,project_id,source_table,key_column,sync_mode)
+VALUES($1,$2,$3,'envelope_staging_probe','id','snapshot') ON CONFLICT(id) DO NOTHING`, syncID, connectorID, projectID); err != nil {
+		t.Fatal(err)
+	}
 	rows := make([]connector.SnapshotRow, envelopeStagingProbeRows)
 	var logical int64
 	for i := range rows {
@@ -1166,27 +1180,66 @@ func runStagingProbe(ctx context.Context, t *testing.T, store *storage.Store, cf
 		t.Fatal(err)
 	}
 	before := fileSize(duckPath)
-	batch := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: connectorID, Table: "envelope_staging_probe", SyncID: syncID, RunID: runID, Generation: generation, GenerationSeq: 1, BindingDigest: strings.Repeat("a", 64), Kind: connector.SnapshotKindBatch, BatchID: "probe-0", BatchIndex: 0, PayloadSHA256: digest, CaptureStartedAt: started, Rows: rows}
-	if _, err := store.ApplySnapshotEnvelope(ctx, batch, storage.AppliedMark{}); err != nil {
-		t.Fatal(err)
-	}
-	staged := fileSize(duckPath)
-	manifest, err := connector.SnapshotManifestDigest([]connector.SnapshotManifestEntry{{Index: 0, BatchID: batch.BatchID, PayloadSHA256: digest, RowCount: len(rows)}})
+	manifest, err := connector.SnapshotManifestDigest([]connector.SnapshotManifestEntry{{Index: 0, BatchID: "probe-0", PayloadSHA256: digest, RowCount: len(rows)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	finished := time.Now().UTC()
-	complete := batch
-	complete.Kind, complete.BatchID, complete.BatchIndex, complete.PayloadSHA256, complete.Rows = connector.SnapshotKindComplete, "", 0, "", nil
-	complete.ExpectedBatches, complete.ExpectedRows, complete.BatchManifestSHA256, complete.CaptureFinishedAt = 1, int64(len(rows)), manifest, &finished
-	promotion, err := store.ApplySnapshotEnvelope(ctx, complete, storage.AppliedMark{})
-	if err != nil {
-		t.Fatal(err)
+	var previous connector.SnapshotEnvelope
+	cleanupCycles, recoveryCycles, cleanupRows := 0, 0, 0
+	staged := before
+	for cycle := 1; cycle <= 3; cycle++ {
+		started := time.Now().UTC().Add(-time.Minute)
+		generation := uuid.NewSHA1(namespace, []byte(fmt.Sprintf("staging-generation-%d", cycle))).String()
+		runID := uuid.NewSHA1(namespace, []byte(fmt.Sprintf("staging-run-%d", cycle))).String()
+		batch := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: connectorID, Table: "envelope_staging_probe", SyncID: syncID, RunID: runID, Generation: generation, GenerationSeq: int64(cycle), BindingDigest: strings.Repeat("a", 64), Kind: connector.SnapshotKindBatch, BatchID: "probe-0", BatchIndex: 0, PayloadSHA256: digest, CaptureStartedAt: started, Rows: rows}
+		if _, err := store.ApplySnapshotEnvelope(ctx, batch, storage.AppliedMark{}); err != nil {
+			t.Fatal(err)
+		}
+		if cycle == 1 {
+			staged = fileSize(duckPath)
+		}
+		finished := time.Now().UTC()
+		complete := batch
+		complete.Kind, complete.BatchID, complete.BatchIndex, complete.PayloadSHA256, complete.Rows = connector.SnapshotKindComplete, "", 0, "", nil
+		complete.ExpectedBatches, complete.ExpectedRows, complete.BatchManifestSHA256, complete.CaptureFinishedAt = 1, int64(len(rows)), manifest, &finished
+		promotion, err := store.ApplySnapshotEnvelope(ctx, complete, storage.AppliedMark{})
+		if err != nil || promotion == nil {
+			t.Fatalf("staging promotion cycle %d: promotion=%+v err=%v", cycle, promotion, err)
+		}
+		if _, err := pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch)
+VALUES($1,$2,$3,$4,$5,$6,$7,'sealed',$8,$9,$9,$10,'capacity',1)`, projectID, connectorID, batch.Table, syncID,
+			generation, cycle, batch.BindingDigest, started, finished, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pg.Exec(ctx, `INSERT INTO connector_snapshot_outbox
+(project_id,connector_id,table_name,generation,batch_id,batch_index,kind,payload,published,published_at)
+VALUES($1,$2,$3,$4,'probe-0',0,'batch',$5,true,now())`, projectID, connectorID, batch.Table, generation, []byte("capacity-staging-payload")); err != nil {
+			t.Fatal(err)
+		}
+		if cycle > 1 {
+			deleted, eligible, err := store.DeleteEligibleStagingChunk(ctx, previous.Generation, time.Now().UTC().Add(time.Hour), 50_000)
+			if err != nil || !eligible || deleted != len(rows) {
+				t.Fatalf("staging cleanup cycle %d: deleted=%d eligible=%v err=%v", cycle-1, deleted, eligible, err)
+			}
+			cleanupCycles++
+			cleanupRows += deleted
+			if _, err := store.ApplySnapshotEnvelope(ctx, previous, storage.AppliedMark{}); err != nil {
+				t.Fatalf("staging recovery cycle %d: %v", cycle-1, err)
+			}
+			recoveryCycles++
+			var outboxRows int
+			if err := pg.QueryRow(ctx, `SELECT count(*) FROM connector_snapshot_outbox WHERE generation=$1`, previous.Generation).Scan(&outboxRows); err != nil || outboxRows != 0 {
+				t.Fatalf("staging cleanup cycle %d retained outbox=%d err=%v", cycle-1, outboxRows, err)
+			}
+		}
+		previous = batch
 	}
 	after := fileSize(duckPath)
 	return envelopeRetention{EventRetentionDays: cfg.EventRetentionDays, StagingTTL: cfg.SourceStagingTTL,
 		ProbeRows: len(rows), ProbeLogicalBytes: logical, StagingDiskGrowthBytes: staged - before,
-		PostPromotionGrowthBytes: after - before, CleanupVerified: promotion != nil && promotion.ExpectedRows == int64(len(rows))}
+		PostPromotionGrowthBytes: after - before, CleanupCycles: cleanupCycles, RecoveryCycles: recoveryCycles,
+		CleanupRows: cleanupRows, CleanupVerified: cleanupCycles == 2 && recoveryCycles == 2 && cleanupRows == 2*len(rows)}
 }
 
 type envelopeAcceptance struct {
