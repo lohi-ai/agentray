@@ -94,16 +94,15 @@ func TestRunSQLSchemaMarksSQLRequired(t *testing.T) {
 	}
 }
 
-func TestSubmitRecommendationIsTerminal(t *testing.T) {
+func TestSubmitRecommendationAllowsReceiptDrivenFollowup(t *testing.T) {
 	terminal := opcore.TerminalNames(Registry())
-	if !terminal["submit_recommendation"] {
-		t.Error("submit_recommendation should be a terminal operation")
+	if terminal["submit_recommendation"] {
+		t.Error("submit_recommendation must allow receipt-driven conflict handling and notification")
 	}
 	if terminal["run_sql"] {
 		t.Error("run_sql should not be terminal")
 	}
 }
-
 
 func (f *fakeRepo) CreateRecommendation(_ context.Context, rec storage.AgentRecommendation) (string, error) {
 	f.gotRec = rec

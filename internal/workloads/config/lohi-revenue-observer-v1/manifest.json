@@ -2,7 +2,7 @@
   "version": "lohi-revenue-observer-v1",
   "definition_version": "lohi-evidence-v1",
   "agent_preset": "insight-digest",
-  "skill_sha256": "228e27b0b17a9ad078e2f153e13e35ba92243d18f30b2e0d34b1cd50a30c2240",
+  "skill_sha256": "799f055f67799623ba44a624708d32f26c230829aa80288261219b06aa23f655",
   "scheduler_timezone": "UTC",
   "local_timezone": "Asia/Ho_Chi_Minh",
   "initially_enabled": false,
@@ -44,13 +44,13 @@
       "condition"
     ],
     "idempotency_key": "sha256(project|definition_version|period|condition)",
-    "idempotency_decision": "Plans atomically claims (project, operation, idempotency_key) for identical requests; a different request under the same observation key conflicts and must be surfaced, never retried under a new key. Notification delivery keeps existing retry semantics and is not exactly-once."
+    "idempotency_decision": "Plans atomically claims (project, operation, idempotency_key) for identical requests; a different request under the same observation key conflicts and must be surfaced, never retried under a new key. A matching existing finding remains eligible for at-least-once notification redelivery, so a missed delivery is repairable; successful overlaps may duplicate and delivery is not exactly-once."
   },
   "delivery": {
     "operation": "send_notification",
     "channel_required": false,
     "on_missing_channel": "keep the Plans finding and run-history result; surface that delivery was skipped",
     "on_denied_finding_write": "record the run failure and do not deliver an unrecorded assertion",
-    "guarantee": "existing delivery semantics; no exactly-once promise"
+    "guarantee": "at-least-once retry for matching findings; successful overlaps may duplicate; no exactly-once promise"
   }
 }

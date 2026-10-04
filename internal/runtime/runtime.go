@@ -56,8 +56,8 @@ type BuildParams struct {
 	// unavailable.
 	SourceRunner usecase.SourceRunner
 	RunID        string // links submitted recommendations to this run
-	// Trigger is the run trigger (chat | scheduled | manual). On a chat trigger
-	// submit_recommendation no longer ends the run, so the model still produces a
+	// Trigger is the run trigger (chat | scheduled | manual). Terminal operations
+	// stop unattended runs, while chat continues so the model can still produce a
 	// textual reply for the user instead of terminating silently.
 	Trigger string
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
@@ -628,9 +628,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 // buildToolsAndHooks assembles the agent's ToolSet from the shared opcore/usecase
 // registry, bound to one project/run, plus the terminate hook. Every operation is
 // registered as a tool; the Policy (not the ToolSet) decides which the model is
-// shown. The terminate hook ends the run after a terminal op (submit_recommendation)
-// — except on a chat trigger, where the model must still reply to the user, so
-// the run continues past the recommendation instead of stopping silently.
+// shown. The terminate hook ends an unattended run after an operation explicitly
+// marked terminal. Chat continues so the model can still reply to the user.
 //
 // This is the product's own contribution, and it reaches the composition through
 // the tools and hooks plugins (preset routes cfg.Tools / cfg.Hooks to them).

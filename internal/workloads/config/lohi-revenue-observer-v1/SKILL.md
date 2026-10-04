@@ -88,7 +88,13 @@ that a campaign caused the result.
 
 Before any write, page through `list_findings` until exhausted and look for the
 same four-part `evidence.observation_key`, including settled findings. If found,
-do not write or notify again; cite the existing finding id in the run result.
+do not write again. When an authorized delivery channel is configured, treat the
+existing finding as a retryable delivery obligation: call `send_notification`
+with that finding's same period, condition, and evidence, cite its id, and record
+whether the retry was sent or failed. When no channel is configured, cite the id
+and record that delivery was skipped. Notification has at-least-once retry
+semantics: an overlapping run may redeliver a notification that already arrived,
+which is preferable to silently dropping one that did not.
 
 If absent and a finding is warranted, build the complete deterministic request
 once. Call `submit_recommendation` with category `data` for readiness failures or
@@ -97,8 +103,10 @@ hex SHA-256 of the UTF-8 string
 `project|definition_version|period|condition`. The Plans write atomically claims
 that key within the project: identical overlap/retry requests replay the first
 receipt; a different payload under the same key returns a conflict.
-On conflict, stop, re-read findings, and surface the conflict in run history.
-Never change the condition/key merely to make the write succeed.
+On conflict, re-read findings. If the matching finding is now present, follow the
+same retryable delivery rule; if it is absent, surface the unresolved conflict in
+run history and do not notify. Never change the condition/key merely to make the
+write succeed.
 
 This provides atomic idempotency for the Plans mutation, not a promise that the
 entire scheduled run or notification delivery is exactly once. The pre-write
@@ -107,9 +115,11 @@ clients without the deterministic key.
 
 ## Delivery and failure behavior
 
-Only after a new Plans finding succeeds may `send_notification` summarize that
+After a new Plans finding succeeds, `send_notification` may summarize that
 finding, using the same period, condition, and evidence without adding numbers.
-Delivery is optional and inherits existing channel retry/error semantics:
+A matching finding discovered during overlap/retry is also eligible for the
+retry described above. Delivery is optional and at least once, with existing
+channel error semantics and no exactly-once promise:
 
 - no configured channel: keep the finding and successful analysis in existing
   Plans/run history, state that delivery was skipped, and do not fabricate a
@@ -117,7 +127,8 @@ Delivery is optional and inherits existing channel retry/error semantics:
 - denied `plans:write`: write nothing, deliver nothing, and let the run record
   the authorization failure;
 - denied or failed notification: keep the Plans finding, record delivery failure
-  honestly, and do not loop or claim delivery;
+  honestly, and leave it eligible for a later overlap/retry; do not loop within
+  one run or claim delivery;
 - paused/disabled trigger: perform no run and no delivery.
 
 Never invent a metric or evidence field. Never issue source DDL, mutate events,

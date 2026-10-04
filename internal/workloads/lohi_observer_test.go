@@ -174,6 +174,7 @@ func TestLohiRevenueObserverDedupAndHonestyContract(t *testing.T) {
 		"identical overlap/retry requests replay", "different payload under the same key returns a conflict",
 		"no configured channel", "denied `plans:write`", "paused/disabled trigger",
 		"does not justify a revenue or recovery finding", "not a promise", "never invent",
+		"retryable delivery obligation", "at-least-once retry", "may redeliver",
 	} {
 		if !strings.Contains(strings.ToLower(skill.Body), strings.ToLower(marker)) {
 			t.Errorf("observer skill missing honesty rule %q", marker)
