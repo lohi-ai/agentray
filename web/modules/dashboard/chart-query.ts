@@ -447,7 +447,9 @@ export function projectChartRows(
     }
     values.push(value);
   }
-  const xField = requestedX || keys.find((key) => key !== yField);
+  const xField = requestedX
+    || keys.find((key) => key !== yField && rows.every((row) => safeChartNumber(row[key]) === null))
+    || keys.find((key) => key !== yField);
   const labels = rows.map((row, index) => {
     const value = xField ? row[xField] : undefined;
     return typeof value === 'string' || typeof value === 'number' ? value : index + 1;

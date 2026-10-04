@@ -242,6 +242,48 @@ func TestScopedReadonlySQLAllowsTableNamesInsideStringLiterals(t *testing.T) {
 	}
 }
 
+func TestScopedReadonlySQLMasksDollarStringsAndNestedComments(t *testing.T) {
+	allowed := []string{
+		`SELECT $$can't$$ AS value FROM events LIMIT 1`,
+		`SELECT $note$FROM external_rows isn't a source$note$ AS value FROM events LIMIT 1`,
+		`SELECT 1 AS value /* outer /* inner */ ' */ FROM events LIMIT 1`,
+	}
+	for _, query := range allowed {
+		scoped, _, err := scopedReadonlySQL(query, "project-1", nil)
+		if err != nil {
+			t.Errorf("valid quoted/commented query rejected (%v): %s", err, query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("real events source was not scoped: %s", scoped)
+		}
+	}
+
+	unsourced := []string{
+		`SELECT $$FROM events$$ AS value`,
+		`SELECT 1 /* outer /* FROM events */ still hidden */`,
+	}
+	for _, query := range unsourced {
+		if _, _, err := scopedReadonlySQL(query, "project-1", nil); err == nil {
+			t.Errorf("source hidden in a quoted/commented span was accepted: %s", query)
+		}
+	}
+}
+
+func TestScopedReadonlySQLKeepsDollarQuotedSyntaxInsideIdentifiersVisible(t *testing.T) {
+	for _, alias := range []string{"é$tag$", "a$tag$$tag$"} {
+		query := "SELECT 1 AS " + alias + " FROM events LIMIT 1"
+		scoped, _, err := scopedReadonlySQL(query, "project-1", nil)
+		if err != nil {
+			t.Errorf("valid dollar-bearing identifier rejected (%v): %s", err, query)
+			continue
+		}
+		if !strings.Contains(scoped, "FROM scoped_events") {
+			t.Errorf("real events source was not scoped: %s", scoped)
+		}
+	}
+}
+
 func TestScopedReadonlySQLDistinguishesOrdinaryAndEscapeStrings(t *testing.T) {
 	ordinary := `SELECT '\' AS slash FROM events LIMIT 1`
 	query, args, err := scopedReadonlySQL(ordinary, "project-1", nil)
