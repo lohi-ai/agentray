@@ -346,6 +346,16 @@ func (d *DuckDB) snapshotGenerationActive(ctx context.Context, generation string
 	return active, err
 }
 
+func (d *DuckDB) snapshotGenerationSuperseded(ctx context.Context, generation StagingGenerationDescriptor) (bool, error) {
+	var superseded bool
+	err := d.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions
+WHERE project_id=? AND connector_id=? AND table_name=? AND generation_seq>?)`, generation.ProjectID, generation.ConnectorID,
+			generation.Table, generation.GenerationSeq).Scan(&superseded)
+	})
+	return superseded, err
+}
+
 func (d *DuckDB) snapshotGenerationCleanupComplete(ctx context.Context, generation string) (bool, error) {
 	var complete bool
 	err := d.Read(ctx, func(conn *sql.Conn) error {
@@ -362,24 +372,36 @@ func (d *DuckDB) storeIdentity(ctx context.Context) (string, error) {
 	return id, err
 }
 
-func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation string, limit int) (deleted int, more bool, err error) {
+func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation StagingGenerationDescriptor, limit int) (deleted int, more, eligible bool, err error) {
 	err = d.Write(ctx, func(tx *sql.Tx) error {
 		var active bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions WHERE generation=?)`, generation).Scan(&active); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions WHERE generation=?)`, generation.Generation).Scan(&active); err != nil {
 			return err
 		}
 		if active {
 			return nil
 		}
+		if generation.State == "sealed" {
+			var superseded bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_promotions
+WHERE project_id=? AND connector_id=? AND table_name=? AND generation_seq>?)`, generation.ProjectID, generation.ConnectorID,
+				generation.Table, generation.GenerationSeq).Scan(&superseded); err != nil {
+				return err
+			}
+			if !superseded {
+				return nil
+			}
+		}
+		eligible = true
 		result, err := tx.ExecContext(ctx, `DELETE FROM connector_snapshot_rows WHERE rowid IN
-(SELECT rowid FROM connector_snapshot_rows WHERE generation=? LIMIT ?)`, generation, limit)
+(SELECT rowid FROM connector_snapshot_rows WHERE generation=? LIMIT ?)`, generation.Generation, limit)
 		if err != nil {
 			return err
 		}
 		if n, rowsErr := result.RowsAffected(); rowsErr == nil {
 			deleted = int(n)
 		}
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_rows WHERE generation=?)`, generation).Scan(&more); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM connector_snapshot_rows WHERE generation=?)`, generation.Generation).Scan(&more); err != nil {
 			return err
 		}
 		if !more {
@@ -387,15 +409,15 @@ func (d *DuckDB) deleteSnapshotStagingChunk(ctx context.Context, generation stri
 				`DELETE FROM connector_snapshot_batches WHERE generation=?`,
 				`DELETE FROM connector_snapshot_completions WHERE generation=?`,
 			} {
-				if _, err := tx.ExecContext(ctx, stmt, generation); err != nil {
+				if _, err := tx.ExecContext(ctx, stmt, generation.Generation); err != nil {
 					return err
 				}
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO connector_snapshot_cleanup_receipts(generation,cleaned_at) VALUES(?,now())`, generation); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO connector_snapshot_cleanup_receipts(generation,cleaned_at) VALUES(?,now())`, generation.Generation); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	return deleted, more, err
+	return deleted, more, eligible, err
 }

@@ -123,9 +123,14 @@ func TestSnapshotStagingCompactionPreservesActiveGeneration(t *testing.T) {
 	if _, err := d.ApplySnapshotEnvelope(ctx, f.Complete, AppliedMark{}); err != nil {
 		t.Fatal(err)
 	}
-	deleted, _, err := d.deleteSnapshotStagingChunk(ctx, f.Complete.Generation, 50_000)
+	descriptor := StagingGenerationDescriptor{ProjectID: f.Complete.ProjectID, ConnectorID: f.Complete.ConnectorID,
+		Table: f.Complete.Table, Generation: f.Complete.Generation, GenerationSeq: f.Complete.GenerationSeq, State: "sealed"}
+	deleted, _, eligible, err := d.deleteSnapshotStagingChunk(ctx, descriptor, 50_000)
 	if err != nil || deleted != 0 {
 		t.Fatalf("active generation cleanup = deleted %d err=%v", deleted, err)
+	}
+	if eligible {
+		t.Fatal("active generation remained eligible inside deletion transaction")
 	}
 	var rows int
 	if err := d.Read(ctx, func(conn *sql.Conn) error {
@@ -152,9 +157,17 @@ func TestSnapshotCleanupTombstoneFencesLateRedelivery(t *testing.T) {
 	if _, err := d.ApplySnapshotEnvelope(ctx, f.Batches[0], AppliedMark{}); err != nil {
 		t.Fatal(err)
 	}
-	deleted, more, err := d.deleteSnapshotStagingChunk(ctx, f.Batches[0].Generation, 50_000)
-	if err != nil || deleted == 0 || more {
-		t.Fatalf("partial cleanup = deleted %d more=%v err=%v", deleted, more, err)
+	sealed := StagingGenerationDescriptor{ProjectID: f.Batches[0].ProjectID, ConnectorID: f.Batches[0].ConnectorID,
+		Table: f.Batches[0].Table, Generation: f.Batches[0].Generation, GenerationSeq: f.Batches[0].GenerationSeq, State: "sealed",
+		IsSupersededOnThisStore: true}
+	deleted, more, eligible, err := d.deleteSnapshotStagingChunk(ctx, sealed, 50_000)
+	if err != nil || deleted != 0 || more || eligible {
+		t.Fatalf("sealed cleanup without newer local promotion = deleted %d more=%v eligible=%v err=%v", deleted, more, eligible, err)
+	}
+	descriptor := StagingGenerationDescriptor{Generation: f.Batches[0].Generation, State: "failed"}
+	deleted, more, eligible, err = d.deleteSnapshotStagingChunk(ctx, descriptor, 50_000)
+	if err != nil || deleted == 0 || more || !eligible {
+		t.Fatalf("partial cleanup = deleted %d more=%v eligible=%v err=%v", deleted, more, eligible, err)
 	}
 	delivery := DeliveryReceiptMark{StreamID: "snapshots@test", Subject: "snapshots", StreamSeq: 9, PayloadSHA256: strings.Repeat("a", 64)}
 	for _, env := range []connector.SnapshotEnvelope{f.Batches[0], f.Complete} {

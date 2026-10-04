@@ -27,7 +27,7 @@ func (s *Store) ListStagingGenerations(ctx context.Context, cutoff time.Time, li
 		}
 		storeID = id
 	}
-	rows, err := s.pg.Query(ctx, `SELECT generation::text,state,terminal_at,
+	rows, err := s.pg.Query(ctx, `SELECT project_id::text,connector_id::text,table_name,generation::text,generation_seq,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g
 WHERE state IN ('sealed','failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
@@ -42,7 +42,7 @@ ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID)
 	out := []StagingGenerationDescriptor{}
 	for rows.Next() {
 		var d StagingGenerationDescriptor
-		if err := rows.Scan(&d.Generation, &d.State, &d.TerminalAt, &d.HasUnpublishedOutbox); err != nil {
+		if err := rows.Scan(&d.ProjectID, &d.ConnectorID, &d.Table, &d.Generation, &d.GenerationSeq, &d.State, &d.TerminalAt, &d.HasUnpublishedOutbox); err != nil {
 			return nil, err
 		}
 		if s.duck != nil {
@@ -51,6 +51,13 @@ ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID)
 				return nil, err
 			}
 			d.IsActiveOnThisStore = active
+			if d.State == "sealed" {
+				superseded, err := s.duck.snapshotGenerationSuperseded(ctx, d)
+				if err != nil {
+					return nil, err
+				}
+				d.IsSupersededOnThisStore = superseded
+			}
 		}
 		out = append(out, d)
 	}
@@ -68,10 +75,11 @@ func (s *Store) DeleteEligibleStagingChunk(ctx context.Context, generation strin
 	defer tx.Rollback(ctx)
 	var descriptor StagingGenerationDescriptor
 	var pending bool
-	err = tx.QueryRow(ctx, `SELECT generation::text,state,terminal_at,
+	err = tx.QueryRow(ctx, `SELECT project_id::text,connector_id::text,table_name,generation::text,generation_seq,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generation).
-		Scan(&descriptor.Generation, &descriptor.State, &descriptor.TerminalAt, &pending)
+		Scan(&descriptor.ProjectID, &descriptor.ConnectorID, &descriptor.Table, &descriptor.Generation, &descriptor.GenerationSeq,
+			&descriptor.State, &descriptor.TerminalAt, &pending)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -84,6 +92,13 @@ FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generatio
 		return 0, false, err
 	}
 	descriptor.IsActiveOnThisStore = active
+	if descriptor.State == "sealed" {
+		superseded, err := s.duck.snapshotGenerationSuperseded(ctx, descriptor)
+		if err != nil {
+			return 0, false, err
+		}
+		descriptor.IsSupersededOnThisStore = superseded
+	}
 	if !EligibleForStagingCleanup(descriptor, cutoff) {
 		return 0, false, nil
 	}
@@ -93,9 +108,13 @@ FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generatio
 	}
 	deleted, more := 0, false
 	if !cleaned {
-		deleted, more, err = s.duck.deleteSnapshotStagingChunk(ctx, generation, limit)
+		var locallyEligible bool
+		deleted, more, locallyEligible, err = s.duck.deleteSnapshotStagingChunk(ctx, descriptor, limit)
 		if err != nil {
 			return 0, false, err
+		}
+		if !locallyEligible {
+			return 0, false, nil
 		}
 	}
 	if !more {

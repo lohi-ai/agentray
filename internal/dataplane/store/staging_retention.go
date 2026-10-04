@@ -14,12 +14,17 @@ const (
 // StagingGenerationDescriptor is the frozen C1 eligibility handoff. C2 never
 // guesses these booleans from age, a failed run, or an absent lease.
 type StagingGenerationDescriptor struct {
-	Generation           string
-	State                string
-	TerminalAt           *time.Time
-	Resumable            bool
-	IsActiveOnThisStore  bool
-	HasUnpublishedOutbox bool
+	ProjectID               string
+	ConnectorID             string
+	Table                   string
+	Generation              string
+	GenerationSeq           int64
+	State                   string
+	TerminalAt              *time.Time
+	Resumable               bool
+	IsActiveOnThisStore     bool
+	IsSupersededOnThisStore bool
+	HasUnpublishedOutbox    bool
 }
 
 func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) bool {
@@ -31,6 +36,13 @@ func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) 
 		return false
 	}
 	if g.TerminalAt == nil || g.TerminalAt.After(cutoff) {
+		return false
+	}
+	// Sealing proves that the producer is finished, not that this serving
+	// store has received enough of the generation to promote it. Preserve its
+	// staging until a newer generation for the same source has been promoted
+	// locally; age and inactivity alone cannot make a sealed snapshot obsolete.
+	if g.State == "sealed" && !g.IsSupersededOnThisStore {
 		return false
 	}
 	return !g.Resumable && !g.IsActiveOnThisStore && !g.HasUnpublishedOutbox
