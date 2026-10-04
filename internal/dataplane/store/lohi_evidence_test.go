@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -139,7 +140,12 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-09", Series: "conversion_14d:unknown", Value: 100, Eligible: 1, Converted: 1})
 	assertLohiRow(t, r10, querytest.LohiAssertion{Date: "2026-09-09", Series: "conversion_14d:tiktok", Absent: true})
 
+	r04 := run("R04")
+	assertLohiRow(t, r04, querytest.LohiAssertion{Date: "2026-09-13", Series: "first_payers", Value: 2, State: "complete"})
+	assertLohiRow(t, r04, querytest.LohiAssertion{Date: "2026-09-13", Series: "first_transaction_gross_vnd", Value: 1400000, State: "complete"})
+
 	r11 := run("R11")
+	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "net_event_revenue_vnd", Value: 1250000, State: "partial", ReasonLike: "exclusive cutoff 18:14 HCM"})
 	assertLohiRow(t, r11, querytest.LohiAssertion{Date: "2026-10-03", Series: "lt_spent", Value: 380, State: "complete"})
 	components := map[string]float64{}
 	for _, series := range []string{"lt_issued", "lt_purchased_ledger", "lt_refunded", "lt_granted", "lt_issued_other", "lt_purchased_topup_control", "lt_purchase_reconciliation_delta"} {
@@ -148,9 +154,34 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	if components["lt_issued"] != components["lt_purchased_ledger"]+components["lt_refunded"]+components["lt_granted"]+components["lt_issued_other"] {
 		t.Fatalf("issuance components do not reconcile: %#v", components)
 	}
-	if components["lt_purchased_ledger"] != 7000 || components["lt_refunded"] != 40 || components["lt_granted"] != 500 || components["lt_purchased_topup_control"] != 17000 || components["lt_purchase_reconciliation_delta"] != -10000 {
+	if components["lt_purchased_ledger"] != 7000 || components["lt_refunded"] != 40 || components["lt_granted"] != 500 || components["lt_purchased_topup_control"] != 17500 || components["lt_purchase_reconciliation_delta"] != -10500 {
 		t.Fatalf("issuance controls drifted: %#v", components)
 	}
+}
+
+func TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows(t *testing.T) {
+	d := openTestDuckDB(t)
+	fixture := seedLohiEvidenceFixture(t, d)
+	ctx := context.Background()
+	if err := d.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM events WHERE project_id = ? AND event_id = ?`, fixture.ProjectID, "90000000-0000-4000-8000-000000000016")
+		return err
+	}); err != nil {
+		t.Fatalf("remove partial-day revenue control: %v", err)
+	}
+	pool, queryCtx := newTestSandboxPool(t, d, nil)
+	query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()["R11"], fixture.ProjectID, nil)
+	if err != nil {
+		t.Fatalf("scope R11: %v", err)
+	}
+	rows, err := pool.query(queryCtx, fixture.ProjectID, query, args)
+	if err != nil {
+		t.Fatalf("execute R11: %v", err)
+	}
+	assertLohiRow(t, rows, querytest.LohiAssertion{
+		Date: "2026-10-03", Series: "net_event_revenue_vnd", Value: 1200000,
+		State: "complete", ReasonLike: "Oct 2 complete HCM days",
+	})
 }
 
 func lohiMetricValue(t *testing.T, rows []map[string]any, series string) float64 {

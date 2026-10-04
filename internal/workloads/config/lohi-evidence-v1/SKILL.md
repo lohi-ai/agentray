@@ -158,14 +158,15 @@ WITH bound AS (
          try_cast(json_extract_string(data, '$.completed_at') AS TIMESTAMPTZ) AS completed_at,
          try_cast(json_extract_string(data, '$.amount_vnd') AS BIGINT) AS amount_vnd
   FROM bound WHERE json_extract_string(data, '$.payment_status') = 'completed'
-), first_at AS (
-  SELECT user_id, min(completed_at) AS first_completed_at FROM completed GROUP BY 1
+), ranked AS (
+  SELECT *, row_number() OVER (PARTITION BY user_id ORDER BY completed_at, id) AS first_rank
+  FROM completed
 ), first_day AS (
-  SELECT cast(timezone('Asia/Ho_Chi_Minh', f.first_completed_at) AS DATE) AS day,
-         count(DISTINCT f.user_id)::BIGINT AS first_payers,
-         sum(c.amount_vnd)::BIGINT AS first_transaction_gross_vnd
-  FROM first_at f JOIN completed c ON c.user_id = f.user_id AND c.completed_at = f.first_completed_at
-  WHERE f.first_completed_at < TIMESTAMPTZ '2026-10-03 11:14:00+00' GROUP BY 1
+  SELECT cast(timezone('Asia/Ho_Chi_Minh', completed_at) AS DATE) AS day,
+         count(*)::BIGINT AS first_payers,
+         sum(amount_vnd)::BIGINT AS first_transaction_gross_vnd
+  FROM ranked
+  WHERE first_rank = 1 AND completed_at < TIMESTAMPTZ '2026-10-03 11:14:00+00' GROUP BY 1
 ), shaped AS (
   SELECT day, 'first_payers' AS series, first_payers AS value, 'people' AS unit, first_payers AS sample_size FROM first_day
   UNION ALL SELECT day, 'first_transaction_gross_vnd', first_transaction_gross_vnd, 'VND', first_payers FROM first_day
@@ -176,8 +177,9 @@ SELECT strftime(day, '%Y-%m-%d') AS date, series, value, unit, sample_size,
 FROM shaped ORDER BY day, series
 ```
 
-Never compute the minimum only inside the report window. This recipe reports the
-first transaction, not all same-day payments by the new payer.
+Never compute the minimum only inside the report window. This recipe reports one
+deterministic first transaction per payer, ordered by `(completed_at, id)`, not
+all payments tied at the first timestamp or made on the same day.
 
 ### R05 — TTS listeners and paid TTS ledger use
 
@@ -513,7 +515,8 @@ WITH source_bound AS (
          ) AS retry_rank
   FROM event_input WHERE event_name IN ('revenue', 'revenue_reversed')
 ), event_net AS (
-  SELECT coalesce(sum(CASE WHEN event_name = 'revenue_reversed' THEN -amount ELSE amount END), 0)::BIGINT AS value
+  SELECT coalesce(sum(CASE WHEN event_name = 'revenue_reversed' THEN -amount ELSE amount END), 0)::BIGINT AS value,
+         count(*) FILTER (WHERE cast(timezone('Asia/Ho_Chi_Minh', timestamp) AS DATE) = DATE '2026-10-03')::BIGINT AS partial_rows
   FROM event_money_raw WHERE retry_rank = 1 AND currency = 'VND'
 ), daily AS (
   SELECT day, sum(amount_vnd)::BIGINT AS gross_vnd FROM topups GROUP BY 1
@@ -557,7 +560,12 @@ WITH source_bound AS (
   UNION ALL SELECT 'current_gross_vnd_daily_avg', round(current_daily, 2), 'VND/day', 6, 'complete', 'Sep 27-Oct 2, excludes partial Oct 3' FROM score
   UNION ALL SELECT 'gross_vnd_daily_loss', round(baseline_daily-current_daily, 2), 'VND/day', 13, 'complete', 'gross wallet topups, not booked net revenue' FROM score
   UNION ALL SELECT 'projected_30d_loss', round((baseline_daily-current_daily)*30, 2), 'VND/scenario', 13, 'qualified', 'scenario projection, not booked loss' FROM score
-  UNION ALL SELECT 'net_event_revenue_vnd', value::DOUBLE, 'VND', 1, 'complete', 'deduplicated revenue minus revenue_reversed, separate universe' FROM event_net
+  UNION ALL SELECT 'net_event_revenue_vnd', value::DOUBLE, 'VND', 1,
+    CASE WHEN partial_rows > 0 THEN 'partial' ELSE 'complete' END,
+    CASE WHEN partial_rows > 0
+      THEN 'deduplicated revenue minus revenue_reversed over available event history through exclusive cutoff 18:14 HCM, includes partial Oct 3, separate universe'
+      ELSE 'deduplicated revenue minus revenue_reversed over available event history through Oct 2 complete HCM days, separate universe' END
+    FROM event_net
   UNION ALL SELECT 'lt_issued', issued_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 complete days, sum of purchased, refunded, granted and other issuance' FROM ledger_totals
   UNION ALL SELECT 'lt_purchased_ledger', purchased_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as topup_purchase' FROM ledger_totals
   UNION ALL SELECT 'lt_refunded', refunded_lt::DOUBLE, 'LT', ledger_rows, 'complete', 'Sep 1-Oct 2 positive ledger rows classified as refund issuance' FROM ledger_totals
