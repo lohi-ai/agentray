@@ -132,9 +132,16 @@ func TestRepairG7OversizedSnapshotRejectedBeforePreparation(t *testing.T) {
 	q := NewJetStreamQueue(js, cfg.IngestSubject, cfg.IngestConnectorSubject)
 	common := connector.SnapshotEnvelope{ProjectID: "p", ConnectorID: "c", Table: "t", SyncID: "s", RunID: "r",
 		Generation: "g", GenerationSeq: 1, BindingDigest: strings.Repeat("a", 64), CaptureStartedAt: time.Now().UTC()}
-	_, err = q.BuildSnapshotBatches(common, []connector.LandedRow{{Key: "oversize", DataJSON: `{"blob":"` + strings.Repeat("x", 32<<10) + `"}`}}, 0)
+	sensitiveKey := "fixture.patient.0042@example.test"
+	_, err = q.BuildSnapshotBatches(common, []connector.LandedRow{{Key: sensitiveKey, DataJSON: `{"blob":"` + strings.Repeat("x", 32<<10) + `"}`}}, 7)
 	if err == nil {
 		t.Fatal("oversized snapshot envelope was accepted for persistence")
+	}
+	if strings.Contains(err.Error(), sensitiveKey) {
+		t.Fatalf("oversized snapshot error exposed source row key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "snapshot batch 7 is") || !strings.Contains(err.Error(), "publish budget") {
+		t.Fatalf("oversized snapshot error lost actionable batch and budget details: %v", err)
 	}
 }
 

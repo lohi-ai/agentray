@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,45 @@ func TestConnectorRunLifecycle(t *testing.T) {
 	// Cross-project read is not-found.
 	if _, err := s.ConnectorRunForProject(ctx, "00000000-0000-0000-0000-000000000000", run.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-project run err = %v, want ErrNoRows", err)
+	}
+}
+
+func TestConnectorRunPersistsSanitizedSnapshotError(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	run, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, "snapshot-pii-safe-error")
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue = %+v %v %v", run, enqueued, err)
+	}
+	if _, claimed, err := s.ClaimConnectorRun(ctx, run.ID, "owner-pii-safe"); err != nil || !claimed {
+		t.Fatalf("claim = %v %v", claimed, err)
+	}
+
+	sensitiveKey := "fixture.patient.0042@example.test"
+	sanitizedErr := "snapshot batch 7 is 33327 bytes, over the 7168-byte publish budget"
+	if err := s.FinishConnectorRun(ctx, run.ID, syncID, "owner-pii-safe", connector.SyncResult{Err: sanitizedErr}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	receipt, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastError string
+	if err := s.pg.QueryRow(ctx, `SELECT last_error FROM connector_syncs WHERE id=$1`, syncID).Scan(&lastError); err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]string{
+		"connector_runs.error":       receipt.Error,
+		"connector_syncs.last_error": lastError,
+	} {
+		if got != sanitizedErr {
+			t.Errorf("%s = %q, want %q", name, got, sanitizedErr)
+		}
+		if strings.Contains(got, sensitiveKey) {
+			t.Errorf("%s exposed source row key: %q", name, got)
+		}
 	}
 }
 

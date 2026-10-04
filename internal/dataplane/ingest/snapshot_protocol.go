@@ -30,7 +30,7 @@ func (q EventQueue) BuildSnapshotBatches(common connector.SnapshotEnvelope, rows
 		}
 		if len(raw) > q.publishBudget() {
 			if len(chunk) == 1 {
-				return nil, fmt.Errorf("snapshot batch starting at row %s is %d bytes, over the %d-byte publish budget", env.Rows[0].Key, len(raw), q.publishBudget())
+				return nil, fmt.Errorf("snapshot batch %d is %d bytes, over the %d-byte publish budget", idx, len(raw), q.publishBudget())
 			}
 			// The legacy chunker budgets row bodies only. Split an oversized
 			// candidate and measure the complete snapshot envelopes again so

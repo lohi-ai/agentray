@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -51,6 +52,7 @@ type snapshotHarness struct {
 	pending   []SnapshotOutbox
 	prepared  int
 	published int
+	buildErr  error
 }
 
 func (h *snapshotHarness) ClaimSnapshotGeneration(_ context.Context, job SyncJob, runID, owner string, epoch int64) (SnapshotGeneration, error) {
@@ -162,6 +164,9 @@ func (h *snapshotHarness) CancelSnapshotGeneration(context.Context, string, stri
 	return nil
 }
 func (h *snapshotHarness) BuildSnapshotBatches(common SnapshotEnvelope, rows []LandedRow, start int64) ([]SnapshotEnvelope, error) {
+	if h.buildErr != nil {
+		return nil, h.buildErr
+	}
 	wire, err := SnapshotRows(rows)
 	if err != nil {
 		return nil, err
@@ -205,6 +210,28 @@ func TestRepairG4TransientValidationPreservesGeneration(t *testing.T) {
 	}
 	if state == "failed" {
 		t.Fatal("transient validation interruption terminalized generation")
+	}
+}
+
+func TestOversizedSnapshotErrorPropagatesWithoutSourceKey(t *testing.T) {
+	sensitiveKey := "fixture.patient.0042@example.test"
+	sanitizedErr := "snapshot batch 7 is 33327 bytes, over the 7168-byte publish budget"
+	source := &fakeSource{batches: []PullResult{{Rows: []Row{{Key: sensitiveKey, Data: map[string]any{"blob": "oversized"}}}}}}
+	useFakeSource(source, nil)
+	h := &snapshotHarness{
+		fakeStore: newFakeStore(snapshotCapacityJob()),
+		buildErr:  fmt.Errorf("%s", sanitizedErr),
+	}
+
+	runSync(t, NewEngine(h, h), h.fakeStore, "snapshot-oversized-error")
+
+	if len(h.finished) != 1 {
+		t.Fatalf("finished results = %+v, want one", h.finished)
+	}
+	if got := h.finished[0].Err; got != sanitizedErr {
+		t.Fatalf("SyncResult.Err = %q, want %q", got, sanitizedErr)
+	} else if strings.Contains(got, sensitiveKey) {
+		t.Fatalf("SyncResult.Err exposed source row key: %q", got)
 	}
 }
 
