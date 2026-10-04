@@ -390,6 +390,7 @@ const busyPrompt = "Agent is already processing a prompt. Use steer() or followU
 // native slice inputs copy membership. Both retain their message objects.
 // Images accompany text input. Their list membership is copied, while the
 // supplied block objects remain shared with events, history and requests.
+// A nil image argument is an explicitly present null entry.
 // It blocks until the run and its listeners settle. Admission errors are
 // returned directly; run failures become Pi's assistant failure lifecycle.
 func (a *Agent) Prompt(ctx context.Context, input any, images ...*ai.ContentBlock) error {
@@ -403,7 +404,14 @@ func (a *Agent) Prompt(ctx context.Context, input any, images ...*ai.ContentBloc
 	var messages *MessageList
 	switch input := input.(type) {
 	case string:
-		content := append([]*ai.ContentBlock{{Type: "text", Text: input}}, images...)
+		content := make([]*ai.ContentBlock, 1, len(images)+1)
+		content[0] = &ai.ContentBlock{Type: "text", Text: input}
+		for _, image := range images {
+			if image == nil {
+				image = ai.NullContentBlock()
+			}
+			content = append(content, image)
+		}
 		messages = NewList(&ai.Message{Role: "user", Content: ai.BlockReferences(content...), Timestamp: now()})
 	case ai.Message:
 		messages = NewList(&input)

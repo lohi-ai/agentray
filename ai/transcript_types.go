@@ -69,6 +69,10 @@ type ContentBlock struct {
 // content-array hole, which Array.filter skips without reading its properties.
 func (b *ContentBlock) IsNull() bool { return b != nil && b.null }
 
+// NullContentBlock constructs an explicitly present null entry, distinct from
+// a nil slot (hole) in MessageContent.Blocks.
+func NullContentBlock() *ContentBlock { return &ContentBlock{null: true} }
+
 // HasContent reports own-field presence without serializing the message. Native
 // zero content is explicit null; decoded messages can retain an absent field.
 // Assigning text or a non-nil block slice makes the field present again.
@@ -121,7 +125,7 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	// JSON null is a present entry, unlike a nil slot from a live sparse stream.
 	for i, block := range c.Blocks {
 		if block == nil {
-			c.Blocks[i] = &ContentBlock{null: true}
+			c.Blocks[i] = NullContentBlock()
 		}
 	}
 	return nil

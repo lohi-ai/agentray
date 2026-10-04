@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore/engine"
@@ -21,11 +22,15 @@ func TestPiPromptImageReferences(t *testing.T) {
 			Input    struct{ InputKind, Shape, Phase, Operation string }
 			Expected json.RawMessage
 		}
+		NullCases []struct {
+			Input    struct{ InputKind, Shape string }
+			Expected json.RawMessage
+		}
 	}
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatal(err)
 	}
-	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 240 {
+	if fixture.UpstreamCommit != "eeac84ca92498ac18b6832754d01aef1d3c5f654" || len(fixture.Cases) != 240 || len(fixture.NullCases) != 9 {
 		t.Fatal("unexpected image-reference oracle coverage")
 	}
 	for _, tc := range fixture.Cases {
@@ -142,6 +147,53 @@ func TestPiPromptImageReferences(t *testing.T) {
 				}
 			}
 			assertStateListJSON(t, map[string]any{"observations": observations, "applied": applied, "original": original.Data, "images": imageValues, "retained": project(retained), "history": history}, tc.Expected)
+		})
+	}
+	for _, tc := range fixture.NullCases {
+		t.Run("null/"+tc.Input.InputKind+"/"+tc.Input.Shape, func(t *testing.T) {
+			original := &ai.ContentBlock{Type: "image", Data: "original", MIMEType: "image/png"}
+			images := []*ai.ContentBlock{nil}
+			if tc.Input.Shape == "null_image" {
+				images = append(images, original)
+			}
+			if tc.Input.Shape == "image_null" {
+				images = []*ai.ContentBlock{original, nil}
+			}
+			supplied := &ai.Message{Role: "user", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "ready"}), Timestamp: 1}
+			var prompt any = "go"
+			if tc.Input.InputKind == "message" {
+				prompt = supplied
+			}
+			if tc.Input.InputKind == "list" {
+				prompt = engine.NewList(supplied)
+			}
+			agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`)}, AgentConfig: engine.AgentConfig{
+				Config: engine.Config{FinishTurn: func(context.Context, *engine.Turn) (string, error) { return "end", nil }},
+				StreamFn: func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+					return loopListResponse(19, "stop"), nil
+				},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := agent.Prompt(context.Background(), prompt, images...); err != nil {
+				t.Fatal(err)
+			}
+			var content []*ai.ContentBlock
+			for _, message := range agent.State().Messages.Values() {
+				if message.Role == "user" {
+					content = message.Content.Blocks
+					break
+				}
+			}
+			keys, same := []string{}, []bool{}
+			for i, block := range content {
+				if block != nil {
+					keys = append(keys, strconv.Itoa(i))
+				}
+				same = append(same, block == original)
+			}
+			assertStateListJSON(t, map[string]any{"keys": keys, "content": content, "same": same}, tc.Expected)
 		})
 	}
 }

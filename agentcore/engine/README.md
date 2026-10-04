@@ -310,6 +310,18 @@ content slots or grow the list in before/after hooks: retained calls remain
 separate from replacement blocks and keep their identity after growth.
 
 `MessageContent.Blocks` and tool-result content use `[]*ai.ContentBlock`.
+`Agent.Prompt` takes images as `...*ai.ContentBlock`: text prompts copy image-list
+membership but retain each supplied image object, including repeated references.
+Editing an image through the caller, an event, history or a request stays visible
+through the other references. Replacing/appending entries in the caller's image
+slice does not alter prompt membership. Images are ignored for message/list input.
+A nil image argument becomes an explicit null content entry, not an array hole;
+`ai.NullContentBlock` constructs that same sentinel for native callers.
+The JSON host adapter constructs owned block references at its decoding boundary.
+Another 240 pinned-source cases compare image identity and edits through admission,
+events, transforms, conversion, provider, finish and settled state; nine cover
+explicit null images and ignored image arguments.
+
 `ai.BlockContent` constructs blocks from values; `ai.BlockReferences` keeps
 existing objects. Provider accumulators and the proxy publish their block lists
 directly, removing the per-event loop that copied every block. Three concurrent
