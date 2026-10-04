@@ -8,6 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +19,49 @@ import (
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/querytest"
-	"github.com/lohi-ai/agentray/internal/workloads"
 )
+
+const (
+	lohiEvidenceVersion        = "lohi-evidence-v1"
+	lohiRevenueObserverVersion = "lohi-revenue-observer-v1"
+)
+
+var lohiRecipeBlock = regexp.MustCompile(`(?s)<!-- recipe:(R[0-9]{2}) -->\s*` + "```sql\\s*(.*?)\\s*```")
+
+func lohiConfiguredSkillBody(t *testing.T, version string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "workloads", "config", version, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read %s skill: %v", version, err)
+	}
+	return string(body)
+}
+
+func lohiEvidenceRecipes(t *testing.T) map[string]string {
+	t.Helper()
+	body := lohiConfiguredSkillBody(t, lohiEvidenceVersion)
+	out := make(map[string]string, 11)
+	for _, match := range lohiRecipeBlock.FindAllStringSubmatch(body, -1) {
+		out[match[1]] = strings.TrimSpace(match[2])
+	}
+	return out
+}
+
+func lohiPreset(t *testing.T, slug string) AgentPreset {
+	t.Helper()
+	preset := AgentPreset{
+		Slug: slug, Name: slug, Scopes: map[string]bool{"monitor": true, "data_quality": true, "analyze_build": true, "growth_suggest": true},
+		Skills: []AgentPresetSkill{{
+			Name: lohiEvidenceVersion, Description: "Governed Lohi evidence", Body: lohiConfiguredSkillBody(t, lohiEvidenceVersion),
+		}},
+	}
+	if slug == "insight-digest" {
+		preset.Skills = append(preset.Skills, AgentPresetSkill{
+			Name: lohiRevenueObserverVersion, Description: "Scheduled Lohi observation", Body: lohiConfiguredSkillBody(t, lohiRevenueObserverVersion),
+		})
+	}
+	return preset
+}
 
 func seedLohiEvidenceFixture(t *testing.T, d *DuckDB) querytest.LohiEvidenceFixture {
 	t.Helper()
@@ -66,7 +110,7 @@ func TestLohiEvidenceV1RecipesExecuteAndRepeatExactly(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedLohiEvidenceFixture(t, d)
 	pool, ctx := newTestSandboxPool(t, d, nil)
-	recipes := workloads.LohiEvidenceRecipes()
+	recipes := lohiEvidenceRecipes(t)
 	if len(recipes) != 11 {
 		t.Fatalf("recipe count = %d, want 11", len(recipes))
 	}
@@ -114,7 +158,7 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedLohiEvidenceFixture(t, d)
 	pool, ctx := newTestSandboxPool(t, d, nil)
-	recipes := workloads.LohiEvidenceRecipes()
+	recipes := lohiEvidenceRecipes(t)
 	run := func(ref string) []map[string]any {
 		t.Helper()
 		query, args, err := scopedReadonlySQL(recipes[ref], fixture.ProjectID, nil)
@@ -196,7 +240,7 @@ func TestLohiEvidenceV1SettlementAndSubsecondAgeStayHonest(t *testing.T) {
 	pool, queryCtx := newTestSandboxPool(t, d, nil)
 	run := func(ref string) []map[string]any {
 		t.Helper()
-		query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()[ref], projectID, nil)
+		query, args, err := scopedReadonlySQL(lohiEvidenceRecipes(t)[ref], projectID, nil)
 		if err != nil {
 			t.Fatalf("scope %s: %v", ref, err)
 		}
@@ -227,7 +271,7 @@ func TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows(t *testing.T)
 		t.Fatalf("remove partial-day revenue control: %v", err)
 	}
 	pool, queryCtx := newTestSandboxPool(t, d, nil)
-	query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()["R11"], fixture.ProjectID, nil)
+	query, args, err := scopedReadonlySQL(lohiEvidenceRecipes(t)["R11"], fixture.ProjectID, nil)
 	if err != nil {
 		t.Fatalf("scope R11: %v", err)
 	}
@@ -303,15 +347,7 @@ func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
 	s := plansTestStore(t)
 	ctx := context.Background()
 	userID, projectID := seedConvProject(t, s)
-	pack := workloads.MustBySlug("data-analyst")
-	preset := AgentPreset{
-		Slug: pack.Slug, Name: pack.Name, Tagline: pack.Tagline, Description: pack.Description,
-		Category: string(pack.Category), Icon: pack.Icon, SoulMD: pack.SoulMD, AgentsMD: pack.AgentsMD,
-		Scopes: pack.Scopes,
-	}
-	for _, skill := range pack.Skills {
-		preset.Skills = append(preset.Skills, AgentPresetSkill(skill))
-	}
+	preset := lohiPreset(t, "data-analyst")
 	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
 		return preset, slug == preset.Slug
 	})
@@ -327,12 +363,13 @@ func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
 	}
 	var installed AgentSkill
 	for _, skill := range skills {
-		if skill.Name == workloads.LohiEvidenceVersion {
+		if skill.Name == lohiEvidenceVersion {
 			installed = skill
 		}
 	}
-	if installed.ID == "" || installed.Body != workloads.LohiEvidenceSkill().Body {
-		t.Fatalf("portable skill was not installed verbatim: id=%q body_equal=%v", installed.ID, installed.Body == workloads.LohiEvidenceSkill().Body)
+	wantBody := lohiConfiguredSkillBody(t, lohiEvidenceVersion)
+	if installed.ID == "" || installed.Body != wantBody {
+		t.Fatalf("portable skill was not installed verbatim: id=%q body_equal=%v", installed.ID, installed.Body == wantBody)
 	}
 
 	installed.Body += "\n\nOperator note: preserve this local edit."
@@ -351,7 +388,7 @@ func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
 		t.Fatalf("list reinstalled skills: %v", err)
 	}
 	for _, skill := range skills {
-		if skill.Name == workloads.LohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
+		if skill.Name == lohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
 			t.Fatal("reinstall overwrote the operator-edited Lohi skill")
 		}
 	}
@@ -361,15 +398,7 @@ func TestLohiRevenueObserverInstallsOnInsightDigestWithoutArmingSchedule(t *test
 	s := plansTestStore(t)
 	ctx := context.Background()
 	userID, projectID := seedConvProject(t, s)
-	pack := workloads.MustBySlug("insight-digest")
-	preset := AgentPreset{
-		Slug: pack.Slug, Name: pack.Name, Tagline: pack.Tagline, Description: pack.Description,
-		Category: string(pack.Category), Icon: pack.Icon, SoulMD: pack.SoulMD, AgentsMD: pack.AgentsMD,
-		Scopes: pack.Scopes,
-	}
-	for _, skill := range pack.Skills {
-		preset.Skills = append(preset.Skills, AgentPresetSkill(skill))
-	}
+	preset := lohiPreset(t, "insight-digest")
 	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
 		return preset, slug == preset.Slug
 	})
@@ -387,7 +416,7 @@ func TestLohiRevenueObserverInstallsOnInsightDigestWithoutArmingSchedule(t *test
 	for _, skill := range skills {
 		installed[skill.Name]++
 	}
-	if installed[workloads.LohiEvidenceVersion] != 1 || installed[workloads.LohiRevenueObserverVersion] != 1 {
+	if installed[lohiEvidenceVersion] != 1 || installed[lohiRevenueObserverVersion] != 1 {
 		t.Fatalf("installed Lohi skills = %+v", installed)
 	}
 	triggers, err := s.ListAgentTriggers(ctx, userID, projectID, agent.ID)
@@ -405,15 +434,15 @@ func TestLohiRevenueObserverFindingOverlapIsAtomic(t *testing.T) {
 	_, projectID := seedConvProject(t, s)
 	period := "2026-09-28/2026-10-04@Asia/Ho_Chi_Minh"
 	condition := "mature_cohort:conversion_14d_decline"
-	rawKey := strings.Join([]string{projectID, workloads.LohiEvidenceVersion, period, condition}, "|")
+	rawKey := strings.Join([]string{projectID, lohiEvidenceVersion, period, condition}, "|")
 	idemKey := fmt.Sprintf("%x", sha256.Sum256([]byte(rawKey)))
 	evidence, err := json.Marshal(map[string]any{
 		"query_ref":      "lohi-evidence-v1/R10",
-		"metric_version": workloads.LohiEvidenceVersion,
+		"metric_version": lohiEvidenceVersion,
 		"range":          period,
 		"timezone":       "Asia/Ho_Chi_Minh",
 		"observation_key": map[string]string{
-			"project": projectID, "definition_version": workloads.LohiEvidenceVersion,
+			"project": projectID, "definition_version": lohiEvidenceVersion,
 			"period": period, "condition": condition,
 		},
 	})

@@ -889,14 +889,15 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	}
 
 	params := BuildParams{
-		ProjectID:          opts.ProjectID,
-		ScopeID:            scopeID,
-		Rungs:              rungs,
-		Trigger:            trigger,
-		CompactionProvider: compactProvider,
-		CompactionModel:    compactTier.Model,
-		PiCompactionTier:   &compactTier,
-		Scopes:             ScopesFromMap(cfg.Scopes),
+		ProjectID:              opts.ProjectID,
+		ScopeID:                scopeID,
+		Rungs:                  rungs,
+		Trigger:                trigger,
+		TerminalFollowupSkills: observerTerminalFollowupSkills(skills),
+		CompactionProvider:     compactProvider,
+		CompactionModel:        compactTier.Model,
+		PiCompactionTier:       &compactTier,
+		Scopes:                 ScopesFromMap(cfg.Scopes),
 		// Verify-on-stop rail: a figure-shaped answer produced with zero evidence
 		// tool executions re-opens the run once (verify or disclaim). nil when the
 		// agent holds no evidence tool at all, so persona-only agents are untouched.
@@ -1033,6 +1034,25 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		CostUSD: res.Usage.CostUSD, CostUnpriced: res.Usage.CostUnpriced,
 	}
 	return run, res, runErr
+}
+
+const lohiRevenueObserverSkillName = "lohi-revenue-observer-v1"
+
+// observerTerminalFollowupSkills is deliberately the only runtime opt-in for a
+// non-terminal submit. The capability becomes active only after read_skill has
+// successfully loaded the configured observer contract in this run.
+func observerTerminalFollowupSkills(skills []agentcore.Skill) map[string]string {
+	for _, skill := range skills {
+		if !skill.Enabled || skill.Name != lohiRevenueObserverSkillName {
+			continue
+		}
+		id := skill.ID
+		if id == "" {
+			id = skill.Name
+		}
+		return map[string]string{"submit_recommendation": id}
+	}
+	return nil
 }
 
 // isBackgroundTrigger reports whether a run is unattended — a scheduled tick, an

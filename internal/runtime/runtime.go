@@ -2,9 +2,11 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
@@ -60,6 +62,11 @@ type BuildParams struct {
 	// stop unattended runs, while chat continues so the model can still produce a
 	// textual reply for the user instead of terminating silently.
 	Trigger string
+	// TerminalFollowupSkills opts a terminal operation into continued model
+	// execution, but only after the run successfully loads the named skill. The map is
+	// operation name -> advertised skill id. Empty preserves the terminal
+	// boundary for every ordinary agent.
+	TerminalFollowupSkills map[string]string
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
 	// to the agent's "compaction" task tier instead of borrowing the active rung.
 	// Both unset keeps agentcore's default (the active rung summarizes).
@@ -652,9 +659,32 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 	tools := opcore.Tools(reg, cc)
 	terminal := opcore.TerminalNames(reg)
 	isChat := p.Trigger == "chat"
+	loadedFollowupSkills := map[string]bool{}
+	var loadedFollowupSkillsMu sync.Mutex
 
-	terminate := func(_ context.Context, call agentcore.ToolCall, result string, _ error) (string, bool) {
-		return result, !isChat && terminal[call.Name]
+	terminate := func(_ context.Context, call agentcore.ToolCall, result string, runErr error) (string, bool) {
+		if call.Name == "read_skill" && runErr == nil {
+			var in struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal([]byte(call.Arguments), &in) == nil {
+				loadedFollowupSkillsMu.Lock()
+				loadedFollowupSkills[in.ID] = true
+				loadedFollowupSkillsMu.Unlock()
+			}
+		}
+		if isChat || !terminal[call.Name] {
+			return result, false
+		}
+		if skillID := p.TerminalFollowupSkills[call.Name]; skillID != "" {
+			loadedFollowupSkillsMu.Lock()
+			loaded := loadedFollowupSkills[skillID]
+			loadedFollowupSkillsMu.Unlock()
+			if loaded {
+				return result, false
+			}
+		}
+		return result, true
 	}
 
 	ts := agentcore.NewToolSet(tools...)

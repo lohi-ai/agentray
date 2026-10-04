@@ -25,12 +25,67 @@ const lohiObserverVersion = "lohi-revenue-observer-v1"
 func TestLohiObserverSubmitRecommendationAllowsScheduledFollowup(t *testing.T) {
 	for _, trigger := range []string{"scheduled", "manual"} {
 		t.Run(trigger, func(t *testing.T) {
-			_, hooks := buildToolsAndHooks(BuildParams{Trigger: trigger}, "scope")
+			_, hooks := buildToolsAndHooks(BuildParams{
+				Trigger: trigger,
+				TerminalFollowupSkills: map[string]string{
+					"submit_recommendation": "observer-skill-id",
+				},
+			}, "scope")
+			if _, stop := hooks.After[0](context.Background(), agentcore.ToolCall{
+				Name: "submit_recommendation",
+			}, "receipt", nil); !stop {
+				t.Fatal("submit_recommendation continued before the observer skill was loaded")
+			}
+			if _, stop := hooks.After[0](context.Background(), agentcore.ToolCall{
+				Name: "read_skill", Arguments: `{"id":"observer-skill-id"}`,
+			}, "observer contract", nil); stop {
+				t.Fatal("read_skill unexpectedly stopped the run")
+			}
 			for _, toolErr := range []error{nil, errors.New("idempotency conflict"), errors.New("write denied")} {
 				_, stop := hooks.After[0](context.Background(), agentcore.ToolCall{Name: "submit_recommendation"}, "receipt", toolErr)
 				if stop {
 					t.Fatalf("submit_recommendation stopped %s run after error %v; conflict re-read and notification require a follow-up turn", trigger, toolErr)
 				}
+			}
+		})
+	}
+}
+
+type submitBoundaryTool struct {
+	calls int
+}
+
+func (t *submitBoundaryTool) Name() string { return "submit_recommendation" }
+func (t *submitBoundaryTool) Schema() agentcore.ToolSchema {
+	return agentcore.ToolSchema{Name: t.Name(), Parameters: map[string]any{"type": "object"}}
+}
+func (t *submitBoundaryTool) Run(context.Context, string) (string, error) {
+	t.calls++
+	return "persisted finding", nil
+}
+
+func TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary(t *testing.T) {
+	for _, trigger := range []string{"scheduled", "manual"} {
+		t.Run(trigger, func(t *testing.T) {
+			_, hooks := buildToolsAndHooks(BuildParams{Trigger: trigger}, "ordinary-marketer-scope")
+			tool := &submitBoundaryTool{}
+			provider := agentcore.NewFauxProvider(
+				agentcore.AssistantToolCall("one", tool.Name(), `{"title":"first"}`),
+				agentcore.AssistantToolCall("two", tool.Name(), `{"title":"second"}`),
+				agentcore.AssistantText("done"),
+			)
+			agent, err := agentcore.New(agentcore.Config{
+				Provider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
+				Policy: agentcore.NewAllowList(tool.Name()), Hooks: hooks,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agent.Prompt(context.Background(), "File the recommendation"); err != nil {
+				t.Fatal(err)
+			}
+			if tool.calls != 1 || len(provider.Recorded) != 1 {
+				t.Fatalf("ordinary %s run changed: writes=%d requests=%d, want 1/1", trigger, tool.calls, len(provider.Recorded))
 			}
 		})
 	}

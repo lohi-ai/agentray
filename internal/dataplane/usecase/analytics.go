@@ -560,10 +560,11 @@ type submitRecOutput struct {
 func submitRecommendation() opcore.Operation[submitRecInput, submitRecOutput] {
 	return opcore.Operation[submitRecInput, submitRecOutput]{
 		Name:           "submit_recommendation",
-		Summary:        "Submit a marketing/sales/growth recommendation with supporting evidence. Continue the run to inspect the receipt, perform any required follow-up, and report the final status.",
+		Summary:        "Submit a final marketing/sales/growth recommendation with supporting evidence. Ends a scheduled/manual run.",
 		Scope:          "growth_suggest",
 		Access:         opcore.AccessPlansWrite,
 		MinSessionRole: "member",
+		Terminal:       true,
 		Handler: func(ctx context.Context, cc opcore.CallContext, in submitRecInput) (submitRecOutput, error) {
 			d, err := depsFrom(cc)
 			if err != nil {
