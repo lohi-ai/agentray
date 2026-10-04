@@ -18,11 +18,15 @@ func IsNull(value any) bool { _, ok := value.(nullValue); return ok }
 
 // MarshalOptional exports an optional object property. nil/Undefined/functions
 // are omitted; Null exports an explicit JSON null.
-func MarshalOptional(value any) ([]byte, error) {
+func MarshalOptional(value any, key ...string) ([]byte, error) {
 	if value == nil || IsUndefined(value) || reflect.TypeOf(value).Kind() == reflect.Func {
 		return nil, nil
 	}
-	return MarshalValue(value)
+	property := ""
+	if len(key) > 0 {
+		property = key[0]
+	}
+	return StringifyProperty(value, property)
 }
 
 // DecodeOptional retains absence versus null at optional JSON-value fields.

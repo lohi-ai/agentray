@@ -27,7 +27,7 @@ func TestProgrammaticCallUsesExplicitToolsAndScopedUpdates(t *testing.T) {
 	}
 	current := &engine.Context{} // Explicit nested-call tools need not be in context.Tools.
 	call := ai.ContentBlock{Type: "toolCall", Name: "echo", ID: "call", Arguments: json.RawMessage(`{"count":"42"}`)}
-	result, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant"}, current, engine.ToolHooks{
+	result, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{Role: "assistant"}, current, engine.ToolHooks{
 		Before: func(_ context.Context, hook *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
 			before = true
 			if hook.Context != current || string(hook.ToolCall.Arguments) != `{"count":"42"}` || argumentJSON(t, hook.Args) != `{"count":42}` {
@@ -63,7 +63,7 @@ func TestToolWaitsForAdmittedUpdates(t *testing.T) {
 	}
 	go func() {
 		defer close(done)
-		_, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Name: "echo", Arguments: json.RawMessage(`{}`)}, []*engine.Tool{tool}, nil, &engine.Context{}, engine.ToolHooks{}, func(*engine.ToolResult) error { close(entered); <-release; return nil })
+		_, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Name: "echo", Arguments: json.RawMessage(`{}`)}, engine.NewList([]*engine.Tool{tool}...), nil, &engine.Context{}, engine.ToolHooks{}, func(*engine.ToolResult) error { close(entered); <-release; return nil })
 		if err != nil {
 			t.Error(err)
 		}
@@ -118,7 +118,7 @@ func TestParallelSinkFailureRejectsWithoutResultMessages(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := engine.Run(context.Background(), nil, engine.Context{Tools: []*engine.Tool{tool}}, engine.Config{ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}, sink, stream)
+		_, err := engine.Run(context.Background(), nil, engine.Context{Tools: engine.NewList([]*engine.Tool{tool}...)}, engine.Config{ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }}, sink, stream)
 		done <- err
 	}()
 	select {
@@ -151,7 +151,7 @@ func TestDefaultStreamBinding(t *testing.T) {
 		stream.End(&ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent()})
 		return stream, nil
 	})
-	_, err := engine.Run(context.Background(), nil, engine.Context{}, engine.Config{ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}, func(engine.Event) error { return nil }, nil)
+	_, err := engine.Run(context.Background(), nil, engine.Context{}, engine.Config{ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }}, func(engine.Event) error { return nil }, nil)
 	if err != nil || !called {
 		t.Fatalf("default stream: called=%v err=%v", called, err)
 	}

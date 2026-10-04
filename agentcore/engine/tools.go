@@ -21,35 +21,101 @@ type preparedCall struct {
 // call, without emitting lifecycle events or appending transcript messages.
 // The input call, hook call and outcome call retain the same pointer.
 // The selected tool object survives replacement of its entry in tools.
+// A nil tools argument uses current.Tools; an explicit empty list overrides it.
 // Results and updates retain the tool's pointers unless a hook overrides or fails.
 // An update callback's panic propagates synchronously to the executing tool;
 // a returned error represents a rejected update promise and rejects the call
 // after execution settles. Tools that launch goroutines own their panic boundary.
-func RunToolCall(ctx context.Context, call *ai.ContentBlock, tools []*Tool, assistant *ai.Message, current *Context, hooks ToolHooks, update func(*ToolResult) error) (ToolOutcome, error) {
-	prepared := prepareCall(ctx, call, tools, assistant, current, hooks)
+func RunToolCall(ctx context.Context, call *ai.ContentBlock, tools *ToolList, assistant *ai.Message, current *Context, hooks ToolHooks, update func(*ToolResult) error) (ToolOutcome, error) {
+	if tools == nil && current != nil {
+		tools = current.Tools
+	}
+	prepared, err := prepareCall(ctx, call, tools, assistant, current, hooks)
+	if err != nil {
+		return ToolOutcome{}, err
+	}
 	if prepared.immediate != nil {
 		return *prepared.immediate, nil
 	}
 	return executeCall(ctx, prepared, assistant, current, hooks, update)
 }
 
-func toolCalls(message *ai.Message) []*ai.ContentBlock {
+func toolCalls(message *ai.Message) ([]*ai.ContentBlock, error) {
+	if message.Content.Text != nil {
+		return nil, errors.New(`message.content.filter is not a function. (In 'message.content.filter((c) => c.type === "toolCall")', 'message.content.filter' is undefined)`)
+	}
+	if message.Content.Blocks == nil {
+		return nil, jsonjs.PropertyReadError(message.HasContent(), "message.content.filter")
+	}
 	calls := []*ai.ContentBlock{}
 	for i := range message.Content.Blocks {
 		block := message.Content.Blocks[i]
+		if block == nil {
+			continue // Array.filter skips absent indices, including proxy gaps.
+		}
+		if block.IsNull() {
+			return nil, jsonjs.PropertyReadError(true, "c.type")
+		}
 		if block.Type == "toolCall" {
 			calls = append(calls, block)
 		}
 	}
-	return calls
+	return calls, nil
 }
 
 func errorResult(message string) *ToolResult {
 	return &ToolResult{Content: []*ai.ContentBlock{{Type: "text", Text: message}}, Details: NewObject()}
 }
 
-func prepareCall(ctx context.Context, call *ai.ContentBlock, tools []*Tool, assistant *ai.Message, current *Context, hooks ToolHooks) (prepared preparedCall) {
+// Array.find visits holes as undefined, stops at the first match, and never
+// reads the array's constructor. Retain sparse membership during the lookup.
+func findTool(tools *ToolList, name string) (*Tool, error) {
+	snapshot := tools.indexedSnapshot()
+	for index := 0; index < snapshot.length; index++ {
+		tool, present := snapshot.values[index]
+		if tool == nil {
+			return nil, jsonjs.PropertyReadError(present, "t.name")
+		}
+		if tool.Name == name {
+			return tool, nil
+		}
+	}
+	return nil, nil
+}
+
+// Array.map checks its constructor and skips holes before getToolStateChanges
+// constructs a Map from the mapped entries. A present null therefore fails
+// before a hole does, regardless of their relative positions.
+func declareTools(tools *ToolList) (declarations []ai.Tool, err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			declarations, err = nil, failureError(value)
+		}
+	}()
+	snapshot := tools.Clone()
+	declarations = make([]ai.Tool, 0, len(snapshot.values))
+	for _, index := range snapshot.Keys() {
+		tool := snapshot.values[index]
+		if tool == nil {
+			return nil, jsonjs.PropertyReadError(true, "tool.name")
+		}
+		declarations = append(declarations, ai.ToToolDeclaration(tool.Tool))
+	}
+	if len(snapshot.values) != snapshot.length {
+		// Pinned Bun's Map constructor diagnostic for an undefined entry.
+		return nil, errors.New("Type error")
+	}
+	return declarations, nil
+}
+
+func prepareCall(ctx context.Context, call *ai.ContentBlock, tools *ToolList, assistant *ai.Message, current *Context, hooks ToolHooks) (prepared preparedCall, lookupErr error) {
 	prepared.call = call
+	// Pi performs lookup before its tool-failure catch. Malformed tool lists
+	// reject the call; they must not become an isError tool result.
+	prepared.tool, lookupErr = findTool(tools, call.Name)
+	if lookupErr != nil {
+		return
+	}
 	fail := func(message string, terminate bool) {
 		result := errorResult(message)
 		if terminate {
@@ -62,12 +128,6 @@ func prepareCall(ctx context.Context, call *ai.ContentBlock, tools []*Tool, assi
 			fail(failureError(value).Error(), false)
 		}
 	}()
-	for i := range tools {
-		if tools[i].Name == call.Name {
-			prepared.tool = tools[i]
-			break
-		}
-	}
 	if prepared.tool == nil {
 		fail("Tool "+call.Name+" not found", false)
 		return
@@ -249,10 +309,17 @@ type toolBatch struct {
 func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, calls []*ai.ContentBlock, config Config, emit EventSink) (toolBatch, error) {
 	batch := toolBatch{messages: []*ai.Message{}}
 	sequential := config.ToolExecution == "sequential"
-	for _, call := range calls {
-		for _, tool := range current.Tools {
-			if tool.Name == call.Name {
-				sequential = sequential || tool.ExecutionMode == "sequential"
+	// Truncated responses bypass tool selection entirely. Otherwise Pi's
+	// some(find(...)) stops as soon as one selected tool is sequential, even
+	// when later calls would encounter an unreadable list entry.
+	if assistant.StopReason != "length" {
+		for _, call := range calls {
+			tool, err := findTool(current.Tools, call.Name)
+			if err != nil {
+				return batch, err
+			}
+			if tool != nil && tool.ExecutionMode == "sequential" {
+				sequential = true
 				break
 			}
 		}
@@ -295,7 +362,10 @@ func executeBatch(ctx context.Context, current *Context, assistant *ai.Message, 
 			}
 			continue
 		}
-		preparation := prepareCall(ctx, call, current.Tools, assistant, current, config.ToolHooks)
+		preparation, err := prepareCall(ctx, call, current.Tools, assistant, current, config.ToolHooks)
+		if err != nil {
+			return batch, err
+		}
 		if preparation.immediate != nil {
 			outcome := *preparation.immediate
 			if err := end(outcome); err != nil {

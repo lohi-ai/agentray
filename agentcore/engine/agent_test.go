@@ -226,23 +226,23 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		return stream, nil
 	}
 	if input.ConvertCustom || input.ConvertFailure != "" {
-		options.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
+		options.ConvertToLLM = func(messages *engine.MessageList) (*engine.MessageList, error) {
 			if input.ConvertFailure != "" {
 				return nil, errors.New(input.ConvertFailure)
 			}
-			result := engine.MessagePointers(engine.MessageValues(messages))
+			result := engine.MessagePointers(engine.MessageValues(messages.Values()))
 			for i := range result {
 				if result[i].Role == "custom" {
 					result[i].Role = "user"
 				}
 			}
-			return result, nil
+			return engine.NewList(result...), nil
 		}
 	}
 	if input.Decisions != nil {
-		options.FinishTurn = func(ctx context.Context, turn engine.Turn) (string, error) {
+		options.FinishTurn = func(ctx context.Context, turn *engine.Turn) (string, error) {
 			ids := []string{}
-			for _, message := range turn.ToolResults {
+			for _, message := range turn.ToolResults.Values() {
 				ids = append(ids, message.ToolCallID)
 			}
 			add(&hooks, map[string]any{"hook": "finish", "tools": ids, "signalMatches": ctx == agent.Signal()})
@@ -264,8 +264,8 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 		}
 	}
 	if input.ContextPrepare {
-		options.PrepareNextTurnWithContext = func(ctx context.Context, turn engine.Turn) (*engine.TurnUpdate, error) {
-			add(&hooks, map[string]any{"hook": "contextPrepare", "messageRole": turn.Message.Role, "newMessages": len(turn.NewMessages), "signalMatches": ctx == agent.Signal()})
+		options.PrepareNextTurnWithContext = func(ctx context.Context, turn *engine.Turn) (*engine.TurnUpdate, error) {
+			add(&hooks, map[string]any{"hook": "contextPrepare", "messageRole": turn.Message.Role, "newMessages": turn.NewMessages.Len(), "signalMatches": ctx == agent.Signal()})
 			defer func() { prepareIndex++ }()
 			if prepareIndex < len(input.NextUpdates) {
 				return input.NextUpdates[prepareIndex], nil
@@ -317,7 +317,7 @@ func runAgentFixture(t *testing.T, input agentInput) []byte {
 				value = message
 			}
 			if err == nil {
-				err = agent.Prompt(context.Background(), value, action.Images...)
+				err = agent.Prompt(context.Background(), value, ai.BlockContent(action.Images...).Blocks...)
 			}
 		case "continue":
 			err = agent.Continue(context.Background())

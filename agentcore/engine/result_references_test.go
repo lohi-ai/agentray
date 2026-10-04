@@ -103,14 +103,14 @@ func TestPiResultReferences(t *testing.T) {
 			call := &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockReferences(call), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}
 			var outcome engine.ToolOutcome
-			var messages []*ai.Message
+			var messages *engine.MessageList
 			var err error
 			if input.Mode == "programmatic" {
-				outcome, err = engine.RunToolCall(context.Background(), call, []*engine.Tool{tool}, assistant, &engine.Context{Messages: []*ai.Message{}, Tools: []*engine.Tool{tool}}, engine.ToolHooks{After: after}, func(partial *engine.ToolResult) error { onUpdate(partial); return nil })
+				outcome, err = engine.RunToolCall(context.Background(), call, engine.NewList([]*engine.Tool{tool}...), assistant, &engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList([]*engine.Tool{tool}...)}, engine.ToolHooks{After: after}, func(partial *engine.ToolResult) error { onUpdate(partial); return nil })
 				identities = append(identities, map[string]bool{"outcome": outcome.Result == produced})
 			} else {
-				config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ToolExecution: input.Mode, ToolHooks: engine.ToolHooks{After: after}, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }, FinishTurn: func(context.Context, engine.Turn) (string, error) { return "end", nil }}
-				messages, err = engine.Run(context.Background(), []*ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{Messages: []*ai.Message{}, Tools: []*engine.Tool{tool}}, config, func(event engine.Event) error {
+				config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ToolExecution: input.Mode, ToolHooks: engine.ToolHooks{After: after}, ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }, FinishTurn: func(context.Context, *engine.Turn) (string, error) { return "end", nil }}
+				messages, err = engine.Run(context.Background(), engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("go")}}...), engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList([]*engine.Tool{tool}...)}, config, func(event engine.Event) error {
 					events = append(events, capture(event))
 					if event.Type == "tool_execution_update" {
 						onUpdate(event.PartialResult)

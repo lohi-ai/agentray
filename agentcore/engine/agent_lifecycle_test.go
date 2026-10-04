@@ -236,7 +236,7 @@ func TestAgentUsesLatestInstalledPreparationCallback(t *testing.T) {
 	var agent *engine.Agent
 	turns, oldCalls, newCalls := 0, 0, 0
 	config := engine.AgentConfig{StreamFn: completedAgentStream, PrepareNextTurn: func(context.Context) (*engine.TurnUpdate, error) { oldCalls++; return nil, nil }}
-	config.FinishTurn = func(context.Context, engine.Turn) (string, error) {
+	config.FinishTurn = func(context.Context, *engine.Turn) (string, error) {
 		turns++
 		if turns == 1 {
 			updated := config

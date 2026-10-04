@@ -62,8 +62,8 @@ func listAgent(t *testing.T, stream engine.StreamFn) (*engine.Agent, []*ai.Messa
 		InitialState: engine.InitialState{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Messages: messages, Tools: tools},
 		AgentConfig: engine.AgentConfig{StreamFn: stream, Config: engine.Config{
 			Now:          func() int64 { return 1000 },
-			ConvertToLLM: func(m []*ai.Message) ([]*ai.Message, error) { return m, nil },
-			FinishTurn:   func(context.Context, engine.Turn) (string, error) { return "end", nil },
+			ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil },
+			FinishTurn:   func(context.Context, *engine.Turn) (string, error) { return "end", nil },
 		}},
 	})
 	if err != nil {

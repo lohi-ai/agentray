@@ -3,16 +3,20 @@ package jsonjs
 import (
 	"reflect"
 	"slices"
+	"strconv"
 )
 
 // Array retains JavaScript-style identity and length across shared references.
 // Absent indices (holes) differ from present Undefined values in Has/Keys, but
-// both read as Undefined and export as null. This type models indexed elements
-// and length; arbitrary named array properties/prototypes are not represented.
+// both read as Undefined and export as null. Enumerable own data properties
+// outside array indices retain insertion order and do not affect length or JSON.
+// An explicit JSONMethod stored as toJSON can replace the array during export.
+// Custom prototypes and accessors are not represented.
 // Callers must synchronize concurrent reads and writes.
 type Array struct {
 	length int
 	values map[int]any
+	named  *Object
 }
 
 func NewArray(values ...any) *Array {
@@ -58,6 +62,64 @@ func (a *Array) Delete(index int) {
 	if a != nil {
 		delete(a.values, index)
 	}
+}
+
+// GetProperty reads an indexed or named own data property. Inherited properties
+// and the reserved length property are excluded; use Len for length.
+func (a *Array) GetProperty(name string) (any, bool) {
+	if a == nil {
+		return Undefined, false
+	}
+	if index, ok := ArrayIndex(name); ok {
+		return a.Get(int(index)), a.Has(int(index))
+	}
+	if value, found := a.named.Lookup(name); found {
+		return value, true
+	}
+	return Undefined, false
+}
+
+// SetProperty defines an enumerable own data property. It bypasses prototype
+// setters (including __proto__) and accessors. Use SetLength to change length.
+func (a *Array) SetProperty(name string, value any) {
+	if name == "length" {
+		panic("use SetLength to set array length")
+	}
+	if index, ok := ArrayIndex(name); ok {
+		a.Set(int(index), value)
+		return
+	}
+	if a.named == nil {
+		a.named = NewObject()
+	}
+	a.named.Set(name, value)
+}
+
+func (a *Array) DeleteProperty(name string) {
+	if a == nil {
+		return
+	}
+	if index, ok := ArrayIndex(name); ok {
+		a.Delete(int(index))
+		return
+	}
+	a.named.Delete(name)
+}
+
+// PropertyKeys follows Object.keys order: numeric indices, then named own data
+// properties in insertion order. The non-enumerable length property is excluded.
+func (a *Array) PropertyKeys() []string {
+	keys := []string{}
+	if a == nil {
+		return keys
+	}
+	for _, index := range a.Keys() {
+		keys = append(keys, strconv.Itoa(index))
+	}
+	for _, property := range a.named.Entries() {
+		keys = append(keys, property.Name)
+	}
+	return keys
 }
 func (a *Array) SetLength(length int) {
 	if length < 0 || uint64(length) > 4294967295 {

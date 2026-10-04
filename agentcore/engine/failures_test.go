@@ -137,7 +137,7 @@ func TestPiFailureValues(t *testing.T) {
 					hooks.After = func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) { panic(failure) }
 				}
 				call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-				outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, hooks, nil)
+				outcome, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, hooks, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -194,7 +194,7 @@ func TestPiToolUpdateFailures(t *testing.T) {
 				return &engine.ToolResult{Content: []*ai.ContentBlock{}, Details: argumentRef(`{}`)}, nil
 			}}
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-			outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
+			outcome, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
 				after = true
 				return nil, nil
 			}}, func(*engine.ToolResult) error {
@@ -283,7 +283,7 @@ func TestPiPendingToolUpdates(t *testing.T) {
 			done := make(chan completion, 1)
 			go func() {
 				call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "tool", Arguments: json.RawMessage(`{}`)}
-				outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
+				outcome, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{Role: "assistant", Content: ai.BlockContent(call)}, &engine.Context{}, engine.ToolHooks{After: func(context.Context, engine.AfterToolCall) (*engine.AfterToolResult, error) {
 					after.Store(true)
 					return nil, nil
 				}}, func(result *engine.ToolResult) error {

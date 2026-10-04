@@ -83,7 +83,7 @@ These compose independently and default closed where possible:
 |---|---|---|
 | Policy gate | Agent sees/calls only allowed tools. | `agentcore.Policy`, `agentruntime/policy.go` |
 | Injection guard | Blocks obvious prompt-injection payloads in tool args. | `sandbox.InjectionGuard` hook |
-| Credential vault | Resolves `{{cred:NAME}}` after trace + policy, before tool execution. Secrets stay out of model context and traces. | `agentcore.CredentialResolver`, `internal/shared/credential` |
+| Credential vault | Resolves `{{cred:NAME}}` after trace + policy, before tool execution. Secrets stay out of model context and traces. | `agentcore.CredentialResolver`, public `credential` (internal compatibility wrapper) |
 | Sandbox | Runs untrusted shell/file/browser-like work in an isolated container. | `agentcore.Sandbox`, `sandbox` |
 | Computer-use isolation | `computer_use` is a deliberate higher-privilege tool (persistent session, network, writable, container-root) distinct from the locked `run_shell` (ephemeral, no-net, read-only, nobody). Still `--cap-drop ALL`, no-new-privileges, no host env, resource caps; granted only when explicitly selected. | `sandbox.NewComputerUseTool`, `Dockerfile.computeruse` |
 | Browser-use isolation | `browser_use` drives a real browser via the `agent-browser` CLI in its **own** persistent session (browser-scoped `::browser` session id, dedicated Chromium image) — same hard isolation as computer-use (`--cap-drop ALL`, no-new-privileges, no host env, caps). The agent-browser daemon self-reaps on idle (`AGENT_BROWSER_IDLE_TIMEOUT_MS`) and `CloseSession` removes the container, so no zombie Chrome survives a conversation. Granted only when explicitly selected; optional cloakbrowser stealth is opt-in at build time. | `sandbox.NewBrowserTool`, `Dockerfile.browser` |
@@ -188,7 +188,7 @@ Already shipped: hardened sandbox image and credential vault.
 | "Model-visible means logged" invariant | `agentcore/plugins/observe/` |
 | Sandbox contract | `agentcore/env.go` |
 | Docker sandbox + injection guard | `sandbox/` |
-| Credential vault | `internal/shared/credential/` |
+| Credential vault | `credential/`; `internal/shared/credential/` retains host env loading and compatibility |
 | HTTP tool + SSRF guard | `sandbox/httpguard.go` + `sandbox/http_tool.go` |
 | MCP client (remote tools) | `internal/shared/mcpclient/` |
 | Lifecycle hooks (first-party extension seam) | `agentcore/hooks.go` |

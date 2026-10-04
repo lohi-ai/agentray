@@ -41,7 +41,7 @@ func TestPiToolArgumentsOracle(t *testing.T) {
 			}
 			before := append([]byte(nil), tc.Args...)
 			call := ai.ContentBlock{Type: "toolCall", ID: "call", Name: "number", Arguments: tc.Args}
-			outcome, err := engine.RunToolCall(context.Background(), &call, []*engine.Tool{tool}, &ai.Message{}, &engine.Context{Tools: []*engine.Tool{tool}}, engine.ToolHooks{
+			outcome, err := engine.RunToolCall(context.Background(), &call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{}, &engine.Context{Tools: engine.NewList([]*engine.Tool{tool}...)}, engine.ToolHooks{
 				Before: func(_ context.Context, hook *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
 					text := argumentJSON(t, hook.Args)
 					prepared = &text

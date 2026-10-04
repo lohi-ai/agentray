@@ -39,8 +39,16 @@ read as `Undefined` and export as `null`. `Values` returns a detached dense slic
 with holes filled by `Undefined`. Recording and snapshotting spread-copy direct
 array attributes, including filling holes, while arrays nested inside another
 array or object remain shared. Sparse indexed storage avoids allocating all
-intervening slots during a distant `Set` or length growth. This API models indexed
-elements and length, not arbitrary named array properties or custom prototypes.
+intervening slots during a distant `Set` or length growth. `GetProperty`,
+`SetProperty`, `DeleteProperty` and `PropertyKeys` expose indexed and named
+enumerable own data properties. Numeric indices enumerate first; other names
+retain insertion order. Named properties survive length changes and remain live
+on nested arrays and status fields. Direct attribute spread copies drop them;
+JSON excludes them, even when they contain cycles or functions. `SetProperty`
+defines an own property for `__proto__`, without invoking a prototype setter.
+Length remains exposed through `Len`/`SetLength`. Custom prototypes and accessors
+are not represented. An explicit `JSONMethod` stored under `toJSON` can replace
+the array during JSON export.
 Plain Go slices remain accepted and retain their Go types; use `Array` when
 shared growth/truncation must behave like JavaScript.
 
@@ -82,7 +90,15 @@ undefined array elements export as `null`. This also preserves null attributes
 decoded from JSON. Callers previously using nil for omission must use
 `telemetry.Undefined` instead. Function values remain present in snapshots;
 JSON omits them from objects and exports them as `null` in arrays. Recording
-and export never invoke the function.
+and export never invoke ordinary functions. An explicit `JSONMethod` stored as an
+own `toJSON` property is the exception at export: it receives the object/array
+and containing key, and its return value replaces that position. Recording,
+snapshotting and graph cloning never call it. Export propagates callback errors
+and panics, reads later property values after earlier hooks, and captures object
+keys/array length before visiting children. It does not call a returned object's
+hook again at the same position. `StringifyValue` preserves an undefined root as
+no bytes; Go's `json.Marshaler` adapter must instead return `null`. Go's outer
+`encoding/json` encoder may also apply HTML escaping to the returned bytes.
 
 `SetAttributesFrom` and `AddEventFrom` accept attribute readers. Active spans
 read once; no-op and settled spans skip reading. A panic suppresses the outer
@@ -97,7 +113,9 @@ Go adaptations: ordinary Go errors produce `{name: "Error", message: err.Error()
 produce an error status without details. This includes `panic(nil)`: Go's runtime
 wrapper is excluded from recorded error details while the original recovered
 panic is propagated to the caller. Unsupported Go attribute payloads (channels, arbitrary pointers/structs and maps with
-non-string keys) are ignored atomically. These adaptations do not invoke user serialization methods.
+non-string keys) in JSON-visible positions are ignored atomically. Named array
+properties are not visited by array export or spread copying. These adaptations
+do not invoke user serialization methods.
 An explicit `*ErrorDetails` preserves a serialized failure's original name and
 message while retaining normal Go error identity; the recorder copies its fields.
 
@@ -116,8 +134,9 @@ descriptors remain immutable across shallow status copies, but nested objects
 and arrays retain their references. Edits through those references affect other
 copies and settled recorder snapshots, matching Pi's shallow error-field copying.
 Callers must synchronize shared edits. JSON export retains the attribute value
-domain and never invokes field functions or custom Go serializers; cycles and
-unsupported Go field payloads return an export error.
+domain and only invokes explicitly registered `JSONMethod` hooks, never arbitrary
+field functions or custom Go serializers; cycles and
+unsupported Go field payloads in JSON-visible positions return an export error.
 
 The shared `internal/jsonjs` normalizer preserves numeric index-key ordering,
 duplicate-key semantics, binary64 rounding/overflow and UTF-16 surrogate escapes
@@ -174,6 +193,13 @@ cases. Each case creates and closes its own `AdapterFixture`, checks normalized
 snapshots, and returns an error on failure. Run the suite for any new backend.
 
 ## Verification and remaining work
+
+The `pi-tojson.json` fixture contains 128 pinned-source placement/return cases
+and 13 source-runtime mutation cases. These verify export-only hook execution,
+receiver identity, containing keys, array spread behavior, root/property omission,
+replacement values, errors, cycles, later-field mutations, and captured array
+length. Native tests also cover map mutation during cycle detection, passive
+cloning, and Go error/panic identity. These tests run entirely in Go.
 
 `go test -race ./telemetry/...` runs without a JavaScript runtime. Thirty-nine recorded
 fixtures were generated by the unchanged Pi implementation, covering nested
@@ -246,6 +272,15 @@ and decoded arrays. Input/snapshot edits cover append, distant assignment,
 deletion, length growth/truncation and pop. Go checks cover cyclic arrays,
 passive function export, unsupported payload rejection, detached dense views
 and sparse storage at JavaScript's maximum array index.
+Another 240 original-source cases compare named properties on direct, nested,
+shared and status arrays, including input/snapshot edits before and after
+settlement. They compare complete JSON, property order and values, reference
+identity, constructor/prototype-related names, undefined values and named cycles
+or functions. Seven source-runtime graph-clone cases verify that detached copies
+preserve sparse membership, named fields, shared children and cycles. A native
+provider-stream snapshot test verifies the same graph preservation and producer
+isolation at the AI observation boundary. Native checks also cover the maximum
+index versus an ordinary numeric-looking name and ignored opaque Go payloads.
 The recorder does not enforce homogeneous arrays or reject readable nested
 objects merely because they lie outside the TypeScript attribute declaration.
 Twenty-four additional value cases cover mixed arrays, nested arrays/objects,
@@ -292,6 +327,7 @@ bun telemetry/testdata/generate-attribute-decode-fixtures.ts --check
 bun telemetry/testdata/generate-attribute-unicode-fixtures.ts --check
 bun telemetry/testdata/generate-attribute-order-fixtures.ts --check
 bun telemetry/testdata/generate-attribute-array-fixtures.ts --check
+bun telemetry/testdata/generate-array-property-fixtures.ts --check
 bun telemetry/testdata/generate-attribute-reader-fixtures.ts --check
 bun telemetry/testdata/generate-option-reader-fixtures.ts --check
 bun telemetry/testdata/generate-status-json-fixtures.ts --check
@@ -301,13 +337,16 @@ bun telemetry/testdata/generate-status-reference-fixtures.ts --check
 
 The pinned TypeScript under `third_party/pi/upstream` is a development reference
 only for this module. The generator verifies its original bytes before use.
+The port's completion criteria include deleting this reference, TS fixture
+generators, and TS-only bridge/build tooling after parity verification. Retain
+the verified JSON fixtures, Go tests, and provenance/license notices.
 The native host records request spans and delivers trace packets with this
 module for callback and explicitly bound Go-provider streams. The native session
 adapter feeds the existing trace sink directly. Default production provider
 instrumentation has not yet switched to the Go engine.
 The original MIT license is retained in `LICENSE.pi`.
 
-The ordered value containers and passive JSON codec are shared with the native
+The ordered value containers and JSON codec are shared with the native
 agent engine through `internal/jsonjs`. Telemetry exports concrete aliases;
 recorder-specific attribute admission, outer-array copying and status handling
 stay in this package. Serializing an input object preserves its own properties;

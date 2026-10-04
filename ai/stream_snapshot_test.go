@@ -129,6 +129,10 @@ func TestAssistantStreamSnapshotDetachesLiveDetailsGraph(t *testing.T) {
 	array.SetLength(4)
 	array.Set(2, child)
 	array.Set(3, Undefined)
+	array.SetProperty("meta", child)
+	array.SetProperty("self", array)
+	calls := 0
+	array.SetProperty("fn", func() { calls++ })
 	native := map[string]any{"child": child, "bytes": []byte{1, 2}}
 	native["self"] = native
 	root := NewObject(Property{Name: "array", Value: array}, Property{Name: "native", Value: native})
@@ -152,6 +156,19 @@ func TestAssistantStreamSnapshotDetachesLiveDetailsGraph(t *testing.T) {
 	}
 	if clonedArray.Len() != 4 || clonedArray.Has(1) || !clonedArray.Has(3) || clonedArray.Get(3) != Undefined {
 		t.Fatal("snapshot changed sparse array shape")
+	}
+	namedChild, childFound := clonedArray.GetProperty("meta")
+	self, selfFound := clonedArray.GetProperty("self")
+	function, functionFound := clonedArray.GetProperty("fn")
+	if !childFound || namedChild != clonedChild || !selfFound || self != clonedArray || !functionFound || calls != 0 {
+		t.Fatal("snapshot lost named array graph or evaluated a property function")
+	}
+	if _, ok := function.(func()); !ok {
+		t.Fatal("snapshot discarded a named function value")
+	}
+	clonedArray.DeleteProperty("meta")
+	if value, found := array.GetProperty("meta"); !found || value != child {
+		t.Fatal("snapshot property deletion reached source")
 	}
 	if !math.Signbit(clonedChild.Get("negativeZero").(float64)) || !math.IsInf(clonedChild.Get("infinity").(float64), 1) {
 		t.Fatal("snapshot serialized live numbers")

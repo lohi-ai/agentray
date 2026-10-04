@@ -67,6 +67,9 @@ func (c *ValueCloner) clone(value reflect.Value) reflect.Value {
 		for index, child := range array.values {
 			copied.values[index] = c.Clone(child)
 		}
+		for _, property := range array.named.Entries() {
+			copied.SetProperty(property.Name, c.Clone(property.Value))
+		}
 		return reflect.ValueOf(copied)
 	}
 	switch value.Kind() {

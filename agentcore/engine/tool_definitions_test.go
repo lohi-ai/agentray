@@ -50,17 +50,17 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 					},
 				}
 			}
-			activeTools := []*engine.Tool{makeTool("original")}
-			retained := activeTools[0]
+			activeTools := engine.NewList(makeTool("original"))
+			retained := activeTools.Get(0)
 			mutate := func(at string) {
 				if phase == at+"_replace" {
-					activeTools[0] = makeTool("replacement")
+					activeTools.Set(0, makeTool("replacement"))
 				}
 				if phase == at+"_grow_mutate" {
 					for i := 0; i < 8; i++ {
 						padding := makeTool("padding")
 						padding.Name = "padding" + strconv.Itoa(i)
-						activeTools = append(activeTools, padding)
+						activeTools.Append(padding)
 					}
 				}
 				if phase == at+"_mutate" || phase == at+"_grow_mutate" {
@@ -80,7 +80,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 				assistant.Content.Blocks = append(assistant.Content.Blocks, &ai.ContentBlock{Type: "toolCall", ID: "second", Name: "echo", Arguments: json.RawMessage(`{}`)})
 			}
 			model := json.RawMessage(`{"id":"test","api":"test","provider":"test"}`)
-			config := engine.Config{Model: model, ConvertToLLM: func(m []*ai.Message) ([]*ai.Message, error) { return m, nil }, Now: func() int64 { return 1000 },
+			config := engine.Config{Model: model, ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil }, Now: func() int64 { return 1000 },
 				ToolHooks: engine.ToolHooks{Before: func(_ context.Context, hook *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
 					if hook.ToolCall.ID == "first" {
 						mutate("before")
@@ -93,7 +93,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 					activeTools = request.Context.Tools
 					return nil, nil
 				},
-				FinishTurn: func(context.Context, engine.Turn) (string, error) { return "end", nil },
+				FinishTurn: func(context.Context, *engine.Turn) (string, error) { return "end", nil },
 			}
 			stream := func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 				s := ai.NewAssistantMessageEventStream()
@@ -107,7 +107,7 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 				return nil
 			}
 			if mode == "programmatic" {
-				outcome, err := engine.RunToolCall(context.Background(), assistant.Content.Blocks[0], activeTools, assistant, &engine.Context{Messages: []*ai.Message{assistant}, Tools: activeTools}, config.ToolHooks, nil)
+				outcome, err := engine.RunToolCall(context.Background(), assistant.Content.Blocks[0], activeTools, assistant, &engine.Context{Messages: engine.NewList([]*ai.Message{assistant}...), Tools: activeTools}, config.ToolHooks, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -118,12 +118,12 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 				if strings.Contains(mode, "_set_") {
 					initialTools = nil
 				}
-				agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Tools: initialTools, Model: model}, AgentConfig: engine.AgentConfig{Config: config, StreamFn: stream}})
+				agent, err := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Tools: initialTools.Values(), Model: model}, AgentConfig: engine.AgentConfig{Config: config, StreamFn: stream}})
 				if err != nil {
 					t.Fatal(err)
 				}
 				if strings.Contains(mode, "_set_") {
-					agent.SetTools(activeTools)
+					agent.SetToolList(activeTools)
 				}
 				agent.Subscribe(&engine.Listener{Handle: func(_ context.Context, event engine.Event) error { return emit(event) }})
 				if err := agent.Prompt(context.Background(), &ai.Message{Role: "user", Content: ai.TextContent("go")}); err != nil {
@@ -131,12 +131,12 @@ func TestPiToolDefinitionReferences(t *testing.T) {
 				}
 			} else {
 				config.ToolExecution = mode
-				if _, err := engine.Run(context.Background(), []*ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{Messages: []*ai.Message{}, Tools: activeTools}, config, emit, stream); err != nil {
+				if _, err := engine.Run(context.Background(), engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("go")}}...), engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: activeTools}, config, emit, stream); err != nil {
 					t.Fatal(err)
 				}
 			}
 			sort.Slice(executed, func(i, j int) bool { return executed[i]["id"] < executed[j]["id"] })
-			actual, err := json.Marshal(map[string]any{"executed": executed, "results": results, "retained": retained.Label, "slot": activeTools[0].Label, "same": retained == activeTools[0]})
+			actual, err := json.Marshal(map[string]any{"executed": executed, "results": results, "retained": retained.Label, "slot": activeTools.Get(0).Label, "same": retained == activeTools.Get(0)})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -148,7 +148,7 @@ func TestPiArgumentReferences(t *testing.T) {
 			call := &ai.ContentBlock{Type: "toolCall", Name: "echo", ID: "first", Arguments: json.RawMessage(initial)}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockReferences(call), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}
 			if mode == "programmatic" {
-				outcome, err := engine.RunToolCall(context.Background(), call, []*engine.Tool{tool}, assistant, &engine.Context{}, hooks, func(*engine.ToolResult) error { update(); return nil })
+				outcome, err := engine.RunToolCall(context.Background(), call, engine.NewList([]*engine.Tool{tool}...), assistant, &engine.Context{}, hooks, func(*engine.ToolResult) error { update(); return nil })
 				if err != nil || outcome.IsError {
 					t.Fatalf("tool failed: %+v %v", outcome, err)
 				}
@@ -158,7 +158,7 @@ func TestPiArgumentReferences(t *testing.T) {
 					s.Push(ai.AssistantMessageEvent{Type: "done", Reason: "toolUse", Message: assistant})
 					return s, nil
 				}
-				_, err := engine.Run(context.Background(), nil, engine.Context{Messages: []*ai.Message{}, Tools: []*engine.Tool{tool}}, engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), ConvertToLLM: func(m []*ai.Message) ([]*ai.Message, error) { return m, nil }, ToolExecution: mode, ToolHooks: hooks, FinishTurn: func(context.Context, engine.Turn) (string, error) { return "end", nil }}, func(event engine.Event) error {
+				_, err := engine.Run(context.Background(), nil, engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList([]*engine.Tool{tool}...)}, engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil }, ToolExecution: mode, ToolHooks: hooks, FinishTurn: func(context.Context, *engine.Turn) (string, error) { return "end", nil }}, func(event engine.Event) error {
 					if event.Type == "tool_execution_update" {
 						update()
 					}

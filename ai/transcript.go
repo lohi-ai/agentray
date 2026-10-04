@@ -5,15 +5,22 @@ import (
 	"encoding/json"
 	"maps"
 	"strings"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // The transcript functions port packages/ai/src/utils/{text,transcript}.ts.
 // They do not mutate the supplied history. Like Pi, unchanged message content
 // and tool declarations may share storage with the input.
 
+// ContentText follows Pi's filter/map/join reads. Malformed content panics with
+// its property-read error; valid sparse arrays skip absent slots.
 func ContentText(content MessageContent, separator ...string) string {
 	if content.Text != nil {
 		return *content.Text
+	}
+	if content.Blocks == nil {
+		panic(jsonjs.PropertyReadError(!content.undefined, "content.filter"))
 	}
 	sep := "\n"
 	if len(separator) > 0 {
@@ -21,6 +28,12 @@ func ContentText(content MessageContent, separator ...string) string {
 	}
 	parts := []string{}
 	for _, block := range content.Blocks {
+		if block == nil {
+			continue
+		}
+		if block.IsNull() {
+			panic(jsonjs.PropertyReadError(true, "block.type"))
+		}
 		if block.Type == "text" {
 			parts = append(parts, block.Text)
 		}
@@ -131,13 +144,13 @@ func GetCurrentSystemMessage(messages []Message) *Message {
 	parts := []string{}
 	sections := SystemSections{}
 	var timestamp *int64
+	timestampDefined := false
 	for _, message := range messages {
 		if message.Role != "system" {
 			continue
 		}
 		if timestamp == nil {
-			value := message.Timestamp
-			timestamp = &value
+			timestamp, timestampDefined = message.replayTimestamp()
 		}
 		if text := ContentText(message.Content); text != "" {
 			parts = append(parts, text)
@@ -162,7 +175,7 @@ func GetCurrentSystemMessage(messages []Message) *Message {
 		}
 	}
 	tools := GetCurrentTools(messages)
-	if timestamp == nil && len(tools) == 0 {
+	if !timestampDefined && len(tools) == 0 {
 		return nil
 	}
 	message := &Message{Role: "system", Content: TextContent(strings.Join(parts, "\n\n"))}
@@ -176,6 +189,21 @@ func GetCurrentSystemMessage(messages []Message) *Message {
 		message.ToolsAdded = tools
 	}
 	return message
+}
+
+// Nullish assignment retries after both missing and null timestamps. Only an
+// undefined final timestamp suppresses a baseline that declares no tools.
+func (m Message) replayTimestamp() (*int64, bool) {
+	if m.Timestamp == 0 && m.encoding != nil {
+		if _, tracked := m.encoding.normalized["timestamp"]; tracked {
+			raw, present := m.encoding.original["timestamp"]
+			if !present || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				return nil, present
+			}
+		}
+	}
+	value := m.Timestamp
+	return &value, true
 }
 
 func GetCurrentSystemPrompt(messages []Message) string {

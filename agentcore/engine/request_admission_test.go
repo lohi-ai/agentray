@@ -19,11 +19,11 @@ func TestRequestAdmissionOwnsPreparationAndStream(t *testing.T) {
 			t.Error("prepared twice")
 			return nil, nil
 		},
-		TransformContext: func(context.Context, []*ai.Message) ([]*ai.Message, error) {
+		TransformContext: func(context.Context, *engine.MessageList) (*engine.MessageList, error) {
 			t.Error("transformed twice")
 			return nil, nil
 		},
-		ConvertToLLM: func([]*ai.Message) ([]*ai.Message, error) { t.Error("converted twice"); return nil, nil },
+		ConvertToLLM: func(*engine.MessageList) (*engine.MessageList, error) { t.Error("converted twice"); return nil, nil },
 		GetAPIKey:    func(string) (string, error) { t.Error("acquired key twice"); return "", nil },
 		AdmitRequest: func(ctx context.Context, request engine.Request, options map[string]any) (*engine.RequestAdmission, error) {
 			if string(request.Model) != string(initial) || request.ThinkingLevel != "off" || options["temperature"] != 0.4 || options["toolExecution"] != "parallel" {
@@ -31,7 +31,7 @@ func TestRequestAdmissionOwnsPreparationAndStream(t *testing.T) {
 			}
 			request.Model, request.ThinkingLevel = selected, "high"
 			stream := ai.NewAssistantMessageEventStreamFor(ctx)
-			message := &ai.Message{Role: "assistant", Model: "selected", Content: ai.TextContent("complete"), StopReason: "stop"}
+			message := &ai.Message{Role: "assistant", Model: "selected", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "complete"}), StopReason: "stop"}
 			stream.Push(ai.AssistantMessageEvent{Type: "done", Message: message})
 			stream.End()
 			return &engine.RequestAdmission{Request: request, Stream: stream}, nil

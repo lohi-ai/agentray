@@ -190,44 +190,44 @@ func runFixture(t *testing.T, input loopInput) []byte {
 	if input.APIKey != nil {
 		config.Options["apiKey"] = *input.APIKey
 	}
-	config.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
+	config.ConvertToLLM = func(messages *engine.MessageList) (*engine.MessageList, error) {
 		roles := []string{}
-		result := engine.MessagePointers(engine.MessageValues(messages))
-		for i, message := range messages {
+		result := engine.MessagePointers(engine.MessageValues(messages.Values()))
+		for i, message := range messages.Values() {
 			roles = append(roles, message.Role)
 			if input.ConvertCustom && message.Role == "custom" {
 				result[i].Role = "user"
 			}
 		}
 		add(&hooks, map[string]any{"hook": "convert", "roles": roles})
-		return result, nil
+		return engine.NewList(result...), nil
 	}
 	if input.TransformPrefix != nil {
-		config.TransformContext = func(_ context.Context, messages []*ai.Message) ([]*ai.Message, error) {
+		config.TransformContext = func(_ context.Context, messages *engine.MessageList) (*engine.MessageList, error) {
 			add(&hooks, map[string]any{"hook": "transform"})
-			return append([]*ai.Message{input.TransformPrefix}, messages...), nil
+			return engine.NewList(append([]*ai.Message{input.TransformPrefix}, messages.Values()...)...), nil
 		}
 	}
 	steering, follow, finish, next, request, key := 0, 0, 0, 0, 0, 0
-	config.GetSteeringMessages = func() ([]*ai.Message, error) {
+	config.GetSteeringMessages = func() (*engine.MessageList, error) {
 		add(&hooks, map[string]any{"hook": "steering"})
 		defer func() { steering++ }()
 		if steering < len(input.Steering) {
-			return input.Steering[steering], nil
+			return engine.NewList(input.Steering[steering]...), nil
 		}
 		return nil, nil
 	}
-	config.GetFollowUpMessages = func() ([]*ai.Message, error) {
+	config.GetFollowUpMessages = func() (*engine.MessageList, error) {
 		add(&hooks, map[string]any{"hook": "followUp"})
 		defer func() { follow++ }()
 		if follow < len(input.FollowUps) {
-			return input.FollowUps[follow], nil
+			return engine.NewList(input.FollowUps[follow]...), nil
 		}
 		return nil, nil
 	}
-	config.FinishTurn = func(_ context.Context, turn engine.Turn) (string, error) {
+	config.FinishTurn = func(_ context.Context, turn *engine.Turn) (string, error) {
 		ids := []string{}
-		for _, result := range turn.ToolResults {
+		for _, result := range turn.ToolResults.Values() {
 			ids = append(ids, result.ToolCallID)
 		}
 		add(&hooks, map[string]any{"hook": "finish", "stopReason": turn.Message.StopReason, "tools": ids})
@@ -237,7 +237,7 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		}
 		return "", nil
 	}
-	config.PrepareNextTurn = func(engine.Turn) (*engine.TurnUpdate, error) {
+	config.PrepareNextTurn = func(*engine.Turn) (*engine.TurnUpdate, error) {
 		add(&hooks, map[string]any{"hook": "next"})
 		defer func() { next++ }()
 		if next < len(input.NextUpdates) {
@@ -424,16 +424,16 @@ func runFixture(t *testing.T, input loopInput) []byte {
 		}
 		return nil
 	}
-	var messages []*ai.Message
+	var messages *engine.MessageList
 	var err error
-	current := engine.Context{Messages: input.Messages, Tools: tools}
+	current := engine.Context{Messages: engine.NewList(input.Messages...), Tools: engine.NewList(tools...)}
 	if input.OmitStream {
 		stream = nil
 	}
 	if input.Resume {
 		messages, err = engine.Continue(ctx, current, config, sink, stream)
 	} else {
-		messages, err = engine.Run(ctx, input.Prompts, current, config, sink, stream)
+		messages, err = engine.Run(ctx, engine.NewList(input.Prompts...), current, config, sink, stream)
 	}
 	for _, update := range late {
 		update()

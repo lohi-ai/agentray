@@ -69,9 +69,9 @@ func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRu
 	// Native tool callbacks are not JSON metadata. The no-update path must keep
 	// the exact installed argument preparer/executor (not reconstruct them from
 	// a declaration); ask-v1 in particular normalizes shorthand question args.
-	for i, tool := range source.Context.Tools {
-		cloned.Context.Tools[i].PrepareArguments = tool.PrepareArguments
-		cloned.Context.Tools[i].Execute = tool.Execute
+	for i, tool := range source.Context.Tools.Values() {
+		cloned.Context.Tools.Get(i).PrepareArguments = tool.PrepareArguments
+		cloned.Context.Tools.Get(i).Execute = tool.Execute
 	}
 	prepared.request = engine.Request{Context: cloned.Context, Model: append(json.RawMessage(nil), rung.model...), ThinkingLevel: source.ThinkingLevel}
 	updateRaw, err := s.callback(ctx, "prepareRequest", raw, nil)
@@ -94,7 +94,7 @@ func (s *PiSession) prepareNativeAttempt(ctx context.Context, rung nativeBoundRu
 	if err = check(); err != nil {
 		return prepared, err
 	}
-	messages := engine.MessageValues(prepared.request.Context.Messages)
+	messages := engine.MessageValues(prepared.request.Context.Messages.Values())
 	for _, method := range []string{"transformContext", "convertToLlm"} {
 		if !s.callbacks[method] {
 			if method == "convertToLlm" {

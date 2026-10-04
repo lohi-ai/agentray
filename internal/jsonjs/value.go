@@ -2,24 +2,59 @@ package jsonjs
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 )
 
-// MarshalValue exports JSON-shaped values without invoking user methods.
-// Object/array identity and numeric/UTF-16 semantics are shared across ports.
-func MarshalValue(value any) ([]byte, error) {
-	if !SupportedValue(value) {
-		return nil, errors.New("unsupported JSON-shaped value")
+// PropertyReadError retains the pinned runtime's diagnostic for reading a
+// property on null (present) or undefined (absent).
+func PropertyReadError(present bool, expression string) error {
+	value := "undefined"
+	if present {
+		value = "null"
 	}
-	converted, err := jsonValue(reflect.ValueOf(value), make(map[valueIdentity]bool))
+	return fmt.Errorf("%s is not an object (evaluating '%s')", value, expression)
+}
+
+// JSONMethod is an explicit own toJSON hook. Export passes the current object
+// or array as receiver and its containing property key (empty at the root).
+// Recording/cloning never invoke it. Returned errors and panics propagate.
+// Other Go function types and arbitrary serialization methods remain passive.
+type JSONMethod func(receiver any, key string) (any, error)
+
+// StringifyValue follows JSON.stringify for the supported value graph. An
+// undefined/function root, including a hook result, returns no bytes and no error.
+func StringifyValue(value any) ([]byte, error) { return StringifyProperty(value, "") }
+
+// StringifyProperty exports a value at a known property boundary. It lets typed
+// Go host serializers retain the toJSON key and omit undefined hook results.
+func StringifyProperty(value any, key string) ([]byte, error) {
+	converted, err := jsonValue(reflect.ValueOf(value), key, make(map[valueIdentity]bool))
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(converted)
+	if IsUndefined(converted) {
+		return nil, nil
+	}
+	raw, err := json.Marshal(converted)
+	if err != nil {
+		return nil, err
+	}
+	return StringifyJSON(raw)
+}
+
+// MarshalValue adapts export to Go's json.Marshaler, which requires a JSON value:
+// an undefined root becomes null. StringifyValue preserves root omission instead.
+func MarshalValue(value any) ([]byte, error) {
+	raw, err := StringifyValue(value)
+	if err == nil && raw == nil {
+		raw = []byte("null")
+	}
+	return raw, err
 }
 
 func SupportedValue(value any) bool {
@@ -61,14 +96,44 @@ type valueIdentity struct {
 }
 
 func valueReference(value reflect.Value) valueIdentity {
-	return valueIdentity{kind: value.Kind(), pointer: value.Pointer(), length: value.Len(), valueType: value.Type()}
+	identity := valueIdentity{kind: value.Kind(), pointer: value.Pointer(), valueType: value.Type()}
+	// Slice views may share a backing pointer with different lengths. Map
+	// identity must stay stable when a hook adds or deletes properties.
+	if value.Kind() == reflect.Slice {
+		identity.length = value.Len()
+	}
+	return identity
 }
 
-func jsonValue(value reflect.Value, active map[valueIdentity]bool) (any, error) {
+func jsonValue(value reflect.Value, key string, active map[valueIdentity]bool) (any, error) {
 	for value.IsValid() && value.Kind() == reflect.Interface {
 		value = value.Elem()
 	}
-	if !value.IsValid() || omittedJSONValue(value) || (value.CanInterface() && IsNull(value.Interface())) {
+	var receiver, candidate any
+	if object, ok := objectValue(value); ok && object != nil {
+		receiver, candidate = object, object.Get("toJSON")
+	} else if array, ok := referenceArray(value); ok && array != nil {
+		receiver = array
+		candidate, _ = array.GetProperty("toJSON")
+	} else if value.IsValid() && value.Kind() == reflect.Map && value.Type().Key().Kind() == reflect.String {
+		if method := value.MapIndex(reflect.ValueOf("toJSON").Convert(value.Type().Key())); method.IsValid() {
+			receiver, candidate = value.Interface(), method.Interface()
+		}
+	}
+	if method, ok := candidate.(JSONMethod); ok && method != nil {
+		replacement, err := method(receiver, key)
+		if err != nil {
+			return nil, err
+		}
+		value = reflect.ValueOf(replacement)
+		for value.IsValid() && value.Kind() == reflect.Interface {
+			value = value.Elem()
+		}
+	}
+	if omittedJSONValue(value) {
+		return Undefined, nil
+	}
+	if !value.IsValid() || (value.CanInterface() && IsNull(value.Interface())) {
 		return nil, nil
 	}
 	if array, ok := referenceArray(value); ok {
@@ -82,11 +147,13 @@ func jsonValue(value reflect.Value, active map[valueIdentity]bool) (any, error) 
 		}
 		result := make([]any, array.Len())
 		for i := range result {
-			child, err := jsonValue(reflect.ValueOf(array.Get(i)), active)
+			child, err := jsonValue(reflect.ValueOf(array.Get(i)), strconv.Itoa(i), active)
 			if err != nil {
 				return nil, err
 			}
-			result[i] = child
+			if !IsUndefined(child) {
+				result[i] = child
+			}
 		}
 		return result, nil
 	}
@@ -99,7 +166,16 @@ func jsonValue(value reflect.Value, active map[valueIdentity]bool) (any, error) 
 			active[identity] = true
 			defer delete(active, identity)
 		}
-		return jsonProperties(object.Entries(), active)
+		keys := []string{}
+		for _, property := range object.Entries() {
+			keys = append(keys, property.Name)
+		}
+		return jsonProperties(keys, func(key string) any {
+			if value, found := object.Lookup(key); found {
+				return value
+			}
+			return Undefined
+		}, active)
 	}
 	if value.Kind() == reflect.Map || value.Kind() == reflect.Slice {
 		identity := valueReference(value)
@@ -117,25 +193,57 @@ func jsonValue(value reflect.Value, active map[valueIdentity]bool) (any, error) 
 	case reflect.Slice, reflect.Array:
 		array := make([]any, value.Len())
 		for i := range array {
-			child, err := jsonValue(value.Index(i), active)
+			child, err := jsonValue(value.Index(i), strconv.Itoa(i), active)
 			if err != nil {
 				return nil, err
 			}
-			array[i] = child
+			if !IsUndefined(child) {
+				array[i] = child
+			}
 		}
 		return array, nil
 	case reflect.Map:
+		if value.Type().Key().Kind() != reflect.String {
+			return nil, &json.UnsupportedTypeError{Type: value.Type()}
+		}
 		// Build escaped keys directly: encoding/json would replace WTF-8
 		// surrogate bytes and could collapse distinct JavaScript properties.
 		// Native maps have no insertion order; keep deterministic key order,
 		// with JavaScript's numeric index keys first.
 		keys := value.MapKeys()
 		slices.SortFunc(keys, func(a, b reflect.Value) int { return strings.Compare(a.String(), b.String()) })
-		properties := make([]Property, 0, len(keys))
+		names := make([]string, 0, len(keys))
 		for _, key := range keys {
-			properties = append(properties, Property{Name: key.String(), Value: value.MapIndex(key).Interface()})
+			names = append(names, key.String())
 		}
-		return jsonProperties(properties, active)
+		// Sort numeric keys before visiting values, not just before writing bytes.
+		slices.SortStableFunc(names, func(a, b string) int {
+			ai, ax := ArrayIndex(a)
+			bi, bx := ArrayIndex(b)
+			if ax && bx {
+				if ai < bi {
+					return -1
+				}
+				if ai > bi {
+					return 1
+				}
+				return 0
+			}
+			if ax {
+				return -1
+			}
+			if bx {
+				return 1
+			}
+			return 0
+		})
+		return jsonProperties(names, func(key string) any {
+			child := value.MapIndex(reflect.ValueOf(key).Convert(value.Type().Key()))
+			if child.IsValid() {
+				return child.Interface()
+			}
+			return Undefined
+		}, active)
 	}
 	var number float64
 	switch value.Kind() {
@@ -157,22 +265,21 @@ func jsonValue(value reflect.Value, active map[valueIdentity]bool) (any, error) 
 	return number, nil
 }
 
-func jsonProperties(properties []Property, active map[valueIdentity]bool) (any, error) {
+func jsonProperties(keys []string, read func(string) any, active map[valueIdentity]bool) (any, error) {
 	var object ObjectFields
-	for _, property := range properties {
-		entry := reflect.ValueOf(property.Value)
-		if omittedJSONValue(entry) {
-			continue
-		}
-		child, err := jsonValue(entry, active)
+	for _, key := range keys {
+		child, err := jsonValue(reflect.ValueOf(read(key)), key, active)
 		if err != nil {
 			return nil, err
+		}
+		if IsUndefined(child) {
+			continue
 		}
 		raw, err := json.Marshal(child)
 		if err != nil {
 			return nil, err
 		}
-		object.Set(QuoteString(property.Name), raw)
+		object.Set(QuoteString(key), raw)
 	}
 	return json.RawMessage(object.Marshal()), nil
 }
@@ -200,6 +307,8 @@ func supportedValue(value reflect.Value, seen map[valueIdentity]bool) bool {
 			return true
 		}
 		seen[identity] = true
+		// Array export/spread visits indexed entries only. Named properties can
+		// retain any opaque value without affecting JSON payload admission.
 		for _, child := range array.values {
 			if !supportedValue(reflect.ValueOf(child), seen) {
 				return false

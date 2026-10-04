@@ -66,7 +66,7 @@ func TestPiArgumentValues(t *testing.T) {
 				},
 			}
 			call := &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(tc.Input.Raw)}
-			outcome, err := engine.RunToolCall(context.Background(), call, []*engine.Tool{tool}, &ai.Message{}, &engine.Context{}, engine.ToolHooks{
+			outcome, err := engine.RunToolCall(context.Background(), call, engine.NewList([]*engine.Tool{tool}...), &ai.Message{}, &engine.Context{}, engine.ToolHooks{
 				Before: func(_ context.Context, c *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
 					before = inspect(c.Args)
 					return nil, nil

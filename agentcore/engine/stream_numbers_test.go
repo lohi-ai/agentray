@@ -101,7 +101,7 @@ func TestPiStreamNumbers(t *testing.T) {
 				}
 				events = append(events, value)
 				if event.Type == "agent_end" {
-					for _, m := range event.Messages {
+					for _, m := range event.Messages.Values() {
 						if m.Role == "assistant" {
 							completed = append(completed, describe(m))
 						}
@@ -112,7 +112,7 @@ func TestPiStreamNumbers(t *testing.T) {
 			model := json.RawMessage(`{"id":"test","api":"test","provider":"test"}`)
 			prompt := &ai.Message{Role: "user", Content: ai.TextContent("go")}
 			if tc.Input.Mode == "loop" {
-				_, err = engine.Run(context.Background(), []*ai.Message{prompt}, engine.Context{}, engine.Config{Model: model, ConvertToLLM: func(m []*ai.Message) ([]*ai.Message, error) { return m, nil }}, emit, stream)
+				_, err = engine.Run(context.Background(), engine.NewList([]*ai.Message{prompt}...), engine.Context{}, engine.Config{Model: model, ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil }}, emit, stream)
 			} else {
 				agent, createErr := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: model}, AgentConfig: engine.AgentConfig{StreamFn: stream}})
 				if createErr != nil {

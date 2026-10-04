@@ -11,6 +11,49 @@ import (
 	"github.com/lohi-ai/agentray/ai"
 )
 
+func TestNativeTurnCallbacksPreserveNullFields(t *testing.T) {
+	for _, name := range []string{"finishTurn", "prepareNextTurnWithContext"} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			agent := &NativeAgent{config: NativeAgentConfig{Callback: func(_ context.Context, method string, raw json.RawMessage, _ func(json.RawMessage) error) (json.RawMessage, error) {
+				calls++
+				if method != name {
+					t.Errorf("callback %q, want %q", method, name)
+				}
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if len(fields) != 4 {
+					t.Fatalf("unexpected turn fields: %s", raw)
+				}
+				for _, field := range []string{"message", "toolResults", "context", "newMessages"} {
+					if string(fields[field]) != "null" {
+						t.Errorf("%s = %s, want null", field, fields[field])
+					}
+				}
+				return json.RawMessage(`null`), nil
+			}}}
+			options, err := agent.bindOptions(json.RawMessage(fmt.Sprintf(`{"callbacks":[%q]}`, name)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn := &engine.Turn{}
+			if name == "finishTurn" {
+				_, err = options.FinishTurn(context.Background(), turn)
+			} else {
+				_, err = options.PrepareNextTurnWithContext(context.Background(), turn)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("callback invoked %d times, want once", calls)
+			}
+		})
+	}
+}
+
 func TestNativeToolBindingRetainsNullResultsAndUpdates(t *testing.T) {
 	for _, resultJSON := range []string{`null`, `{"content":[{"type":"text","text":"done"}],"details":{}}`} {
 		t.Run(resultJSON, func(t *testing.T) {
@@ -30,7 +73,7 @@ func TestNativeToolBindingRetainsNullResultsAndUpdates(t *testing.T) {
 				t.Fatal(err)
 			}
 			var updates []*engine.ToolResult
-			outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}, tools, nil, &engine.Context{Tools: tools}, engine.ToolHooks{}, func(partial *engine.ToolResult) error {
+			outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}, engine.NewList(tools...), nil, &engine.Context{Tools: engine.NewList(tools...)}, engine.ToolHooks{}, func(partial *engine.ToolResult) error {
 				updates = append(updates, partial)
 				return nil
 			})
@@ -76,7 +119,7 @@ func TestNativeToolBindingExportsLiveArguments(t *testing.T) {
 			}
 			original := json.RawMessage(`{"items":[{"value":"original"}]}`)
 			call := &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: original}
-			outcome, err := engine.RunToolCall(context.Background(), call, tools, nil, &engine.Context{Tools: tools}, engine.ToolHooks{
+			outcome, err := engine.RunToolCall(context.Background(), call, engine.NewList(tools...), nil, &engine.Context{Tools: engine.NewList(tools...)}, engine.ToolHooks{
 				Before: func(_ context.Context, call *engine.BeforeToolCall) (*engine.BeforeToolResult, error) {
 					args := call.Args.(*engine.Object)
 					items := args.Get("items").(*engine.Array)

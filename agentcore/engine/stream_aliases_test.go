@@ -56,7 +56,7 @@ func TestPiStreamAliases(t *testing.T) {
 			}
 			events := []json.RawMessage{}
 			aliases := []map[string]any{}
-			var messages []*ai.Message
+			var messages *engine.MessageList
 			sink := func(event engine.Event) error {
 				raw, err := json.Marshal(event)
 				if err != nil {
@@ -90,10 +90,10 @@ func TestPiStreamAliases(t *testing.T) {
 				}
 				return nil
 			}
-			config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}
+			config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }}
 			prompt := &ai.Message{Role: "user", Content: ai.TextContent("go"), Timestamp: 0}
 			if tc.Input.Mode == "loop" {
-				messages, err = engine.Run(context.Background(), []*ai.Message{prompt}, engine.Context{Messages: []*ai.Message{}, Tools: []*engine.Tool{}}, config, sink, stream)
+				messages, err = engine.Run(context.Background(), engine.NewList([]*ai.Message{prompt}...), engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList([]*engine.Tool{}...)}, config, sink, stream)
 			} else {
 				agent, createErr := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: config.Model}, AgentConfig: engine.AgentConfig{Config: config, StreamFn: stream}})
 				if createErr != nil {

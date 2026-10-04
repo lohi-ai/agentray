@@ -122,7 +122,7 @@ func TestPiResultValues(t *testing.T) {
 			call := &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}
 			assistant := &ai.Message{Role: "assistant", Content: ai.BlockReferences(call), API: "test", Provider: "test", Model: "test", Usage: &ai.Usage{}, StopReason: "toolUse", Timestamp: 1}
 			if mode == "programmatic" {
-				outcome, err := engine.RunToolCall(context.Background(), call, []*engine.Tool{tool}, assistant, &engine.Context{}, engine.ToolHooks{After: after}, func(value *engine.ToolResult) error { update(value); return nil })
+				outcome, err := engine.RunToolCall(context.Background(), call, engine.NewList([]*engine.Tool{tool}...), assistant, &engine.Context{}, engine.ToolHooks{After: after}, func(value *engine.ToolResult) error { update(value); return nil })
 				if err != nil || outcome.IsError {
 					t.Fatalf("failed: %+v %v", outcome, err)
 				}
@@ -133,12 +133,12 @@ func TestPiResultValues(t *testing.T) {
 					s.Push(ai.AssistantMessageEvent{Type: "done", Reason: "toolUse", Message: assistant})
 					return s, nil
 				}
-				result, err := engine.Run(context.Background(), nil, engine.Context{Messages: []*ai.Message{}, Tools: []*engine.Tool{tool}}, engine.Config{
+				result, err := engine.Run(context.Background(), nil, engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList([]*engine.Tool{tool}...)}, engine.Config{
 					Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`),
 					Now:   func() int64 { return 1000 }, ToolExecution: mode,
-					ConvertToLLM: func(m []*ai.Message) ([]*ai.Message, error) { return m, nil },
+					ConvertToLLM: func(m *engine.MessageList) (*engine.MessageList, error) { return m, nil },
 					ToolHooks:    engine.ToolHooks{After: after},
-					FinishTurn:   func(context.Context, engine.Turn) (string, error) { return "end", nil },
+					FinishTurn:   func(context.Context, *engine.Turn) (string, error) { return "end", nil },
 				}, func(event engine.Event) error {
 					switch event.Type {
 					case "tool_execution_update":
@@ -162,7 +162,7 @@ func TestPiResultValues(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				for _, message := range result {
+				for _, message := range result.Values() {
 					if message.Role == "toolResult" {
 						messages = append(messages, message)
 					}
@@ -234,7 +234,7 @@ func TestPiResultOptionalValues(t *testing.T) {
 			tool := &engine.Tool{Tool: ai.Tool{Name: "echo", Parameters: json.RawMessage(`{"type":"object"}`)}, Execute: func(context.Context, string, any, func(*engine.ToolResult)) (*engine.ToolResult, error) {
 				return &original, nil
 			}}
-			outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}, []*engine.Tool{tool}, &ai.Message{}, &engine.Context{}, engine.ToolHooks{
+			outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", ID: "call", Name: "echo", Arguments: json.RawMessage(`{}`)}, engine.NewList([]*engine.Tool{tool}...), &ai.Message{}, &engine.Context{}, engine.ToolHooks{
 				After: func(_ context.Context, c engine.AfterToolCall) (*engine.AfterToolResult, error) {
 					switch tc.Input.Phase {
 					case "empty_override":
@@ -319,7 +319,7 @@ func TestToolResultLiveGraphDoesNotSerializeDuringExecution(t *testing.T) {
 		return original, nil
 	}}
 	updates := 0
-	outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", Name: "echo", Arguments: json.RawMessage(`{}`)}, []*engine.Tool{tool}, nil, &engine.Context{}, engine.ToolHooks{
+	outcome, err := engine.RunToolCall(context.Background(), &ai.ContentBlock{Type: "toolCall", Name: "echo", Arguments: json.RawMessage(`{}`)}, engine.NewList([]*engine.Tool{tool}...), nil, &engine.Context{}, engine.ToolHooks{
 		After: func(_ context.Context, call engine.AfterToolCall) (*engine.AfterToolResult, error) {
 			if call.Result != original || call.Result.Details != details {
 				t.Fatal("after hook lost live graph")

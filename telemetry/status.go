@@ -3,8 +3,9 @@ package telemetry
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/lohi-ai/agentray/internal/jsonjs"
 	"strconv"
+
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 // The field descriptors are immutable after publication, so detached error
@@ -71,7 +72,11 @@ func (e *ErrorDetails) UnmarshalJSON(data []byte) error {
 }
 
 func (e ErrorDetails) MarshalJSON() ([]byte, error) {
-	return NewObject(Property{Name: "name", Value: e.NameValue()}, Property{Name: "message", Value: e.MessageValue()}).MarshalJSON()
+	return e.jsonValue().MarshalJSON()
+}
+
+func (e ErrorDetails) jsonValue() *Object {
+	return NewObject(Property{Name: "name", Value: e.NameValue()}, Property{Name: "message", Value: e.MessageValue()})
 }
 
 // UnmarshalJSON projects serialized status inputs using Pi's property reads.
@@ -95,11 +100,18 @@ func (s *SpanStatus) UnmarshalJSON(data []byte) error {
 }
 
 func (s SpanStatus) MarshalJSON() ([]byte, error) {
+	return jsonjs.MarshalValue(s.jsonValue())
+}
+
+func (s SpanStatus) jsonValue() any {
 	if s.nullInput && s.Status == "" && s.Error == nil {
-		return []byte("null"), nil
+		return nil
 	}
-	type plain SpanStatus
-	return json.Marshal(plain(s))
+	value := NewObject(Property{Name: "status", Value: s.Status})
+	if s.Error != nil {
+		value.Set("error", s.Error.jsonValue())
+	}
+	return value
 }
 
 func statusObject(data []byte) (map[string]json.RawMessage, bool, error) {

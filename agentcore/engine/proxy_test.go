@@ -411,7 +411,7 @@ func TestProxyConcurrentEngineSnapshots(t *testing.T) {
 	defer cancel()
 	var mu sync.Mutex
 	var snapshots []*ai.Message
-	messages, err := engine.Run(ctx, []*ai.Message{{Role: "user", Content: ai.TextContent("test")}}, engine.Context{}, engine.Config{ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }, Model: json.RawMessage(`{"id":"m","provider":"p","api":"a"}`)}, func(e engine.Event) error {
+	messages, err := engine.Run(ctx, engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("test")}}...), engine.Context{}, engine.Config{ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }, Model: json.RawMessage(`{"id":"m","provider":"p","api":"a"}`)}, func(e engine.Event) error {
 		if e.Message != nil {
 			mu.Lock()
 			snapshots = append(snapshots, e.Message)
@@ -424,7 +424,7 @@ func TestProxyConcurrentEngineSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	last := messages[len(messages)-1]
+	last := messages.Get(messages.Len() - 1)
 	if last.Content.Blocks[0].Text != strings.Repeat("x", 100) {
 		t.Fatalf("lost deltas: %+v", last)
 	}

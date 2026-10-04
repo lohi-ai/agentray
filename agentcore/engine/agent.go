@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/lohi-ai/agentray/ai"
+	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
 type InitialState struct {
@@ -27,7 +28,7 @@ type AgentConfig struct {
 	Config
 	StreamFn                   StreamFn
 	PrepareNextTurn            func(context.Context) (*TurnUpdate, error)
-	PrepareNextTurnWithContext func(context.Context, Turn) (*TurnUpdate, error)
+	PrepareNextTurnWithContext func(context.Context, *Turn) (*TurnUpdate, error)
 	SteeringMode               string
 	FollowUpMode               string
 	SessionID                  *string
@@ -58,15 +59,36 @@ type State struct {
 // SystemPrompt replays the current collection lazily, like Pi's state getter.
 // Holding State retains that collection even when the agent later replaces it.
 func (s State) SystemPrompt() string {
-	return ai.GetCurrentSystemPrompt(MessageValues(s.Messages.Values()))
+	prompt, err := s.systemPrompt()
+	if err != nil {
+		panic(err)
+	}
+	return prompt
+}
+
+func (s State) systemPrompt() (string, error) {
+	messages, err := replayMessageValues(s.Messages)
+	if err != nil {
+		return "", err
+	}
+	var prompt string
+	err = catchFailure(func() error {
+		prompt = ai.GetCurrentSystemPrompt(messages)
+		return nil
+	})
+	return prompt, err
 }
 
 func (s State) MarshalJSON() ([]byte, error) {
+	prompt, err := s.systemPrompt()
+	if err != nil {
+		return nil, err
+	}
 	type plain State
 	return json.Marshal(struct {
 		SystemPrompt string `json:"systemPrompt"`
 		plain
-	}{SystemPrompt: s.SystemPrompt(), plain: plain(s)})
+	}{SystemPrompt: prompt, plain: plain(s)})
 }
 
 // Listener has identity independently of its Go callback. Subscribing the same
@@ -76,10 +98,11 @@ type Listener struct {
 }
 
 type activeRun struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	done       chan struct{}
-	stopParent func() bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	done            chan struct{}
+	stopParent      func() bool
+	snapshotFailure error
 }
 
 type messageQueue struct {
@@ -170,12 +193,16 @@ func normalizeAgentConfig(options AgentConfig) (AgentConfig, error) {
 	return options, nil
 }
 
-func defaultConvertToLLM(messages []*ai.Message) ([]*ai.Message, error) {
-	result := []*ai.Message{}
-	for _, message := range messages {
+func defaultConvertToLLM(messages *MessageList) (*MessageList, error) {
+	result := NewList[*ai.Message]()
+	// Array.filter skips holes and creates a new dense collection. Snapshot
+	// indexed membership while retaining the message objects.
+	input := messages.Clone()
+	for _, index := range input.Keys() {
+		message := input.Get(index)
 		switch message.Role {
 		case "system", "user", "assistant", "toolResult":
-			result = append(result, message)
+			result.Append(message)
 		}
 	}
 	return result, nil
@@ -191,11 +218,6 @@ func (a *Agent) Configure(options AgentConfig) error {
 	a.options = configured
 	a.steering.mode, a.followUp.mode = configured.SteeringMode, configured.FollowUpMode
 	return nil
-}
-
-// Caller holds mu. Replay helpers read a shallow projection of live entries.
-func (a *Agent) messageSnapshot() []ai.Message {
-	return MessageValues(a.messages.Values())
 }
 
 func (a *Agent) State() State {
@@ -340,7 +362,17 @@ func (a *Agent) Reset() error {
 	if a.active != nil {
 		return errors.New("Agent is already processing. Wait for completion before resetting.")
 	}
-	baseline := ai.GetCurrentSystemMessage(a.messageSnapshot())
+	messages, err := replayMessageValues(a.messages)
+	if err != nil {
+		return err
+	}
+	var baseline *ai.Message
+	if err := catchFailure(func() error {
+		baseline = ai.GetCurrentSystemMessage(messages)
+		return nil
+	}); err != nil {
+		return err
+	}
 	a.messages = NewList[*ai.Message]()
 	if baseline != nil {
 		a.messages.Append(baseline)
@@ -353,12 +385,14 @@ func (a *Agent) Reset() error {
 
 const busyPrompt = "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
 
-// Prompt accepts text, message values or message references (single or slices).
-// Reference inputs keep their identity through callbacks and history.
-// Images accompany text input.
+// Prompt accepts text, message values/references, native slices or a MessageList.
+// A MessageList preserves live prompt membership during initial event delivery;
+// native slice inputs copy membership. Both retain their message objects.
+// Images accompany text input. Their list membership is copied, while the
+// supplied block objects remain shared with events, history and requests.
 // It blocks until the run and its listeners settle. Admission errors are
 // returned directly; run failures become Pi's assistant failure lifecycle.
-func (a *Agent) Prompt(ctx context.Context, input any, images ...ai.ContentBlock) error {
+func (a *Agent) Prompt(ctx context.Context, input any, images ...*ai.ContentBlock) error {
 	a.mu.Lock()
 	if a.active != nil {
 		a.mu.Unlock()
@@ -366,18 +400,20 @@ func (a *Agent) Prompt(ctx context.Context, input any, images ...ai.ContentBlock
 	}
 	now := a.options.Config.now
 	a.mu.Unlock()
-	var messages []*ai.Message
+	var messages *MessageList
 	switch input := input.(type) {
 	case string:
-		content := append([]ai.ContentBlock{{Type: "text", Text: input}}, images...)
-		messages = []*ai.Message{{Role: "user", Content: ai.BlockContent(content...), Timestamp: now()}}
+		content := append([]*ai.ContentBlock{{Type: "text", Text: input}}, images...)
+		messages = NewList(&ai.Message{Role: "user", Content: ai.BlockReferences(content...), Timestamp: now()})
 	case ai.Message:
-		messages = []*ai.Message{&input}
+		messages = NewList(&input)
 	case *ai.Message:
-		messages = []*ai.Message{input}
+		messages = NewList(input)
 	case []ai.Message:
-		messages = MessagePointers(input)
+		messages = NewList(MessagePointers(input)...)
 	case []*ai.Message:
+		messages = NewList(input...)
+	case *MessageList:
 		messages = input
 	default:
 		return fmt.Errorf("engine: unsupported prompt input %T", input)
@@ -398,9 +434,21 @@ func (a *Agent) Continue(ctx context.Context) error {
 		a.mu.Unlock()
 		return errors.New("Agent is already processing. Wait for completion before continuing.")
 	}
-	messages := a.messages.Values()
+	messages := a.messages.indexedSnapshot()
+	lastMessage := messages.Get(messages.Len() - 1)
+	if lastMessage == nil {
+		a.mu.Unlock()
+		return errors.New("No messages to continue from")
+	}
 	hasNonSystem := false
-	for _, message := range messages {
+	// Array.every skips holes, but visits an explicit null. It also stops on
+	// the first non-system message, before reading any later malformed slots.
+	for _, index := range messages.Keys() {
+		message := messages.Get(index)
+		if message == nil {
+			a.mu.Unlock()
+			return jsonjs.PropertyReadError(true, "message.role")
+		}
 		if message.Role != "system" {
 			hasNonSystem = true
 			break
@@ -412,7 +460,7 @@ func (a *Agent) Continue(ctx context.Context) error {
 	}
 	var prompts []*ai.Message
 	skipSteering, continuation := false, true
-	if messages[len(messages)-1].Role == "assistant" {
+	if lastMessage.Role == "assistant" {
 		prompts = a.steering.drain()
 		if len(prompts) > 0 {
 			skipSteering = true
@@ -427,7 +475,7 @@ func (a *Agent) Continue(ctx context.Context) error {
 	}
 	active, current, config, stream := a.beginRun(ctx, skipSteering)
 	a.mu.Unlock()
-	return a.run(active, current, config, stream, prompts, continuation)
+	return a.run(active, current, config, stream, NewList(prompts...), continuation)
 }
 
 // beginRun is called with mu held. No user callbacks run during admission.
@@ -440,7 +488,11 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 	active := &activeRun{ctx: ctx, cancel: cancel, done: make(chan struct{}), stopParent: stopParent}
 	a.active = active
 	a.state.IsStreaming, a.state.StreamingMessage, a.state.ErrorMessage = true, nil, nil
-	current := Context{Messages: a.messages.Values(), Tools: a.state.Tools.Values()}
+	var current Context
+	active.snapshotFailure = catchFailure(func() error {
+		current = Context{Messages: a.messages.Clone(), Tools: a.state.Tools.Clone()}
+		return nil
+	})
 	config := a.options.Config
 	config.Model = a.state.Model
 	config.Reasoning = a.state.ThinkingLevel
@@ -463,7 +515,7 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 	}
 	config.PrepareNextTurn = nil
 	if a.options.PrepareNextTurnWithContext != nil || a.options.PrepareNextTurn != nil {
-		config.PrepareNextTurn = func(turn Turn) (*TurnUpdate, error) {
+		config.PrepareNextTurn = func(turn *Turn) (*TurnUpdate, error) {
 			a.mu.Lock()
 			withContext, legacy := a.options.PrepareNextTurnWithContext, a.options.PrepareNextTurn
 			a.mu.Unlock()
@@ -476,20 +528,24 @@ func (a *Agent) beginRun(parent context.Context, skipSteering bool) (*activeRun,
 			return nil, nil
 		}
 	}
-	config.GetSteeringMessages = func() ([]*ai.Message, error) {
+	config.GetSteeringMessages = func() (*MessageList, error) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if skipSteering {
 			skipSteering = false
-			return []*ai.Message{}, nil
+			return NewList[*ai.Message](), nil
 		}
-		return a.steering.drain(), nil
+		return NewList(a.steering.drain()...), nil
 	}
-	config.GetFollowUpMessages = func() ([]*ai.Message, error) { a.mu.Lock(); defer a.mu.Unlock(); return a.followUp.drain(), nil }
+	config.GetFollowUpMessages = func() (*MessageList, error) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return NewList(a.followUp.drain()...), nil
+	}
 	return active, current, config, a.options.StreamFn
 }
 
-func (a *Agent) run(active *activeRun, current Context, config Config, stream StreamFn, prompts []*ai.Message, continuation bool) (err error) {
+func (a *Agent) run(active *activeRun, current Context, config Config, stream StreamFn, prompts *MessageList, continuation bool) (err error) {
 	defer func() {
 		active.stopParent()
 		a.mu.Lock()
@@ -502,7 +558,10 @@ func (a *Agent) run(active *activeRun, current Context, config Config, stream St
 	// Pi does not abort a successfully settled signal. Detach the parent
 	// registration at settlement without cancelling a signal retained by a
 	// subscriber. This also avoids retaining every run in a long-lived parent.
-	err = executeAgentRun(func() error {
+	err = catchFailure(func() error {
+		if active.snapshotFailure != nil {
+			return active.snapshotFailure
+		}
 		if continuation {
 			_, err := Continue(active.ctx, current, config, a.processEvent, stream)
 			return err
@@ -516,7 +575,7 @@ func (a *Agent) run(active *activeRun, current Context, config Config, stream St
 	return a.handleFailure(active, err, config.now())
 }
 
-func executeAgentRun(fn func() error) (err error) {
+func catchFailure(fn func() error) (err error) {
 	defer func() {
 		if value := recover(); value != nil {
 			err = failureError(value)
@@ -545,13 +604,13 @@ func (a *Agent) handleFailure(active *activeRun, failure error, timestamp int64)
 	text := failure.Error()
 	message.ErrorMessage = &text
 	for _, event := range []Event{{Type: "message_start", Message: message}, {Type: "message_end", Message: message},
-		{Type: "turn_end", Message: message, ToolResults: []*ai.Message{}}} {
-		if err := executeAgentRun(func() error { return a.processEvent(event) }); err != nil {
+		{Type: "turn_end", Message: message, ToolResults: NewList[*ai.Message]()}} {
+		if err := catchFailure(func() error { return a.processEvent(event) }); err != nil {
 			return err
 		}
 	}
-	return executeAgentRun(func() error {
-		return a.processEvent(Event{Type: "agent_end", Messages: []*ai.Message{message}})
+	return catchFailure(func() error {
+		return a.processEvent(Event{Type: "agent_end", Messages: NewList(message)})
 	})
 }
 

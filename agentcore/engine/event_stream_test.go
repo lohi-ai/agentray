@@ -46,17 +46,17 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 			defer cancel()
 			events := []engine.Event{}
 			requests := []map[string]any{}
-			config := engine.Config{Model: fixture.Model, Now: func() int64 { return fixture.Now }, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) {
-				copy := engine.MessagePointers(engine.MessageValues(messages))
+			config := engine.Config{Model: fixture.Model, Now: func() int64 { return fixture.Now }, ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) {
+				copy := engine.MessagePointers(engine.MessageValues(messages.Values()))
 				for i := range copy {
 					if copy[i].Role == "custom" {
 						copy[i].Role = "user"
 					}
 				}
-				return copy, nil
+				return engine.NewList(copy...), nil
 			}}
 			if tc.Input.TransformFailure != "" {
-				config.TransformContext = func(context.Context, []*ai.Message) ([]*ai.Message, error) {
+				config.TransformContext = func(context.Context, *engine.MessageList) (*engine.MessageList, error) {
 					return nil, errors.New(tc.Input.TransformFailure)
 				}
 			}
@@ -114,16 +114,16 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 			var stream *engine.AgentEventStream
 			var syncError, producerError *string
 			if tc.Input.Resume {
-				stream, err = engine.AgentLoopContinue(ctx, engine.Context{Messages: messages, Tools: tools}, config, provider)
+				stream, err = engine.AgentLoopContinue(ctx, engine.Context{Messages: engine.NewList(messages...), Tools: engine.NewList(tools...)}, config, provider)
 			} else {
-				stream = engine.AgentLoop(ctx, []*ai.Message{&user}, engine.Context{Tools: tools}, config, provider)
+				stream = engine.AgentLoop(ctx, engine.NewList([]*ai.Message{&user}...), engine.Context{Tools: engine.NewList(tools...)}, config, provider)
 				err = nil
 			}
 			if err != nil {
 				failure := err.Error()
 				syncError = &failure
 			}
-			var result []*ai.Message
+			var result *engine.MessageList
 			resultPending, queuePending := false, false
 			if stream != nil {
 				// Pi queues the first event synchronously. A cancelled reader must still
@@ -165,7 +165,7 @@ func TestPiPublicLoopStreamOracle(t *testing.T) {
 					_, err := stream.Result(reader)
 					stop()
 					resultPending = errors.Is(err, context.DeadlineExceeded)
-					stream.End([]*ai.Message{})
+					stream.End(engine.NewList[*ai.Message]())
 				}
 			}
 			actual, err := json.Marshal(map[string]any{"events": events, "requests": requests, "result": result, "syncError": syncError, "producerError": producerError, "resultPending": resultPending, "queuePending": queuePending})
@@ -189,8 +189,8 @@ func TestAgentLoopStreamDoesNotWaitForReaders(t *testing.T) {
 	release := make(chan struct{})
 	releaseProvider := sync.OnceFunc(func() { close(release) })
 	defer releaseProvider()
-	config := engine.Config{Model: json.RawMessage(`{"id":"test"}`), ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}
-	stream := engine.AgentLoop(ctx, []*ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{}, config, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+	config := engine.Config{Model: json.RawMessage(`{"id":"test"}`), ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }}
+	stream := engine.AgentLoop(ctx, engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("go")}}...), engine.Context{}, config, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 		close(providerStarted)
 		<-release
 		response := ai.NewAssistantMessageEventStream()
@@ -211,7 +211,7 @@ func TestAgentLoopStreamDoesNotWaitForReaders(t *testing.T) {
 	}
 	releaseProvider()
 	result, err := stream.Result(ctx)
-	if err != nil || len(result) != 2 {
+	if err != nil || result.Len() != 2 {
 		t.Fatalf("result without draining: %v %v", result, err)
 	}
 	if err := stream.Wait(ctx); err != nil {
@@ -227,7 +227,7 @@ func TestAgentLoopStreamDoesNotWaitForReaders(t *testing.T) {
 			break
 		}
 		count++
-		if event.Type == "agent_end" && len(event.Messages) != len(result) {
+		if event.Type == "agent_end" && event.Messages.Len() != result.Len() {
 			t.Fatal("terminal result differs")
 		}
 	}
@@ -240,7 +240,7 @@ func TestAgentLoopStreamReportsPanickingProducerWithoutInventingEnd(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	original := errors.New("hook panic")
-	stream := engine.AgentLoop(ctx, nil, engine.Context{}, engine.Config{GetSteeringMessages: func() ([]*ai.Message, error) { panic(original) }}, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+	stream := engine.AgentLoop(ctx, nil, engine.Context{}, engine.Config{GetSteeringMessages: func() (*engine.MessageList, error) { panic(original) }}, func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
 		t.Error("unexpected provider")
 		return nil, nil
 	})

@@ -179,7 +179,7 @@ func (a *NativeAgent) run(ctx context.Context, continuation bool, input json.Raw
 			if continuation {
 				err = a.agent.Continue(runCtx)
 			} else {
-				err = a.agent.Prompt(runCtx, prompt, images...)
+				err = a.agent.Prompt(runCtx, prompt, ai.BlockContent(images...).Blocks...)
 			}
 			if state := a.agent.State(); state.ErrorMessage != nil && *state.ErrorMessage != "" {
 				span.SetStatus(telemetry.SpanStatus{Status: "error"})

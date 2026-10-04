@@ -10,7 +10,8 @@
     "Complete Pi model/options/provider contracts, model collections, auth and catalog support.",
     "Port all API implementations and route Go callers through them.",
     "Port remaining images/classifiers, OAuth, transport/session, utilities and CLI/build equivalents where applicable.",
-    "Run provider-level differential request/event/error fixtures and audit every source module against current upstream."
+    "Run provider-level differential request/event/error fixtures and audit every source module against current upstream.",
+    "Before marking the port complete, remove TypeScript reference sources and fixture generators, the development worker/bridge, and port-only Bun dependencies/configuration. Retain Go code/tests, verified JSON fixtures and provenance/license notices; verify builds and tests without the removed tooling."
   ],
   "modules": [
     {

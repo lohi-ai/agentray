@@ -98,7 +98,7 @@ func TestNativeRequestPreparationMatchesEngine(t *testing.T) {
 			if strings.Contains(string(piRequestJSON(nativeContext(request.request.Context))), "transformContext") || !strings.Contains(string(piRequestJSON(nativeContext(request.request.Context))), "9007199254740993") {
 				t.Fatal("provider transform changed prepared native context")
 			}
-			request.request.Context.Messages[0].Content = ai.TextContent("mutated")
+			request.request.Context.Messages.Get(0).Content = ai.TextContent("mutated")
 			stateAfter, err := session.State(ctx)
 			if err != nil || !samePiJSON(stateBefore, stateAfter) || !samePiJSON(before, piRequestJSON(nativeContext(source.Context))) {
 				t.Fatal("candidate preparation mutated source or persistent agent state", err)
@@ -134,7 +134,7 @@ func TestNativeRequestPreparationUsesFreshCandidateContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	source := engine.Request{Context: &engine.Context{Messages: []*ai.Message{{Role: "user", Content: ai.TextContent("original")}}}, Model: ladder.rungs[0].model, ThinkingLevel: "high"}
+	source := engine.Request{Context: &engine.Context{Messages: engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("original")}}...)}, Model: ladder.rungs[0].model, ThinkingLevel: "high"}
 	for _, index := range []int{0, 1, 1} {
 		ctx, err := ladder.attemptContext(session.ctx, index, 0)
 		if err != nil {
@@ -155,7 +155,7 @@ func TestNativeRequestPreparationUsesFreshCandidateContext(t *testing.T) {
 			t.Fatal("candidate inherited another attempt's transformed context or callbacks", messages)
 		}
 	}
-	if len(source.Context.Messages) != 1 || ladder.selection().Generation != 0 {
+	if source.Context.Messages.Len() != 1 || ladder.selection().Generation != 0 {
 		t.Fatal("request-only preparation committed state")
 	}
 }

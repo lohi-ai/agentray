@@ -118,22 +118,22 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 	for _, name := range wire.Callbacks {
 		switch name {
 		case "convertToLlm":
-			options.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) {
+			options.ConvertToLLM = func(messages *engine.MessageList) (*engine.MessageList, error) {
 				raw, err := a.invoke(a.ctx, "convertToLlm", messages)
 				if err != nil {
 					return nil, err
 				}
-				var converted []*ai.Message
+				var converted *engine.MessageList
 				err = json.Unmarshal(raw, &converted)
 				return converted, err
 			}
 		case "transformContext":
-			options.TransformContext = func(ctx context.Context, messages []*ai.Message) ([]*ai.Message, error) {
+			options.TransformContext = func(ctx context.Context, messages *engine.MessageList) (*engine.MessageList, error) {
 				raw, err := a.invoke(ctx, "transformContext", messages)
 				if err != nil {
 					return nil, err
 				}
-				var transformed []*ai.Message
+				var transformed *engine.MessageList
 				err = json.Unmarshal(raw, &transformed)
 				return transformed, err
 			}
@@ -173,7 +173,7 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 				return &result, err
 			}
 		case "finishTurn":
-			options.FinishTurn = func(ctx context.Context, turn engine.Turn) (string, error) {
+			options.FinishTurn = func(ctx context.Context, turn *engine.Turn) (string, error) {
 				raw, err := a.invoke(ctx, "finishTurn", nativeTurn(turn))
 				if err != nil || nativeNull(raw) {
 					return "", err
@@ -201,7 +201,7 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 				return a.bindUpdate(raw)
 			}
 		case "prepareNextTurnWithContext":
-			options.PrepareNextTurnWithContext = func(ctx context.Context, turn engine.Turn) (*engine.TurnUpdate, error) {
+			options.PrepareNextTurnWithContext = func(ctx context.Context, turn *engine.Turn) (*engine.TurnUpdate, error) {
 				raw, err := a.invoke(ctx, "prepareNextTurnWithContext", nativeTurn(turn))
 				if err != nil {
 					return nil, err
@@ -223,17 +223,20 @@ func (a *NativeAgent) bindOptions(raw json.RawMessage) (engine.AgentOptions, err
 }
 
 func nativeContext(c *engine.Context) map[string]any {
+	if c == nil {
+		return nil
+	}
 	messages := c.Messages
 	if messages == nil {
-		messages = []*ai.Message{}
+		messages = engine.NewList[*ai.Message]()
 	}
 	tools := c.Tools
 	if tools == nil {
-		tools = []*engine.Tool{}
+		tools = engine.NewList[*engine.Tool]()
 	}
 	return map[string]any{"messages": messages, "tools": tools}
 }
-func nativeTurn(turn engine.Turn) map[string]any {
+func nativeTurn(turn *engine.Turn) map[string]any {
 	return map[string]any{"message": turn.Message, "toolResults": turn.ToolResults, "context": nativeContext(turn.Context), "newMessages": turn.NewMessages}
 }
 func nativeToolCall(call engine.BeforeToolCall) map[string]any {
@@ -259,13 +262,13 @@ func (a *NativeAgent) bindUpdate(raw json.RawMessage) (*engine.TurnUpdate, error
 	if err := json.Unmarshal(raw, &update); err != nil {
 		return nil, err
 	}
-	result := &engine.TurnUpdate{Messages: update.Messages, Model: update.Model, ThinkingLevel: update.ThinkingLevel}
+	result := &engine.TurnUpdate{Messages: engine.NewList(update.Messages...), Model: update.Model, ThinkingLevel: update.ThinkingLevel}
 	if update.Context != nil {
 		tools, err := a.bindTools(update.Context.Tools)
 		if err != nil {
 			return nil, err
 		}
-		result.Context = &engine.Context{Messages: update.Context.Messages, Tools: tools}
+		result.Context = &engine.Context{Messages: engine.NewList(update.Context.Messages...), Tools: engine.NewList(tools...)}
 	}
 	return result, nil
 }

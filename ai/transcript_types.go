@@ -45,7 +45,8 @@ type Message struct {
 
 // ContentBlock is Pi's text/thinking/image/toolCall union. Optional signatures
 // use pointers so an explicit empty signature survives JSON round trips.
-// Decoded null entries are preserved for sparse streamed content arrays.
+// A nil slot represents an array hole; decoded null entries retain a distinct
+// sentinel. Both serialize as null within an array, but filtering distinguishes them.
 type ContentBlock struct {
 	null              bool
 	Type              string                     `json:"type"`
@@ -64,11 +65,23 @@ type ContentBlock struct {
 	Extra             map[string]json.RawMessage `json:"-"`
 }
 
+// IsNull reports an explicit decoded null. A nil block pointer is a sparse
+// content-array hole, which Array.filter skips without reading its properties.
+func (b *ContentBlock) IsNull() bool { return b != nil && b.null }
+
+// HasContent reports own-field presence without serializing the message. Native
+// zero content is explicit null; decoded messages can retain an absent field.
+// Assigning text or a non-nil block slice makes the field present again.
+func (m Message) HasContent() bool {
+	return !m.Content.undefined || m.Content.Text != nil || m.Content.Blocks != nil
+}
+
 // MessageContent preserves the distinction between string and array content.
 // Its zero value is JSON null, as accepted by transformMessages for old logs.
 type MessageContent struct {
-	Text   *string
-	Blocks []*ContentBlock
+	undefined bool
+	Text      *string
+	Blocks    []*ContentBlock
 }
 
 func TextContent(text string) MessageContent { return MessageContent{Text: &text} }
@@ -105,7 +118,7 @@ func (c *MessageContent) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &c.Blocks); err != nil {
 		return err
 	}
-	// Retain the explicit-null sentinel used for sparse streamed content.
+	// JSON null is a present entry, unlike a nil slot from a live sparse stream.
 	for i, block := range c.Blocks {
 		if block == nil {
 			c.Blocks[i] = &ContentBlock{null: true}
@@ -261,6 +274,10 @@ func marshalTranscriptObject(value any, extra map[string]json.RawMessage, requir
 		}
 	}
 	for key, value := range required {
+		if jsonjs.IsUndefined(value) {
+			delete(fields, key)
+			continue
+		}
 		// Native validation/provider strings may contain decoded lone UTF-16
 		// surrogates. encoding/json replaces their WTF-8 bytes; retain their
 		// original code units when exporting required transcript text fields.
@@ -280,6 +297,9 @@ func marshalTranscriptObject(value any, extra map[string]json.RawMessage, requir
 func (m Message) MarshalJSON() ([]byte, error) {
 	type plain Message
 	required := map[string]any{}
+	if !m.HasContent() {
+		required["content"] = Undefined
+	}
 	if m.Role == "assistant" {
 		required["api"], required["provider"], required["model"] = m.API, m.Provider, m.Model
 		required["stopReason"] = m.StopReason
@@ -299,7 +319,7 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	if m.Sections != nil {
 		required["sections"] = m.Sections
 	}
-	details, err := jsonjs.MarshalOptional(m.Details)
+	details, err := jsonjs.MarshalOptional(m.Details, "details")
 	if err != nil {
 		return nil, err
 	}
@@ -357,6 +377,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	if err == nil {
 		var fields map[string]json.RawMessage
 		if err = json.Unmarshal(data, &fields); err == nil {
+			m.Content.undefined = fields["content"] == nil
 			m.Details, err = jsonjs.DecodeOptional(fields["details"])
 		}
 	}

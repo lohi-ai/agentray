@@ -58,13 +58,13 @@ func TestPiMessageReferences(t *testing.T) {
 				target := retained
 				switch input.Through {
 				case "context":
-					target = find(turn.Context.Messages)
+					target = find(turn.Context.Messages.Values())
 				case "newMessages":
-					target = find(turn.NewMessages)
+					target = find(turn.NewMessages.Values())
 				case "message":
 					target = turn.Message
 				case "toolResults":
-					target = turn.ToolResults[0]
+					target = turn.ToolResults.Get(0)
 				}
 				target.Timestamp = 77
 				mutated = true
@@ -76,31 +76,34 @@ func TestPiMessageReferences(t *testing.T) {
 				}})
 			}
 			turns, requestCount, responseCount := 0, 0, 0
-			config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }}
-			config.TransformContext = func(_ context.Context, messages []*ai.Message) ([]*ai.Message, error) {
+			config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }}
+			config.TransformContext = func(_ context.Context, messages *engine.MessageList) (*engine.MessageList, error) {
 				mutate("transform", nil)
 				return messages, nil
 			}
-			config.ConvertToLLM = func(messages []*ai.Message) ([]*ai.Message, error) { mutate("convert", nil); return messages, nil }
+			config.ConvertToLLM = func(messages *engine.MessageList) (*engine.MessageList, error) {
+				mutate("convert", nil)
+				return messages, nil
+			}
 			config.GetAPIKey = func(string) (string, error) { mutate("key", nil); return "test", nil }
-			config.GetSteeringMessages = func() ([]*ai.Message, error) { mutate("steering", nil); return nil, nil }
-			config.FinishTurn = func(_ context.Context, turn engine.Turn) (string, error) {
+			config.GetSteeringMessages = func() (*engine.MessageList, error) { mutate("steering", nil); return nil, nil }
+			config.FinishTurn = func(_ context.Context, turn *engine.Turn) (string, error) {
 				turns++
 				if turns == 1 {
-					identity := map[string]bool{"context": find(turn.Context.Messages) == retained, "newMessages": find(turn.NewMessages) == retained}
+					identity := map[string]bool{"context": find(turn.Context.Messages.Values()) == retained, "newMessages": find(turn.NewMessages.Values()) == retained}
 					if input.Role == "assistant" {
 						identity["message"] = turn.Message == retained
 					}
 					if input.Role == "toolResult" {
-						identity["toolResults"] = turn.ToolResults[0] == retained
+						identity["toolResults"] = turn.ToolResults.Get(0) == retained
 					}
 					identities = append(identities, identity)
-					mutate("finish", &turn)
+					mutate("finish", turn)
 					return "continue", nil
 				}
 				return "end", nil
 			}
-			config.PrepareNextTurn = func(engine.Turn) (*engine.TurnUpdate, error) { mutate("next", nil); return nil, nil }
+			config.PrepareNextTurn = func(*engine.Turn) (*engine.TurnUpdate, error) { mutate("next", nil); return nil, nil }
 			config.PrepareRequest = func(context.Context, engine.Request) (*engine.TurnUpdate, error) {
 				if requestCount > 0 {
 					mutate("request", nil)
@@ -124,7 +127,7 @@ func TestPiMessageReferences(t *testing.T) {
 				}
 				return result, nil
 			}
-			var messages []*ai.Message
+			var messages *engine.MessageList
 			sink := func(event engine.Event) error {
 				events = append(events, capture(event))
 				if event.Type == "message_end" && event.Message.Role == input.Role && retained == nil {
@@ -140,7 +143,7 @@ func TestPiMessageReferences(t *testing.T) {
 			var stateMessages *engine.MessageList
 			var err error
 			if input.Mode == "loop" {
-				messages, err = engine.Run(context.Background(), []*ai.Message{prompt}, engine.Context{Messages: []*ai.Message{}, Tools: tools}, config, sink, stream)
+				messages, err = engine.Run(context.Background(), engine.NewList([]*ai.Message{prompt}...), engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList(tools...)}, config, sink, stream)
 			} else {
 				agent, createErr := engine.NewAgent(engine.AgentOptions{InitialState: engine.InitialState{Model: config.Model, Tools: tools}, AgentConfig: engine.AgentConfig{Config: config, StreamFn: stream, PrepareNextTurn: func(context.Context) (*engine.TurnUpdate, error) {
 					mutate("next", nil)

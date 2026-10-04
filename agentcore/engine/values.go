@@ -7,6 +7,7 @@ import "github.com/lohi-ai/agentray/internal/jsonjs"
 type Object = jsonjs.Object
 type Array = jsonjs.Array
 type Property = jsonjs.Property
+type JSONMethod = jsonjs.JSONMethod
 
 const Undefined = jsonjs.Undefined
 const Null = jsonjs.Null

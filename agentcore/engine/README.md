@@ -26,6 +26,77 @@ observing that failure. Thirteen differential cases execute the original public
 wrappers, including their rejected-promise behavior. Additional Go tests cover
 reader cancellation, synchronous first-event admission and panic handling.
 
+`Run`, `Continue` and `AgentEventStream.Result` return `*MessageList`.
+`Turn.NewMessages`, `Turn.ToolResults`, `Event.Messages` and `Event.ToolResults`
+also retain live collections. A saved `NewMessages` sees later turns append to
+the same list; slot/length edits survive into the returned result and terminal
+event. Context history has separate membership, with shared message objects.
+Each turn owns its tool-result list. For error/aborted responses, Pi constructs
+a separate empty list for `turn_end`, so hook edits to that turn's `ToolResults`
+do not change the event list. `Values()` adapts these collections to native slices.
+
+Another 360 original-source cases compare membership, sparse slots, lengths,
+item mutations and identity through finish/next/request hooks, turn/end events,
+return and settlement in low-level Run/Continue and the stateful Agent. They
+include two-turn accumulation, prepared messages and error/aborted exits.
+Twelve stream-wrapper cases verify that `Result`, repeated result reads and
+the queued terminal event share the same list after mutation.
+
+`Run` and `AgentLoop` accept a live `*MessageList` prompt. `Agent.Prompt` also
+accepts that list, alongside text, individual messages and native slice inputs.
+Native slices copy membership; use `MessageList` when callbacks retain and edit
+the input array. With unchanged tool declarations, initial message events iterate
+the original list with its current length on each step. Context and result
+membership were already copied before those events, so later prompt appends can
+appear in events and Agent history without entering the provider's context.
+When tool declarations require an inserted or rewritten system message, initial
+event iteration instead uses the newly declared list.
+
+`GetSteeringMessages`, `GetFollowUpMessages` and `TurnUpdate.Messages` also use
+`*MessageList`. Pending/prepared lists remain live through next-turn preparation,
+steering re-polls and `turn_start`; the loop then spreads their current membership
+into a new collection before emitting messages. Changes after that spread do not
+alter its membership, while edits to shared messages remain visible. Another
+594 original-source cases compare these boundaries, including append, replacement,
+shrink/truncation, local variable reassignment, nested edits and post-settlement
+edits in Run, Continue and the Agent wrapper.
+
+`Context.Messages` and `Context.Tools` are live `*MessageList` and `*ToolList`.
+Transformation and conversion callbacks receive and return `*MessageList`.
+Retained references observe appends, slot replacements and length changes;
+replacing a context field detaches its previous collection. Run copies message
+membership through a dense spread; Continue shares its input history. Agent
+admission copies both lists, preserving sparse slots and shared item objects.
+Another 504 original-source cases compare these behaviors across request,
+transform, convert, credential, stream, tool and turn callbacks and settlement.
+Six cases verify that default conversion filters sparse/custom-role entries
+into a new dense list while retaining selected message objects.
+
+Lists also expose enumerable own data properties through `GetProperty`,
+`SetProperty`, `DeleteProperty` and `PropertyKeys`. Clearing history during a
+partial stream preserves Pi's subsequent assignment to the ordinary `"-1"`
+property without growing the list. Thirteen oracle cases cover key order,
+non-index names, truncation, JSON and slice behavior. An invalid own
+`constructor` fails cloning; two Agent cases verify the failure event sequence,
+idle settlement and a successful subsequent prompt. Custom JavaScript
+prototypes, accessors and Symbol.species constructors have no native mapping.
+Provider normalization still projects a value snapshot at the `StreamFn`
+boundary, after transformation, conversion and credential hooks settle.
+
+`FinishTurn`, `PrepareNextTurn` and `PrepareNextTurnWithContext` receive a
+shared `*Turn`. Each completed turn allocates a new object, which remains live
+for its next-turn callback and any retained references. Replacing `Message`,
+`ToolResults`, `Context` or `NewMessages` updates that object without rebinding
+the loop's own message/context/result variables. A returned `TurnUpdate.Context`
+explicitly selects a replacement context. Reassigning a callback's local turn
+pointer remains local. Concurrent edits to retained turns require synchronization.
+Another 471 original-source cases compare these identities and field replacements
+in Run/Continue and the Agent wrapper through finish, turn-end, steering,
+next-turn, request and post-settlement callbacks, including error/aborted exits,
+nil fields and explicit context adoption. Host callbacks still receive serialized
+snapshots at their transport boundary; a nil turn context serializes as `null`
+without dereferencing it in the adapter.
+
 `NewAgent` constructs the stateful wrapper. `Prompt`, `Continue`, `Steer`,
 `FollowUp`, queue mode/clear/preview methods, `Abort`, `WaitForIdle`, and `Reset`
 follow Pi's lifecycle. State is reduced before subscribers run. Subscribers
@@ -34,12 +105,28 @@ continuation or reset is rejected until the last end subscriber settles.
 Run failures produce the original assistant error/aborted event sequence;
 admission errors and failures in that recovery sequence are returned to callers.
 
+Continuation admission retains Pi's distinction between the wrapper and the
+low-level loop. Agent rejects an absent/null tail or an all-system history before
+starting; its `every` scan skips holes and stops at the first non-system message.
+The low-level loop only validates length and the tail role. Replay later visits
+every slot, so a hole and an explicit null fail at the same lifecycle stage as
+the pinned source, with its corresponding error text. Admission failures leave
+queues intact; failures after queue selection preserve the already-consumed state.
+Another 408 original-source cases cover sparse/null histories, both queues,
+edits during `agent_start`, constructor failures and a subsequent successful run.
+Six cases verify synchronous stream-wrapper validation. Another 102 compare
+system-prompt reads, state JSON and reset, including queue/history preservation
+when replay fails. `SystemPrompt()` panics on those source getter failures;
+`MarshalJSON()` and `Reset()` return errors. These indexed reads do not invoke an
+array constructor; admission's later context clone still does.
+
 The Go API uses `State()` snapshots for scalar state and explicit setters.
 Its `Messages` and `Tools` fields retain live `*MessageList`/`*ToolList`
 collections, and `StreamingMessage` retains the current event object.
 `Get`, `Set`, `Append`, `Delete`, `SetLength`, `Has` and `Keys` operate on
 those collections. `Values()` returns a detached dense slice of shared items;
-`Clone()` also preserves sparse slots. Container operations are synchronized;
+`Clone()` preserves sparse slots and drops named properties, following the
+default Array.slice constructor behavior. Container operations are synchronized;
 concurrent message/tool field edits still require caller synchronization.
 `SetMessages`/`SetTools` copy native slices; `SetMessageList`/`SetToolList`
 copy live collections, including holes. Replacing a collection detaches old
@@ -48,6 +135,12 @@ agent. Model JSON should be treated as immutable.
 `State.SystemPrompt()` replays that view's messages when called, and JSON state
 export includes the computed string. Simply obtaining a state view does not
 eagerly replay an incomplete history.
+`PendingToolCalls` is an immutable `*ToolCallSet` with `Len`, `Has` and
+`Values`. Repeated getters share the set until a tool start/end, reset or run
+settlement replaces it. Even a duplicate start or an unmatched end creates a
+new set; retained sets preserve their previous insertion order and membership.
+Direct JSON serialization produces `{}`, matching Pi's Set. The host transport
+explicitly exports `Values()` as an array, preserving its existing protocol.
 `Listener` pointers provide stable subscription identity without a new
 interface. The live listener set supports removal/addition during delivery.
 `Configure` replaces wrapper options atomically. Most callbacks are captured
@@ -75,8 +168,27 @@ message identity for terminal-only and partial/update streams. State edits made
 after admission do not replace already-snapshotted context slots; edits to their
 shared message/tool objects remain visible. Native race checks exercise
 concurrent list reads, cloning and appends. The outer `State` value still
-snapshots scalar fields, and core loop contexts still use Go slices; this is
-not a claim of full JavaScript state-object/array identity everywhere.
+snapshots scalar fields; this is not a claim of full JavaScript
+state-object/array identity everywhere.
+
+Another 135 original-source cases compare pending-tool set identity, membership,
+insertion order and direct JSON through two awaited subscribers, tool hooks,
+execution updates and settlement. They include duplicate/empty IDs, ID mutation,
+sequential and deterministically ordered parallel completion, missing/invalid/
+blocked/truncated calls, abort and subscriber failures. The Go set exposes Pi's
+public read-only contract; mutation through a JavaScript type cast, prototype
+extensions and native JavaScript iterator objects are not represented.
+
+Another 392 pinned-source cases cover sparse/null tool lists, invalid own array
+constructors, programmatic overrides/default context tools, and mutations at
+assistant completion or tool start. Tool declaration checks constructor/species
+before mapping, skips holes during mapping, and rejects holes when forming the
+declaration lookup. Tool lookup visits holes as undefined and stops at the first
+match; its failures reject the run rather than creating an `isError` result.
+Execution-mode selection stops at the first sequential tool, and truncated
+responses bypass selection entirely. The fixtures compare errors, execution,
+requests and ordered events in both batch modes. In `RunToolCall`, nil tools use
+the context list; an explicit empty list disables all tools for that call.
 
 Ninety-four additional original-source cases compare object identity, complete
 events, requests, returned messages, original prompts and wrapper history.
@@ -84,9 +196,9 @@ They cover retained-pointer edits in finish/end/next/request/transform/convert/
 credential/steering callbacks and edits through context, new-message and tool
 result lists, including error and aborted turns. The earlier twenty-one loop
 and twelve Agent mutation cases still cover pending/prepared messages, both
-tool modes, partial/result-only streams and recovery. Array-length changes
-through retained Go slice headers and provider stream-object aliasing remain
-outside this coverage. Message edits belong to awaited callbacks; callers must
+tool modes, partial/result-only streams and recovery. Native slice convenience
+inputs copy membership; mutable content-block collections and provider
+stream-object aliasing remain outside this coverage. Message edits belong to awaited callbacks; callers must
 synchronize concurrent access to shared payloads or retained pointers.
 
 Go contexts carry the active abort signal and parent values. `Abort` or parent
@@ -94,8 +206,8 @@ cancellation cancels it. Successful settlement detaches from the parent without
 cancelling a saved subscriber signal. Cancelling a `WaitForIdle` wait only stops
 that wait. Hooks/listeners must not synchronously wait for the run they belong to.
 
-Tool lists use `[]*Tool` in `Context`, `InitialState`, `SetTools`
-and `RunToolCall`, and `*ToolList` in `State`. The wrapper copies assigned membership while retaining each
+Tool lists use `*ToolList` in `Context`, `State` and `RunToolCall`, and
+`[]*Tool` in `InitialState` and `SetTools`. The wrapper copies assigned membership while retaining each
 tool object. Preparation selects that object before argument preparation and
 before-call hooks: mutating its executor changes execution, but replacing the
 list entry cannot switch an already-selected call to a different tool. This
@@ -103,8 +215,8 @@ also keeps external edits visible after the wrapper copies or grows its lists.
 Sixty-seven original-source cases compare selected executors, returned results
 and retained/current tool identity across argument preparation, before-call
 hooks, list replacement/growth, sequential/parallel calls, direct `RunToolCall`,
-initial Agent tools and `SetTools`. Shared slice length semantics in core loop
-contexts remain outside this coverage; wrapper state collections are covered above.
+initial Agent tools and `SetTools`. Live context and wrapper state collections
+are covered above.
 
 Tool preflight is ordered. Parallel tools finish independently and emit end
 events in completion order; result messages are appended in original call
@@ -127,11 +239,17 @@ arguments. Another 54 cover nested object edits, array growth, child replacement
 and edits through retained references during updates and after settlement in
 programmatic, sequential and parallel modes. Earlier validation fixtures still
 cover numeric/object edits and required-key deletion. Callers must synchronize
-concurrent access to shared values. The concrete containers and passive JSON
+concurrent access to shared values. The concrete containers and JSON
 codec live in `internal/jsonjs`, shared with telemetry; no interface hierarchy
 or runtime TypeScript dependency is introduced. Host callbacks serialize the
-graph only at their JSON transport boundary. Raw model arguments still use serialized JSON; arbitrary object prototypes
-and named array properties remain outside this representation.
+graph only at their JSON transport boundary. The shared `Array` also retains
+enumerable own named properties through `GetProperty`, `SetProperty`,
+`DeleteProperty` and `PropertyKeys`; these fields do not enter array JSON.
+An own `toJSON` property containing an explicit `JSONMethod` runs only on export,
+with the receiver and containing field key; recording and cloning remain passive.
+The details/structured-content serializers preserve those keys and omit undefined
+hook results. Raw model arguments still use serialized JSON. Arbitrary object
+prototypes and accessors remain outside this representation.
 
 Validation now uses the shared JSON.parse value domain for both arguments and
 schema strings. Its working values preserve binary64 overflow, negative zero,
@@ -201,6 +319,27 @@ blocks remain shared and which are copied for cross-model signature/ID changes
 or image replacement, while keeping the input transcript unchanged. Retained
 slice headers do not automatically track list-length changes; live provider
 messages are still isolated by the engine's stream snapshots.
+
+Within content arrays, nil block pointers represent holes and decoded null
+blocks retain a distinct sentinel (`ContentBlock.IsNull`). Tool-call filtering
+skips holes, including gaps reconstructed from proxy content indices, but rejects
+explicit null entries with the pinned source's property-read error. Missing/null
+content and string assistant content fail at the filter read; error/aborted
+responses bypass this read as in Pi. `Message.HasContent` reads retained field
+presence without serialization. Another 270 source cases verify these reads,
+content replacement at message start/end, completion hooks, events and wrapper
+failure cleanup. Thirty source-backed local HTTP proxy cases cover sparse text
+and tool blocks across successful, truncated, failed and aborted responses.
+
+System-prompt replay uses the same sparse/null distinction. `ContentText` skips
+holes and throws the pinned property-read error for null entries or null/missing
+content. State JSON and `Reset` return those errors through their Go error
+boundary; failed reset preserves history and both queues. Replay retries timestamp
+selection after missing/null values; a final missing timestamp with no tools
+produces no baseline, while null defaults to zero. Another 201 source cases cover
+prompt reads, state JSON, reset/recovery and timestamp selection; 36 compare the
+text/render/replay helpers directly. Content absence travels with decoded content
+through copies, and replacing it with explicit null makes the field present.
 
 `ai.TransformMessageReferences` also preserves message/model identity while
 transforming replay history. Its normalizer receives `*ai.Model` and
@@ -571,6 +710,12 @@ The server exposes this path with `AGENTRAY_AGENT_NATIVE_GO=true`. Its productio
 image no longer ships Bun or the worker bundle. The legacy Go driver remains the
 server default pending the remaining provider/OAuth migration and parity audit;
 the explicit TypeScript adapter is retained for development/test comparison.
+Completing the port also requires removing the TypeScript reference source,
+fixture generators, development worker/bridge, and their Bun build/configuration
+dependencies from the port's scope. Retain Go implementations, Go regression
+tests, verified JSON fixtures, and upstream provenance/license notices. The
+reference tree is temporary migration tooling, not the final architecture;
+passing Go tests alone does not complete this cleanup or the default switch.
 `PiRuntimeConfig{NativeGo: true}` uses the built-in
 `NativeProviderStream` for `openai-completions`, `openai-responses` and `anthropic-messages`;
 `NativeStream` remains an optional

@@ -11,11 +11,11 @@ import (
 	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
-// Context retains message and tool objects shared with lifecycle events and hooks.
-// Replacing a slice entry does not replace an object already selected for execution.
+// Context retains live message/tool collections shared with hooks. Replacing a
+// field detaches that collection; edits through a retained list remain visible.
 type Context struct {
-	Messages []*ai.Message `json:"messages"`
-	Tools    []*Tool       `json:"-"`
+	Messages *MessageList `json:"messages"`
+	Tools    *ToolList    `json:"-"`
 }
 
 // Tool is shared by pointer. Preparation selects the object before invoking
@@ -84,8 +84,14 @@ func (r ToolResult) MarshalJSON() ([]byte, error) {
 	if r.Content == nil {
 		delete(fields, "content")
 	}
-	for name, value := range map[string]any{"details": r.Details, "structuredContent": r.StructuredContent} {
-		raw, err := jsonjs.MarshalOptional(value)
+	for _, name := range []string{"details", "structuredContent"} {
+		// Read each value when visited: a details hook may replace or mutate
+		// the shared structured-content graph before its export.
+		value := r.Details
+		if name == "structuredContent" {
+			value = r.StructuredContent
+		}
+		raw, err := jsonjs.MarshalOptional(value, name)
 		if err != nil {
 			return nil, err
 		}
@@ -187,16 +193,22 @@ type ToolOutcome struct {
 	IsError  bool             `json:"isError"`
 }
 
+// Turn is shared by pointer between FinishTurn and PrepareNextTurn. Its initial
+// fields reference the completed message, per-turn tool results, active context
+// and accumulating run result. Replacing fields changes this retained view, not
+// the loop's own references; context replacement takes effect through TurnUpdate.
+// Edits belong to awaited callbacks; concurrent access requires synchronization.
 type Turn struct {
 	Message     *ai.Message
-	ToolResults []*ai.Message
+	ToolResults *MessageList
 	Context     *Context
-	NewMessages []*ai.Message
+	NewMessages *MessageList
 }
 
 type TurnUpdate struct {
-	Context       *Context
-	Messages      []*ai.Message
+	Context *Context
+	// Messages stays live until the loop spreads prepared and pending messages.
+	Messages      *MessageList
 	Model         json.RawMessage
 	ThinkingLevel *string
 }
@@ -228,18 +240,18 @@ type Config struct {
 	Options       map[string]any
 	ToolExecution string
 	ToolHooks
-	ConvertToLLM     func([]*ai.Message) ([]*ai.Message, error)
-	TransformContext func(context.Context, []*ai.Message) ([]*ai.Message, error)
+	ConvertToLLM     func(*MessageList) (*MessageList, error)
+	TransformContext func(context.Context, *MessageList) (*MessageList, error)
 	GetAPIKey        func(string) (string, error)
-	FinishTurn       func(context.Context, Turn) (string, error)
+	FinishTurn       func(context.Context, *Turn) (string, error)
 	PrepareRequest   func(context.Context, Request) (*TurnUpdate, error)
 	// AdmitRequest, when supplied by a Go host, owns prepare/transform/convert,
 	// credential acquisition and streaming. The nil path follows Pi unchanged.
 	// It must return the selected request before any of its events are consumed.
 	AdmitRequest        AdmitRequestFn
-	PrepareNextTurn     func(Turn) (*TurnUpdate, error)
-	GetSteeringMessages func() ([]*ai.Message, error)
-	GetFollowUpMessages func() ([]*ai.Message, error)
+	PrepareNextTurn     func(*Turn) (*TurnUpdate, error)
+	GetSteeringMessages func() (*MessageList, error)
+	GetFollowUpMessages func() (*MessageList, error)
 	// Now supplies Date.now for deterministic replay and differential testing.
 	Now func() int64
 }
@@ -254,8 +266,8 @@ func (c Config) now() int64 {
 type Event struct {
 	Type                  string
 	Message               *ai.Message
-	Messages              []*ai.Message
-	ToolResults           []*ai.Message
+	Messages              *MessageList
+	ToolResults           *MessageList
 	AssistantMessageEvent *ai.AssistantMessageEvent
 	ToolCallID            string
 	ToolName              string
@@ -270,9 +282,9 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	value := map[string]any{"type": e.Type}
 	switch e.Type {
 	case "agent_end":
-		value["messages"] = nonnil(e.Messages)
+		value["messages"] = messageListOrEmpty(e.Messages)
 	case "turn_end":
-		value["message"], value["toolResults"] = e.Message, nonnil(e.ToolResults)
+		value["message"], value["toolResults"] = e.Message, messageListOrEmpty(e.ToolResults)
 	case "message_start", "message_end":
 		value["message"] = e.Message
 	case "message_update":

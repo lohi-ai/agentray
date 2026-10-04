@@ -121,10 +121,10 @@ func TestPiToolReferences(t *testing.T) {
 				},
 			}
 			var outcome engine.ToolOutcome
-			var messages []*ai.Message
+			var messages *engine.MessageList
 			var err error
 			if input.Mode == "programmatic" {
-				outcome, err = engine.RunToolCall(context.Background(), retained, tools, assistant, &engine.Context{Messages: []*ai.Message{assistant}, Tools: tools}, toolHooks, func(partial *engine.ToolResult) error {
+				outcome, err = engine.RunToolCall(context.Background(), retained, engine.NewList(tools...), assistant, &engine.Context{Messages: engine.NewList([]*ai.Message{assistant}...), Tools: engine.NewList(tools...)}, toolHooks, func(partial *engine.ToolResult) error {
 					updates = append(updates, capture(partial))
 					if input.Phase == "update" {
 						mutate()
@@ -137,8 +137,8 @@ func TestPiToolReferences(t *testing.T) {
 					s.Push(ai.AssistantMessageEvent{Type: "done", Reason: "toolUse", Message: assistant})
 					return s, nil
 				}
-				config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ToolExecution: input.Mode, ToolHooks: toolHooks, ConvertToLLM: func(messages []*ai.Message) ([]*ai.Message, error) { return messages, nil }, FinishTurn: func(context.Context, engine.Turn) (string, error) { return "end", nil }}
-				messages, err = engine.Run(context.Background(), []*ai.Message{{Role: "user", Content: ai.TextContent("go")}}, engine.Context{Messages: []*ai.Message{}, Tools: tools}, config, func(event engine.Event) error {
+				config := engine.Config{Model: json.RawMessage(`{"id":"test","api":"test","provider":"test"}`), Now: func() int64 { return 1000 }, ToolExecution: input.Mode, ToolHooks: toolHooks, ConvertToLLM: func(messages *engine.MessageList) (*engine.MessageList, error) { return messages, nil }, FinishTurn: func(context.Context, *engine.Turn) (string, error) { return "end", nil }}
+				messages, err = engine.Run(context.Background(), engine.NewList([]*ai.Message{{Role: "user", Content: ai.TextContent("go")}}...), engine.Context{Messages: engine.NewList([]*ai.Message{}...), Tools: engine.NewList(tools...)}, config, func(event engine.Event) error {
 					events = append(events, capture(event))
 					if event.Type == "message_end" && event.Message.Role == "assistant" {
 						assistant = event.Message

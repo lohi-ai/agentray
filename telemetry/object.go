@@ -7,6 +7,11 @@ import "github.com/lohi-ai/agentray/internal/jsonjs"
 type Property = jsonjs.Property
 type Object = jsonjs.Object
 type Array = jsonjs.Array
+type JSONMethod = jsonjs.JSONMethod
+
+// StringifyValue preserves JSON.stringify's undefined root as an empty result.
+// Only explicit JSONMethod values stored as toJSON hooks can execute on export.
+func StringifyValue(value any) ([]byte, error) { return jsonjs.StringifyValue(value) }
 
 func NewObject(properties ...Property) *Object        { return jsonjs.NewObject(properties...) }
 func NewArray(values ...any) *Array                   { return jsonjs.NewArray(values...) }
