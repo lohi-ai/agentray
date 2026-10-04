@@ -79,8 +79,8 @@ export function useConnectors() {
 // useConnectorSyncs lists one connector's table syncs through the shared
 // source_status operation — each row carries its latest durable run receipt —
 // and exposes create / update / delete / run-now / cancel / pause mutations.
-// While any run is queued or running the query polls so the receipt's
-// terminal state (and the sync's last_* columns) arrive without a refresh.
+// While any run is queued/running or its data is still becoming queryable,
+// the query polls so both the receipt and readiness converge without a refresh.
 export function useConnectorSyncs(connectorID: string | null) {
   const queryClient = useQueryClient();
   const projectID = useAuthStore((s) => s.project?.id);
@@ -91,7 +91,11 @@ export function useConnectorSyncs(connectorID: string | null) {
     queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID!),
     enabled: !!projectID && !!connectorID,
     refetchInterval: (q) =>
-      (q.state.data?.syncs ?? []).some((s) => s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running'))
+      (q.state.data?.syncs ?? []).some((s) =>
+        s.readiness?.state === 'syncing'
+        || s.latest_run?.status === 'queued'
+        || s.latest_run?.status === 'running',
+      )
         ? 2000
         : false,
   });

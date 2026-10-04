@@ -40,6 +40,7 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
 
 type EvidenceFacts = { definition?: string; unit?: string; cohortEligibility?: string };
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+const MAX_TABLE_ROWS = 500;
 
 function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
   const first = rows[0];
@@ -66,23 +67,30 @@ function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts
 function SeriesChart({ values, labels, type, annotations, appearance, title }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; title?: string }) {
   const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
     || (typeof window !== 'undefined' && window.matchMedia?.(REDUCED_MOTION_QUERY).matches);
+  const [tableOpen, setTableOpen] = useState(false);
   if (values.length === 0) {
     return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
   const latest = values[values.length - 1];
+  const tableValues = tableOpen ? values.slice(0, MAX_TABLE_ROWS) : [];
   return (
     <div>
       <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations, motion: appearance === 'lohi-evidence' ? !reduceMotion : undefined }} />
       {appearance === 'lohi-evidence' ? (
-        <details className="lohi-chart-table">
+        <details className="lohi-chart-table" open={tableOpen} onToggle={(event) => setTableOpen(event.currentTarget.open)}>
           <summary>View data table</summary>
-          <div className="overflow-x-auto">
-            <table>
-              <caption>Tabular alternative for {title || 'this chart'}. Values reflect the current query result.</caption>
-              <thead><tr><th scope="col">Label</th><th scope="col">Value</th></tr></thead>
-              <tbody>{values.map((value, index) => <tr key={`${String(labels?.[index] ?? index)}-${index}`}><th scope="row">{labels?.[index] ?? index + 1}</th><td>{value.toLocaleString()}</td></tr>)}</tbody>
-            </table>
-          </div>
+          {tableOpen ? (
+            <>
+              {values.length > MAX_TABLE_ROWS ? <p>Showing first {MAX_TABLE_ROWS.toLocaleString()} of {values.length.toLocaleString()} rows.</p> : null}
+              <div className="overflow-x-auto">
+                <table>
+                  <caption>Tabular alternative for {title || 'this chart'}. Values reflect the current query result.</caption>
+                  <thead><tr><th scope="col">Label</th><th scope="col">Value</th></tr></thead>
+                  <tbody>{tableValues.map((value, index) => <tr key={`${String(labels?.[index] ?? index)}-${index}`}><th scope="row">{labels?.[index] ?? index + 1}</th><td>{value.toLocaleString()}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
         </details>
       ) : null}
       <div className="mt-2">

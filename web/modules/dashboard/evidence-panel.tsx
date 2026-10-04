@@ -21,49 +21,28 @@ export type ChartEvidence = {
 };
 export type EvidenceState = 'ready' | 'syncing' | 'empty' | 'stale' | 'error' | 'immature' | 'read-only-denied' | 'query-denied' | 'readiness-error';
 
-export type BoardEvidence = {
-  definition: string;
-  unit: string;
-  range: string;
-  timezone: string;
-  coverage: string;
-  partialDay: string;
-  cohortEligibility: string;
-  recipeRef: string;
-  limitation: string;
-};
+const SAVED_LIMITATION_FALLBACK = 'No limitation was supplied with this saved board.';
 
-const LABELS: Record<string, keyof BoardEvidence> = {
-  definition: 'definition', metric_definition: 'definition', definition_version: 'definition',
-  unit: 'unit', exact_range: 'range', range: 'range', timezone: 'timezone',
-  coverage: 'coverage', source_coverage: 'coverage', partial_day: 'partialDay',
-  cohort_eligibility: 'cohortEligibility', cohort: 'cohortEligibility', recipe_ref: 'recipeRef', query_ref: 'recipeRef',
-  limitation: 'limitation', limitations: 'limitation',
-};
-
-export function parseBoardEvidence(description: string, browserTimezone = 'UTC'): BoardEvidence {
-  const result: BoardEvidence = {
-    definition: 'Definition not supplied', unit: 'Not declared', range: 'Applied dashboard range', timezone: browserTimezone,
-    coverage: 'Coverage not verified', partialDay: 'Partial-day status not declared', cohortEligibility: 'Eligibility not declared',
-    recipeRef: 'Query reference pending', limitation: 'No limitation was supplied with this saved board.',
-  };
+export function parseSavedLimitation(description: string): string {
   const trimmed = description.trim();
-  if (!trimmed) return result;
+  if (!trimmed) return SAVED_LIMITATION_FALLBACK;
   try {
     const object = JSON.parse(trimmed) as Record<string, unknown>;
+    let saved = SAVED_LIMITATION_FALLBACK;
     for (const [key, value] of Object.entries(object)) {
-      const target = LABELS[key.trim().toLowerCase()];
-      if (target && (typeof value === 'string' || typeof value === 'number')) result[target] = String(value);
+      const label = key.trim().toLowerCase();
+      if ((label === 'limitation' || label === 'limitations') && (typeof value === 'string' || typeof value === 'number')) saved = String(value);
     }
+    return saved;
   } catch {
     for (const part of trimmed.split(/[\n;|]+/)) {
       const match = part.match(/^\s*([a-zA-Z][a-zA-Z0-9 _-]{1,40})\s*[:=]\s*(.+?)\s*$/);
       if (!match) continue;
-      const target = LABELS[match[1].trim().toLowerCase().replace(/\s+/g, '_')];
-      if (target) result[target] = match[2].trim();
+      const label = match[1].trim().toLowerCase().replace(/\s+/g, '_');
+      if (label === 'limitation' || label === 'limitations') return match[2].trim();
     }
   }
-  return result;
+  return SAVED_LIMITATION_FALLBACK;
 }
 
 export function evidenceFilterKey(filters: Filters): string {
@@ -132,7 +111,7 @@ function pendingRange(filters: Filters): string {
 
 export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, readinessDenied, readinessError, chartEvidence, appliedFilters }: { dashboard: Dashboard | null; charts: Chart[]; syncs: ReadinessSync[]; readinessLoading: boolean; readinessDenied: boolean; readinessError: boolean; chartEvidence: Record<string, ChartEvidence>; appliedFilters: Filters }) {
   const browserTimezone = typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' : 'UTC';
-  const savedEvidence = parseBoardEvidence(dashboard?.description ?? '', browserTimezone);
+  const savedLimitation = parseSavedLimitation(dashboard?.description ?? '');
   const filterKey = evidenceFilterKey(appliedFilters);
   const sqlCharts = charts.filter((chart) => !!chart.sql);
   const [selectedChartID, setSelectedChartID] = useState<string | null>(null);
@@ -149,7 +128,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
     .sort()[0];
   const freshness = [lastComplete ? `Source last complete ${evidenceTime(lastComplete)}` : null, selectedEvidence?.meta?.executed_at ? `Query executed ${evidenceTime(selectedEvidence.meta.executed_at)}` : null].filter(Boolean).join(' · ') || 'Freshness not verified';
   const queryRef = selectedEvidence?.meta?.query_ref || 'Query reference pending';
-  const limitation = queryLimitation(selectedEvidence, savedEvidence.limitation);
+  const limitation = queryLimitation(selectedEvidence, savedLimitation);
   const definition = selectedEvidence?.definition || selectedChart?.name || 'Definition not supplied';
   const unit = selectedEvidence?.unit || (selectedChart?.y_field ? `Unit not declared for ${selectedChart.y_field}` : 'Not declared');
   const range = selectedEvidence?.range?.label || pendingRange(appliedFilters);
