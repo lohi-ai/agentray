@@ -329,7 +329,6 @@ func (p *sqlSandboxPool) queryWithEvidence(ctx context.Context, projectID, query
 		}
 	}()
 	var evidence sandboxEvidence
-	refreshStarted := time.Now()
 	if err := p.main.ReadSnapshot(rctx, func(snapshot duckDBSnapshot) error {
 		if err := sb.refreshLockedSnapshot(rctx, snapshot); err != nil {
 			return err
