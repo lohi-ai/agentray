@@ -1536,15 +1536,25 @@ func userTurnAbove(ctx context.Context, store interface {
 	return storage.AgentConversationEntry{}, fmt.Errorf("agentray: no user message above entry")
 }
 
-// authProject resolves the auth context + project for a request in one step.
+// authProject resolves the auth context + project for a session-owned request
+// in one step. Keep principalFromRequest in the path so a supplied credential
+// still has its normal precedence and failure semantics, then load the project
+// through the membership-aware reader. The role-blind ProjectByID projection
+// is sufficient for operation adapters, but using it here erased Role/IsDemo;
+// every ordinary owner/member chat consequently looked unauthorized to
+// sessionAllowsWrite and the generic runtime silently dropped its write tools.
 func authProject(c echo.Context, store *storage.Store) (authContext, storage.Project, error) {
 	ctx, err := authFromRequest(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}
-	project, err := projectFromRequest(c, store)
+	admitted, err := projectFromRequest(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
+	}
+	project, err := store.ProjectByIDForUser(c.Request().Context(), ctx.User.ID, admitted.ID)
+	if err != nil {
+		return authContext{}, storage.Project{}, echo.NewHTTPError(http.StatusForbidden, "project not available")
 	}
 	return ctx, project, nil
 }
