@@ -22,9 +22,7 @@ export function useAgents() {
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['agents', projectID] });
   // An agent's name, enabled flag, and workspace folder are all shown by the
-  // monitor surfaces too, and the setup page reads its agent from the detail
-  // query rather than from the list — so a write that only refreshed the list
-  // would leave the page the user is looking at showing what they just changed.
+  // monitor surfaces too, so refresh both identity and health after a write.
   const invalidateAgentViews = () => {
     invalidate();
     queryClient.invalidateQueries({ queryKey: ['agent-monitor', projectID] });
@@ -54,6 +52,9 @@ export function useAgents() {
   return {
     agents: (agentsQuery.data?.agents ?? []) as Agent[],
     agentsLoading: agentsQuery.isLoading,
+    agentsReady: enabled && agentsQuery.isSuccess && !agentsQuery.isFetching,
+    agentsError: agentsQuery.error,
+    reloadAgents: agentsQuery.refetch,
     createAgent: (name: string, slug = '') => createAgent.mutateAsync({ name, slug }),
     updateAgent: (id: string, name: string, isEnabled: boolean, workspacePath?: string) =>
       updateAgent.mutateAsync({ id, name, enabled: isEnabled, workspacePath }),
