@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,51 @@ func TestConnectorRunLifecycle(t *testing.T) {
 	// Cross-project read is not-found.
 	if _, err := s.ConnectorRunForProject(ctx, "00000000-0000-0000-0000-000000000000", run.ID); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("cross-project run err = %v, want ErrNoRows", err)
+	}
+}
+
+func TestConnectorRunPersistsSanitizedSourceErrors(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	for name, sanitizedErr := range map[string]string{
+		"snapshot":    "snapshot batch 7 is 33327 bytes, over the 7168-byte publish budget",
+		"incremental": "encode source row: json: unsupported value: NaN",
+	} {
+		t.Run(name, func(t *testing.T) {
+			run, enqueued, err := s.EnqueueConnectorRun(ctx, projectID, syncID, name+"-pii-safe-error")
+			if err != nil || !enqueued {
+				t.Fatalf("enqueue = %+v %v %v", run, enqueued, err)
+			}
+			owner := "owner-pii-safe-" + name
+			if _, claimed, err := s.ClaimConnectorRun(ctx, run.ID, owner); err != nil || !claimed {
+				t.Fatalf("claim = %v %v", claimed, err)
+			}
+			if err := s.FinishConnectorRun(ctx, run.ID, syncID, owner, connector.SyncResult{Err: sanitizedErr}, false); err != nil {
+				t.Fatal(err)
+			}
+
+			receipt, err := s.ConnectorRunForProject(ctx, projectID, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var lastError string
+			if err := s.pg.QueryRow(ctx, `SELECT last_error FROM connector_syncs WHERE id=$1`, syncID).Scan(&lastError); err != nil {
+				t.Fatal(err)
+			}
+			for surface, got := range map[string]string{
+				"connector_runs.error":       receipt.Error,
+				"connector_syncs.last_error": lastError,
+			} {
+				if got != sanitizedErr {
+					t.Errorf("%s = %q, want %q", surface, got, sanitizedErr)
+				}
+				if strings.Contains(got, sensitiveKey) {
+					t.Errorf("%s exposed source row key: %q", surface, got)
+				}
+			}
+		})
 	}
 }
 

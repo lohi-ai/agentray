@@ -193,9 +193,10 @@ func (q EventQueue) publishBudget() int {
 // The landing key makes re-apply idempotent, so a redelivery (or a second
 // colour applying the same rows) is a replace, not a duplicate.
 //
-// A row too large for one message fails the sync with the row named: the cursor
-// holds, so both colours stay without it together (a loud, repairable stall)
-// rather than one colour quietly holding a row the other never got.
+// A row too large for one message fails the sync with its size and the broker
+// budget, but never its source key. The cursor holds, so both colours stay
+// without it together rather than one colour quietly holding a row the other
+// never got.
 func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -203,8 +204,8 @@ func (q EventQueue) PublishExternalRows(ctx context.Context, projectID, connecto
 	budget := q.publishBudget()
 	for _, chunk := range chunkRows(rows, budget) {
 		if len(chunk) == 1 && chunk[0].wireBytes() > budget {
-			return fmt.Errorf("connector row %s is %d bytes, over the %d-byte publish budget: raise the broker's max_payload before this source can sync",
-				chunk[0].Key, chunk[0].wireBytes(), budget)
+			return fmt.Errorf("connector row is %d bytes, over the %d-byte publish budget: raise the broker's max_payload before this source can sync",
+				chunk[0].wireBytes(), budget)
 		}
 		body, err := json.Marshal(ExternalRowsBatch{
 			ProjectID:   projectID,
@@ -306,9 +307,13 @@ func StartEventWorker(nc *nats.Conn, subject, connectorSubject string, sink inge
 	go func() {
 		for msg := range ch {
 			if msg.Subject == connectorSubject {
-				var batch ExternalRowsBatch
-				if err := json.Unmarshal(msg.Data, &batch); err != nil {
+				batch, snapshot, err := decodeConnectorEnvelope(msg.Data)
+				if err != nil {
 					log.Printf("ingestion worker: decode connector batch: %v", err)
+					continue
+				}
+				if snapshot != nil {
+					log.Printf("ingestion worker: snapshot envelope refused: durable JetStream is required")
 					continue
 				}
 				// Bounded like the durable path's insert: this goroutine also
@@ -472,20 +477,30 @@ const (
 
 func (s externalRowsSettler) settle(msg jetstream.Msg) {
 	handle := jsMsgHandle{msg: msg}
-	var batch ExternalRowsBatch
-	if err := json.Unmarshal(msg.Data(), &batch); err != nil {
+	batch, snapshot, err := decodeConnectorEnvelope(msg.Data())
+	if err != nil {
 		log.Printf("ingestion worker: decode connector batch (dead-lettering): %v", err)
 		s.poison(handle, msg.Data(), err)
 		return
 	}
 
-	// Decoded once: the batch is immutable from here, and the retry path should
-	// not re-allocate and re-copy every row payload per attempt.
-	landed := batch.LandedRows()
-	var err error
+	var landed []connector.LandedRow
+	if batch != nil {
+		landed = batch.LandedRows()
+	}
 	for attempt := range connectorInsertAttempts {
 		insertCtx, cancel := context.WithTimeout(context.Background(), connectorInsertTimeout)
-		err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq()})
+		if snapshot != nil {
+			if snapshotSink, ok := s.sink.(interface {
+				ApplySnapshotEnvelope(context.Context, connector.SnapshotEnvelope, storage.AppliedMark) (*connector.SnapshotPromotion, error)
+			}); ok {
+				_, err = snapshotSink.ApplySnapshotEnvelope(insertCtx, *snapshot, storage.AppliedMark{Durable: s.durable, Seq: handle.seq()})
+			} else {
+				err = fmt.Errorf("snapshot landing is unavailable")
+			}
+		} else {
+			err = s.sink.InsertExternalRows(insertCtx, batch.ProjectID, batch.ConnectorID, batch.Table, landed, storage.AppliedMark{Durable: s.durable, Seq: handle.seq()})
+		}
 		cancel()
 		if err == nil {
 			if ackErr := handle.ack(); ackErr != nil {

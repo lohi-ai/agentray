@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
 
@@ -39,6 +40,10 @@ type Store struct {
 	// hostModel is the optional hosted default pool. Workspaces without a BYOK
 	// key inherit it so the first ask works. Zero-value (empty APIKey) = off.
 	hostModel HostModelDefaults
+	// sourcePolicy is loaded once at boot. It is never returned through a DTO;
+	// callers resolve only the binding for a concrete project/connector.
+	sourcePolicy           *connector.SourcePolicy
+	sourcePolicyConfigured bool
 
 	// The one shared demo (config.DemoProjectID): a REAL project fed by a real
 	// site, that every account is added to as a read-only viewer. Both empty
@@ -620,6 +625,10 @@ type TemplateChart struct {
 }
 
 func Open(ctx context.Context, cfg config.Config) (*Store, error) {
+	sourcePolicy, err := connector.LoadSourcePolicy(cfg.SourcePolicyFile)
+	if err != nil {
+		return nil, err
+	}
 	pgCfg, err := pgxpool.ParseConfig(cfg.PostgresURL)
 	if err != nil {
 		return nil, err
@@ -654,11 +663,13 @@ func Open(ctx context.Context, cfg config.Config) (*Store, error) {
 		return nil, err
 	}
 	store := &Store{
-		pg:        pg,
-		duck:      duck,
-		sandboxes: newSQLSandboxPool(duck),
-		resolvers: newResolverCache(30 * time.Second),
-		hostModel: HostModelDefaultsFromConfig(cfg),
+		pg:                     pg,
+		duck:                   duck,
+		sandboxes:              newSQLSandboxPool(duck),
+		resolvers:              newResolverCache(30 * time.Second),
+		hostModel:              HostModelDefaultsFromConfig(cfg),
+		sourcePolicy:           sourcePolicy,
+		sourcePolicyConfigured: strings.TrimSpace(cfg.SourcePolicyFile) != "",
 	}
 	// Migrations run on their own single-connection pool with the per-statement
 	// cap lifted: DDL and one-time backfills on grown production tables can
@@ -1097,6 +1108,10 @@ ON CONFLICT (api_key) DO NOTHING`, cfg.DefaultProjectName, cfg.DefaultProjectAPI
 	}
 
 	if err := s.migrateConnectorRuns(ctx); err != nil {
+		return err
+	}
+
+	if err := s.migrateConnectorSnapshots(ctx); err != nil {
 		return err
 	}
 

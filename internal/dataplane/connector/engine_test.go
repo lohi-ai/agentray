@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -50,7 +51,8 @@ func (f *fakeSource) TestConnection(ctx context.Context) error { return nil }
 func (f *fakeSource) DiscoverSchema(ctx context.Context) ([]Table, error) {
 	return nil, nil
 }
-func (f *fakeSource) Close() {}
+func (f *fakeSource) Close()                                                    {}
+func (f *fakeSource) ValidateSnapshotKey(context.Context, string, string) error { return nil }
 func (f *fakeSource) PullRows(ctx context.Context, req PullRequest) (PullResult, error) {
 	if f.blockCh != nil {
 		select {
@@ -176,6 +178,7 @@ func (f *fakeStore) ClaimConnectorRun(ctx context.Context, runID, owner string) 
 		return Run{}, false, nil
 	}
 	r.Status = "running"
+	r.LeaseEpoch++
 	return *r, true, nil
 }
 
@@ -434,6 +437,33 @@ func TestRunSyncOpenFailurePersistsError(t *testing.T) {
 
 	if got := store.finished[0]; got.Err != "connect failed: host unreachable" || got.Cursor != "" || got.Rows != 0 {
 		t.Fatalf("result = %+v", got)
+	}
+}
+
+func TestRunSyncEncodingErrorDoesNotExposeSourceKey(t *testing.T) {
+	const sensitiveKey = "fixture.patient.0042@example.test"
+	useFakeSource(&fakeSource{batches: []PullResult{{
+		Rows: []Row{{
+			Key:    sensitiveKey,
+			Cursor: "1",
+			Data:   map[string]any{"amount": math.NaN()},
+		}},
+		NextCursor:    "1",
+		NextCursorKey: sensitiveKey,
+	}}}, nil)
+	store := newFakeStore(incrementalJob())
+
+	runSync(t, NewEngine(store, store), store, "incremental-pii-safe-error")
+
+	if len(store.finished) != 1 {
+		t.Fatalf("finished results = %+v, want one", store.finished)
+	}
+	got := store.finished[0].Err
+	if !strings.Contains(got, "encode source row") || !strings.Contains(got, "unsupported value: NaN") {
+		t.Fatalf("SyncResult.Err = %q, want an actionable encoding error", got)
+	}
+	if strings.Contains(got, sensitiveKey) {
+		t.Fatalf("SyncResult.Err exposed source row key: %q", got)
 	}
 }
 
