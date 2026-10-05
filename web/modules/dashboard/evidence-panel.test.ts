@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Chart } from '@/lib/api';
+import type { Chart, QueryMeta } from '@/lib/api';
 import { chartEvidenceStatus, parseSavedLimitation, queryLimitation, resolveEvidenceState, sourceEvidence, type ChartEvidenceStatus } from './evidence-panel';
 
 const chart = { id: 'chart-1' } as Chart;
@@ -62,10 +62,7 @@ describe('dashboard evidence', () => {
   });
 
   it('verifies exact declared bindings and renders their shared capture coverage from run watermarks', () => {
-    const result = sourceEvidence(`WITH bound AS (
-      SELECT data FROM external_rows
-      WHERE connector_id = 'source-1' AND table_name = 'billing'
-    ) SELECT * FROM bound`, {
+    const meta: QueryMeta = {
       query_ref: 'query/1', query_digest: 'digest', executed_at: '2026-10-05T00:00:00Z',
       result_completeness: 'complete', truncated: false, availability_reason: null,
       serving_data_watermark: {
@@ -74,10 +71,40 @@ describe('dashboard evidence', () => {
         sources_truncated: false,
         sources: [{ connector_id: 'source-1', table: 'billing', generation: 'v1', capture_started_at: '2026-09-13T00:00:00Z', capture_finished_at: '2026-10-04T00:00:00Z', landed_at: '2026-10-05T00:00:00Z' }],
       },
-    });
+    };
+    const result = sourceEvidence(`WITH bound AS (
+      SELECT data FROM external_rows
+      WHERE connector_id = 'source-1' AND table_name = 'billing'
+    ) SELECT * FROM bound`, meta);
     expect(result.bindings).toBe('Verified 1 of 1 declared source binding · billing');
     expect(result.coverage).toMatch(/1\/1 required source.*6 source watermarks available.*watermark/i);
     expect(result.coverage).not.toContain('Coverage not verified');
+
+    const ranged = sourceEvidence(`SELECT date, data FROM external_rows
+      WHERE connector_id = 'source-1' AND table_name = 'billing'
+        AND timestamp >= '2026-09-13' AND timestamp < '2026-10-05'`, meta);
+    expect(ranged.bindings).toBe('Verified 1 of 1 declared source binding · billing');
+    expect(ranged.coverage).not.toContain('Coverage not verified');
+  });
+
+  it.each([
+    ['OR branch omits the table binding', "SELECT data FROM external_rows WHERE connector_id = 'source-1' OR table_name = 'billing'"],
+    ['OR true bypasses the declared pair', "SELECT data FROM external_rows WHERE connector_id = 'source-1' AND table_name = 'billing' OR true"],
+    ['bindings belong to an unrelated subquery', "SELECT data FROM external_rows WHERE EXISTS (SELECT 1 FROM events WHERE connector_id = 'source-1' AND table_name = 'billing')"],
+    ['bindings appear only in a comment', "SELECT data FROM external_rows /* connector_id = 'source-1' AND table_name = 'billing' */"],
+  ])('does not verify source bindings when %s', (_, sql) => {
+    const result = sourceEvidence(sql, {
+      query_ref: 'query/1', query_digest: 'digest', executed_at: '2026-10-05T00:00:00Z',
+      result_completeness: 'complete', truncated: false, availability_reason: null,
+      serving_data_watermark: {
+        event_landed_at: null,
+        total_sources: 1,
+        sources_truncated: false,
+        sources: [{ connector_id: 'source-1', table: 'billing', generation: 'v1', capture_started_at: '2026-09-13T00:00:00Z', capture_finished_at: '2026-10-04T00:00:00Z', landed_at: '2026-10-05T00:00:00Z' }],
+      },
+    });
+
+    expect(result).toEqual({ coverage: 'Coverage not verified', bindings: 'Bindings not verified' });
   });
 
   it('does not promote project watermarks into coverage without matching exact declarations', () => {

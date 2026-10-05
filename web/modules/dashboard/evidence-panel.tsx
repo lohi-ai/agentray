@@ -73,9 +73,105 @@ function executableTokens(sql: string): SQLToken[] | null {
   return tokens;
 }
 
+const QUERY_BOUNDARIES = new Set(['union', 'intersect', 'except']);
+const WHERE_BOUNDARIES = new Set(['group', 'having', 'order', 'limit', 'offset', 'window', 'qualify', 'returning', ...QUERY_BOUNDARIES]);
+const ALIAS_BOUNDARIES = new Set(['where', 'join', 'inner', 'left', 'right', 'full', 'cross', 'on', ...WHERE_BOUNDARIES]);
+
+function tokenDepths(tokens: readonly SQLToken[]): number[] | null {
+  const depths: number[] = [];
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.value === ')') depth -= 1;
+    if (depth < 0) return null;
+    depths.push(depth);
+    if (token.value === '(') depth += 1;
+  }
+  return depth === 0 ? depths : null;
+}
+
+function splitBoolean(tokens: readonly SQLToken[], operator: 'and' | 'or'): SQLToken[][] {
+  const parts: SQLToken[][] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.value === '(') depth += 1;
+    else if (token.value === ')') depth -= 1;
+    else if (depth === 0 && token.kind === 'word' && token.value === operator) {
+      parts.push(tokens.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(tokens.slice(start));
+  return parts;
+}
+
+function stripWrappingParentheses(tokens: readonly SQLToken[]): SQLToken[] {
+  let stripped = [...tokens];
+  while (stripped[0]?.value === '(' && stripped.at(-1)?.value === ')') {
+    let depth = 0;
+    let closesAtEnd = false;
+    for (let index = 0; index < stripped.length; index += 1) {
+      if (stripped[index].value === '(') depth += 1;
+      if (stripped[index].value === ')') depth -= 1;
+      if (depth === 0) {
+        closesAtEnd = index === stripped.length - 1;
+        break;
+      }
+    }
+    if (!closesAtEnd) break;
+    stripped = stripped.slice(1, -1);
+  }
+  return stripped;
+}
+
+function intersectConstraints(groups: readonly Set<string>[]): Set<string> {
+  if (groups.length === 0) return new Set();
+  return new Set([...groups[0]].filter((constraint) => groups.every((group) => group.has(constraint))));
+}
+
+function bindingAtom(tokens: readonly SQLToken[], alias: string | null, allowUnqualified: boolean): Set<string> {
+  const atom = stripWrappingParentheses(tokens);
+  let column: SQLToken | undefined;
+  let equals: SQLToken | undefined;
+  let value: SQLToken | undefined;
+  if (atom.length === 3) {
+    [column, equals, value] = atom;
+    if (!allowUnqualified) return new Set();
+  } else if (atom.length === 5 && atom[1].value === '.') {
+    const qualifier = atom[0];
+    if (qualifier.kind !== 'word' || qualifier.value !== (alias ?? 'external_rows')) return new Set();
+    [, , column, equals, value] = atom;
+  } else {
+    return new Set();
+  }
+  if (column?.kind !== 'word' || equals?.value !== '=' || value?.kind !== 'string') return new Set();
+  if (column.value !== 'connector_id' && column.value !== 'table_name') return new Set();
+  return new Set([`${column.value}:${value.value}`]);
+}
+
+// Return only constraints guaranteed by the boolean expression. AND combines
+// guarantees; OR keeps only guarantees present in every branch. Everything
+// else is opaque, so CASE/NOT/functions/subqueries cannot manufacture proof.
+function guaranteedBindings(tokens: readonly SQLToken[], alias: string | null, allowUnqualified: boolean): Set<string> {
+  const expression = stripWrappingParentheses(tokens);
+  if (expression.length === 0 || expression.some((token) => token.kind === 'word' && token.value === 'select')) return new Set();
+  const disjunction = splitBoolean(expression, 'or');
+  if (disjunction.length > 1) {
+    return intersectConstraints(disjunction.map((part) => guaranteedBindings(part, alias, allowUnqualified)));
+  }
+  const conjunction = splitBoolean(expression, 'and');
+  if (conjunction.length > 1) {
+    return new Set(conjunction.flatMap((part) => [...guaranteedBindings(part, alias, allowUnqualified)]));
+  }
+  return bindingAtom(expression, alias, allowUnqualified);
+}
+
 function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
   const tokens = executableTokens(sql);
   if (!tokens) return null;
+  const depths = tokenDepths(tokens);
+  if (!depths) return null;
   const sourceIndexes = tokens.flatMap((token, index) => (
     token.kind === 'word' && (token.value === 'from' || token.value === 'join')
       && tokens[index + 1]?.kind === 'word' && tokens[index + 1]?.value === 'external_rows'
@@ -85,19 +181,65 @@ function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
   if (sourceIndexes.length === 0) return [];
 
   const bindings: DeclaredSourceBinding[] = [];
-  for (let source = 0; source < sourceIndexes.length; source += 1) {
-    const start = sourceIndexes[source] + 2;
-    const end = sourceIndexes[source + 1] ?? tokens.length;
-    const connectors = new Set<string>();
-    const tables = new Set<string>();
-    for (let index = start; index < end - 2; index += 1) {
-      if (tokens[index].kind !== 'word' || tokens[index + 1]?.value !== '=' || tokens[index + 2]?.kind !== 'string') continue;
-      if (tokens[index].value === 'connector_id') connectors.add(tokens[index + 2].value);
-      if (tokens[index].value === 'table_name') tables.add(tokens[index + 2].value);
+  for (const sourceIndex of sourceIndexes) {
+    // JOIN scope depends on join type and ON/WHERE placement. Until that is
+    // parsed deliberately, fail closed rather than attributing a nearby pair.
+    if (tokens[sourceIndex].value !== 'from') return null;
+    const sourceDepth = depths[sourceIndex];
+    let scopeStart = -1;
+    for (let index = sourceIndex - 1; index >= 0; index -= 1) {
+      if (depths[index] < sourceDepth || (depths[index] === sourceDepth && QUERY_BOUNDARIES.has(tokens[index].value))) break;
+      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && tokens[index].value === 'select') {
+        scopeStart = index;
+        break;
+      }
     }
-    // One executable source reference must declare one exact pair. OR/IN,
-    // reversed comparisons, and mixed pairs stay unverified rather than being
-    // guessed into a Cartesian product.
+    if (scopeStart < 0) return null;
+
+    let scopeEnd = tokens.length;
+    for (let index = sourceIndex + 2; index < tokens.length; index += 1) {
+      if (depths[index] < sourceDepth || (depths[index] === sourceDepth && QUERY_BOUNDARIES.has(tokens[index].value))) {
+        scopeEnd = index;
+        break;
+      }
+    }
+    const sameScopeSources = sourceIndexes.filter((index) => index >= scopeStart && index < scopeEnd && depths[index] === sourceDepth);
+    if (sameScopeSources.length !== 1) return null;
+
+    let cursor = sourceIndex + 2;
+    let alias: string | null = null;
+    if (tokens[cursor]?.kind === 'word' && tokens[cursor].value === 'as' && tokens[cursor + 1]?.kind === 'word') {
+      alias = tokens[cursor + 1].value;
+      cursor += 2;
+    } else if (tokens[cursor]?.kind === 'word' && !ALIAS_BOUNDARIES.has(tokens[cursor].value)) {
+      alias = tokens[cursor].value;
+      cursor += 1;
+    }
+
+    let whereIndex = -1;
+    for (let index = cursor; index < scopeEnd; index += 1) {
+      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && tokens[index].value === 'where') {
+        whereIndex = index;
+        break;
+      }
+    }
+    if (whereIndex < 0) return null;
+    let whereEnd = scopeEnd;
+    for (let index = whereIndex + 1; index < scopeEnd; index += 1) {
+      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && WHERE_BOUNDARIES.has(tokens[index].value)) {
+        whereEnd = index;
+        break;
+      }
+    }
+    const hasOtherRelations = tokens.slice(cursor, whereIndex).some((token, offset) => (
+      depths[cursor + offset] === sourceDepth
+      && ((token.kind === 'word' && token.value === 'join') || token.value === ',')
+    ));
+    const constraints = guaranteedBindings(tokens.slice(whereIndex + 1, whereEnd), alias, !hasOtherRelations);
+    const connectors = new Set([...constraints].filter((item) => item.startsWith('connector_id:')).map((item) => item.slice('connector_id:'.length)));
+    const tables = new Set([...constraints].filter((item) => item.startsWith('table_name:')).map((item) => item.slice('table_name:'.length)));
+    // One query scope must guarantee one exact pair. IN, reversed comparisons,
+    // mixed values and ambiguous expressions stay unverified.
     if (connectors.size !== 1 || tables.size !== 1) return null;
     bindings.push({ connectorID: [...connectors][0], table: [...tables][0] });
   }
