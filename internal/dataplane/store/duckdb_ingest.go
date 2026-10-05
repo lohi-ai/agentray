@@ -22,6 +22,9 @@ import (
 // Person projection is NOT applied here — this is the raw-event sink used by
 // pipeline self-metrics; the ingest worker's path is SinkEvents.
 func (d *DuckDB) InsertEvents(ctx context.Context, events []Event) error {
+	if err := d.admitDataWrite(); err != nil {
+		return err
+	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		return insertEventsTx(ctx, tx, events)
 	})
@@ -151,6 +154,9 @@ func insertEventsTx(ctx context.Context, tx *sql.Tx, events []Event) error {
 // what this file can show it applied (see duckdb_position.go). An empty mark is
 // a write that did not come off the durable stream.
 func (d *DuckDB) SinkEvents(ctx context.Context, events []Event, mark AppliedMark) error {
+	if err := d.admitDataWrite(); err != nil {
+		return err
+	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
 		if err := insertEventsTx(ctx, tx, events); err != nil {
 			return err
@@ -158,7 +164,13 @@ func (d *DuckDB) SinkEvents(ctx context.Context, events []Event, mark AppliedMar
 		if err := d.applyPersonUpdatesTx(ctx, tx, events); err != nil {
 			return err
 		}
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		if err := recordAppliedReceiptsTx(ctx, tx, mark, time.Now().UTC()); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
@@ -384,6 +396,11 @@ func (d *DuckDB) ReconcileAliases(ctx context.Context, rows [][3]string) error {
 // for events: one durable consumer carries both subjects, so the position it
 // records covers both (see duckdb_position.go).
 func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID, table string, rows []connector.LandedRow, mark AppliedMark) error {
+	if len(rows) > 0 {
+		if err := d.admitDataWrite(); err != nil {
+			return err
+		}
+	}
 	if len(rows) == 0 {
 		// An empty batch still settles its message, and settling advances the
 		// consumer's ack floor: record the position so the file does not fall
@@ -399,13 +416,27 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 		return err
 	}
 	return d.Write(ctx, func(tx *sql.Tx) error {
+		superseded := false
+		if mark.Source != nil {
+			superseded, err = sourceReceiptSupersededTx(ctx, tx, mark.Source)
+			if err != nil {
+				return err
+			}
+		}
 		// Chunked multi-row statements, like the events insert: one statement
 		// per row keeps a row-group-sized buffer alive until commit, and a
 		// connector batch is up to 1,000 rows.
 		const cols = 7
 		row := placeholders(cols)
 		prefix := `INSERT OR REPLACE INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at) VALUES `
+		if superseded {
+			// Incremental runs are deltas, so an older run can still own keys that
+			// no newer run exported. Merge those missing keys while refusing to
+			// replace values already owned by the newer capture.
+			prefix = `INSERT OR IGNORE INTO external_rows (project_id, connector_id, table_name, row_key, cursor, data, synced_at) VALUES `
+		}
 		now := time.Now().UTC()
+		inserted := int64(0)
 		for start := 0; start < len(rows); start += insertEventsChunk {
 			chunk := rows[start:min(start+insertEventsChunk, len(rows))]
 			args := make([]any, 0, len(chunk)*cols)
@@ -413,10 +444,50 @@ func (d *DuckDB) InsertExternalRows(ctx context.Context, projectID, connectorID,
 				args = append(args, pid, cid, table, r.Key, r.Cursor, r.DataJSON, now)
 			}
 			stmt := prefix + strings.TrimSuffix(strings.Repeat(row+",", len(chunk)), ",")
-			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+			result, err := tx.ExecContext(ctx, stmt, args...)
+			if err != nil {
 				return err
 			}
+			if superseded {
+				n, rowsErr := result.RowsAffected()
+				if rowsErr != nil {
+					return rowsErr
+				}
+				inserted += n
+			}
 		}
-		return advancePositionTx(ctx, tx, mark)
+		if err := advancePositionTx(ctx, tx, mark); err != nil {
+			return err
+		}
+		if err := recordAppliedReceiptsTx(ctx, tx, mark, now); err != nil {
+			return err
+		}
+		if superseded {
+			// Source-wide ordering cannot establish which run owns an existing
+			// incremental key. Persist uncertainty even when every row was ignored:
+			// that apparent no-op may have discarded a delayed middle update.
+			if err := markSourceOrderingAmbiguousTx(ctx, tx, mark.Source, now); err != nil {
+				return err
+			}
+			if inserted == 0 {
+				return nil
+			}
+			// The current source receipt remains authoritative, but its prior
+			// sandbox proof cannot cover keys newly recovered from the older run.
+			return invalidateSourceConfirmationsTx(ctx, tx,
+				sql.NullString{String: projectID, Valid: true},
+				sql.NullString{String: connectorID, Valid: true},
+				sql.NullString{String: table, Valid: true}, now)
+		}
+		if mark.Source == nil {
+			// Legacy envelopes can still mutate a configured source table. They do
+			// not carry a generation receipt, so invalidate any prior sandbox proof
+			// explicitly rather than letting changed rows inherit it.
+			return invalidateSourceConfirmationsTx(ctx, tx,
+				sql.NullString{String: projectID, Valid: true},
+				sql.NullString{String: connectorID, Valid: true},
+				sql.NullString{String: table, Valid: true}, now)
+		}
+		return nil
 	})
 }

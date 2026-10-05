@@ -207,6 +207,9 @@ landing rows are kept.
 
 ## Configuration (`internal/shared/config/config.go`)
 
+Per-serving-store publication, landing, query confirmation, disk pressure, and
+restore behavior are documented in [DATA-RECOVERY.md](DATA-RECOVERY.md).
+
 ### JetStream environment isolation and readiness recovery
 
 Lohi now runs **production only**. The deployment script rejects `--env dev`;

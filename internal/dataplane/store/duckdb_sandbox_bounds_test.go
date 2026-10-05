@@ -436,58 +436,54 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 		// so the kernel bound is the term a child can actually commit.
 		childOverhead = 32 << 20
 	)
-	// Both colours, in both files: the values have to reach each service, and it
-	// is the per-service map that decides that (see below).
-	services := []string{"agentray-api-blue", "agentray-api-green"}
+	// 2server/api.yaml is the checked-in source that renders every blue/green
+	// generation. The remaining GCE compose file owns only shared Redis/NATS.
+	path := repoPath(t, filepath.Join("2server", "api.yaml"))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	memLimitMiB, err := appSpecValue(string(raw), "memoryMb")
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	memLimit, err := dockerSizeBytes(memLimitMiB + "MiB")
+	if err != nil {
+		t.Fatalf("%s memoryMb: %v", path, err)
+	}
+	if got := memLimit / (1 << 20); got != 1024 {
+		t.Fatalf("%s: api memoryMb = %d MiB, want 1024", path, got)
+	}
+	gomemlimitValue, err := appSpecMapValue(string(raw), "env", "GOMEMLIMIT")
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	gomemlimit, err := dockerSizeBytes(gomemlimitValue)
+	if err != nil {
+		t.Fatalf("%s GOMEMLIMIT: %v", path, err)
+	}
+	if got := gomemlimit / (1 << 20); got != 256 {
+		t.Fatalf("%s: GOMEMLIMIT = %d MiB, want 256", path, got)
+	}
+	durable, err := appSpecMapValue(string(raw), "instanceEnv", "INGEST_DURABLE")
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if !strings.Contains(durable, "${generation}") {
+		t.Fatalf("%s: INGEST_DURABLE = %q, want a per-generation template", path, durable)
+	}
 
-	for _, env := range []string{"dev", "prod"} {
-		path := repoPath(t, filepath.Join("infra", "gce", env, "docker-compose.yml"))
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		memLimit, err := composeAnchorMemLimit(string(raw))
-		if err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		if got := memLimit / (1 << 20); got != 1024 {
-			t.Fatalf("%s: api mem_limit = %d MiB, want 1024", path, got)
-		}
-		if anchorEnvKey(t, string(raw), "GOMEMLIMIT") {
-			// YAML merge keys are shallow: a service's own `environment:` map
-			// replaces the anchor's, so a limit declared on the anchor reaches no
-			// container at all. This is how the first cut of this ticket shipped
-			// a GOMEMLIMIT that did nothing.
-			t.Errorf("%s: GOMEMLIMIT is on the anchor, where a service's own environment map drops it", path)
-		}
-		blocks := composeServiceBlocks(t, string(raw))
-		for _, name := range services {
-			block, ok := blocks[name]
-			if !ok {
-				t.Fatalf("%s: no %s service", path, name)
-			}
-			gomemlimit, err := environmentValue(block, "GOMEMLIMIT")
-			if err != nil {
-				t.Fatalf("%s %s: %v — the value must be on the service, not the anchor", path, name, err)
-			}
-			if got := gomemlimit / (1 << 20); got != 256 {
-				t.Fatalf("%s %s: GOMEMLIMIT = %d MiB, want 256", path, name, got)
-			}
-		}
-		gomemlimit := int64(256) << 20
-
-		mainEngine := duckdbSizeBytes(t, sandboxMainMemoryLimit)
-		childAllowance := int64(sandboxRlimitBudget) + childOverhead
-		total := gomemlimit + mainEngine + int64(sandboxMaxProjects)*childAllowance + reserve
-		if total > memLimit {
-			t.Fatalf("%s: envelope %d MiB exceeds mem_limit %d MiB (GOMEMLIMIT %d + main engine %s + %d children × (%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
-				path, total/(1<<20), memLimit/(1<<20), gomemlimit/(1<<20), sandboxMainMemoryLimit,
-				sandboxMaxProjects, sandboxRlimitBudget/(1<<20), childOverhead/(1<<20), reserve/(1<<20))
-		}
-		t.Logf("%s: %d MiB of %d MiB declared (GOMEMLIMIT + main %s + %d×(%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
-			path, total/(1<<20), memLimit/(1<<20), sandboxMainMemoryLimit,
+	mainEngine := duckdbSizeBytes(t, sandboxMainMemoryLimit)
+	childAllowance := int64(sandboxRlimitBudget) + childOverhead
+	total := gomemlimit + mainEngine + int64(sandboxMaxProjects)*childAllowance + reserve
+	if total > memLimit {
+		t.Fatalf("%s: envelope %d MiB exceeds memoryMb %d MiB (GOMEMLIMIT %d + main engine %s + %d children × (%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
+			path, total/(1<<20), memLimit/(1<<20), gomemlimit/(1<<20), sandboxMainMemoryLimit,
 			sandboxMaxProjects, sandboxRlimitBudget/(1<<20), childOverhead/(1<<20), reserve/(1<<20))
 	}
+	t.Logf("%s: %d MiB of %d MiB declared for every generated colour (GOMEMLIMIT + main %s + %d×(%d MiB rlimit + %d MiB runtime) + %d MiB reserve)",
+		path, total/(1<<20), memLimit/(1<<20), sandboxMainMemoryLimit,
+		sandboxMaxProjects, sandboxRlimitBudget/(1<<20), childOverhead/(1<<20), reserve/(1<<20))
 
 	// The budget that is claimed is the budget that is set: both engines report
 	// the constant they were given.
@@ -686,119 +682,38 @@ func TestSandboxChildInheritsNoSecrets(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-// parseAPIBudget reads the api service's mem_limit and GOMEMLIMIT out of a
-// compose file. It scans the api anchor rather than the file, so the sibling
-// web service's limit in the same file cannot be mistaken for it.
-// composeAnchorMemLimit reads the api service anchor the blue and green
-// definitions are built from (mem_limit is inherited from it — no service
-// redefines it, so the anchor's value is the one that reaches the container).
-func composeAnchorMemLimit(raw string) (int64, error) {
-	for _, line := range strings.Split(anchorBlockFrom(raw), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "mem_limit:") {
-			return dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, "mem_limit:")))
-		}
-	}
-	return 0, errors.New("the api anchor declares no mem_limit")
-}
-
-// anchorEnvKey reports whether the anchor sets this environment key. It looks
-// for the YAML key, not the word: the anchor's own comment names GOMEMLIMIT.
-func anchorEnvKey(t *testing.T, raw, key string) bool {
-	t.Helper()
-	_ = anchorBlock(t, raw)
-	for _, line := range strings.Split(anchorBlockFrom(raw), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), key+":") {
-			return true
-		}
-	}
-	return false
-}
-
-func anchorBlock(t *testing.T, raw string) string {
-	t.Helper()
-	block := anchorBlockFrom(raw)
-	if block == "" {
-		t.Fatal("no x-agentray-api anchor")
-	}
-	return block
-}
-
-func anchorBlockFrom(raw string) string {
-	var b strings.Builder
-	started := false
+func appSpecValue(raw, key string) (string, error) {
+	inSpec := false
 	for _, line := range strings.Split(raw, "\n") {
 		switch {
-		case strings.HasPrefix(line, "x-agentray-api:"):
-			started = true
-		case started && line != "" && !strings.HasPrefix(line, " "):
-			return b.String()
-		}
-		if started {
-			b.WriteString(line)
-			b.WriteString("\n")
+		case line == "spec:":
+			inSpec = true
+		case inSpec && line != "" && !strings.HasPrefix(line, " "):
+			return "", fmt.Errorf("spec declares no %s", key)
+		case inSpec && strings.HasPrefix(line, "  "+key+":"):
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "  "+key+":")), `"'`), nil
 		}
 	}
-	return b.String()
+	return "", fmt.Errorf("spec declares no %s", key)
 }
 
-// composeServiceBlocks splits the services section into one block per service.
-// It is deliberately structural rather than a YAML decode: the property under
-// test is *which* service a key lands in, which is exactly what a flat scan of
-// the file cannot see.
-func composeServiceBlocks(t *testing.T, raw string) map[string]string {
-	t.Helper()
-	blocks := map[string]string{}
-	var b strings.Builder
-	name := ""
-	flush := func() {
-		if name != "" {
-			blocks[name] = b.String()
-		}
-		b.Reset()
-	}
-	inServices := false
+func appSpecMapValue(raw, section, key string) (string, error) {
+	inSpec, inSection := false, false
 	for _, line := range strings.Split(raw, "\n") {
 		switch {
-		case line == "services:":
-			inServices = true
-			continue
-		case !inServices:
-			continue
-		case line != "" && !strings.HasPrefix(line, " "):
-			flush()
-			name = ""
-			inServices = false
-			continue
-		case strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && strings.HasSuffix(line, ":"):
-			flush()
-			name = strings.TrimSuffix(strings.TrimSpace(line), ":")
-			continue
-		}
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	flush()
-	return blocks
-}
-
-// environmentValue reports the value of one key in a service's `environment:`
-// map — the map that reaches the container.
-func environmentValue(block, key string) (int64, error) {
-	inEnv := false
-	for _, line := range strings.Split(block, "\n") {
-		trimmed := strings.TrimSpace(line)
-		switch {
-		case trimmed == "environment:":
-			inEnv = true
-			continue
-		case inEnv && strings.HasPrefix(trimmed, key+":"):
-			return dockerSizeBytes(strings.TrimSpace(strings.TrimPrefix(trimmed, key+":")))
-		case inEnv && strings.HasSuffix(line, ":") && strings.HasPrefix(line, "    "):
-			inEnv = false
+		case line == "spec:":
+			inSpec = true
+		case inSpec && line != "" && !strings.HasPrefix(line, " "):
+			return "", fmt.Errorf("spec.%s declares no %s", section, key)
+		case inSpec && line == "  "+section+":":
+			inSection = true
+		case inSection && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "    "):
+			return "", fmt.Errorf("spec.%s declares no %s", section, key)
+		case inSection && strings.HasPrefix(line, "    "+key+":"):
+			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "    "+key+":")), `"'`), nil
 		}
 	}
-	return 0, fmt.Errorf("no %s in the service's environment map", key)
+	return "", fmt.Errorf("spec.%s declares no %s", section, key)
 }
 
 // dockerSizeBytes parses the compose/Dockerfile size form: "768m" is MiB,

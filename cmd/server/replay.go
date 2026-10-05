@@ -71,7 +71,18 @@ func replayDLQ(cfg config.Config) error {
 			// acks the DLQ copy away. A repeated replay is the lesser hazard:
 			// re-applying is a replace for connector rows and is already
 			// tolerated for events (see the batcher's ack comment).
-			if _, perr := ss.JS.Publish(ctx, target, msg.Data()); perr != nil {
+			replay := &nats.Msg{Subject: target, Data: msg.Data(), Header: nats.Header{}}
+			for _, key := range []string{ingestion.OriginSubjectHeader, ingestion.OriginStreamHeader,
+				ingestion.OriginStreamSeqHeader, ingestion.OriginDigestHeader, ingestion.OriginPublishedAtHeader,
+				ingestion.OriginUnverifiableHeader} {
+				if value := msg.Headers().Get(key); value != "" {
+					replay.Header.Set(key, value)
+				}
+			}
+			if replay.Header.Get(ingestion.OriginStreamSeqHeader) == "" {
+				replay.Header.Set(ingestion.LegacyDLQHeader, "true")
+			}
+			if _, perr := ss.JS.PublishMsg(ctx, replay); perr != nil {
 				// Leave it in the DLQ (do not ack) so a later run retries it.
 				log.Printf("replay-dlq: republish failed, leaving in DLQ: %v", perr)
 				continue

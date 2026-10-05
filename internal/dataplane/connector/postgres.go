@@ -108,21 +108,34 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 	type endpoint struct {
 		host string
 		port uint16
+		dest SourceDestination
 	}
-	endpoints := []endpoint{{cfg.Host, cfg.Port}}
+	endpoints := []endpoint{{host: cfg.Host, port: cfg.Port}}
 	for _, fallback := range cfg.Fallbacks {
-		endpoints = append(endpoints, endpoint{fallback.Host, fallback.Port})
+		endpoints = append(endpoints, endpoint{host: fallback.Host, port: fallback.Port})
 	}
 	approvedByHost := make(map[string][]endpoint)
-	for _, ep := range endpoints {
+	for i := range endpoints {
+		ep := &endpoints[i]
 		if strings.TrimSpace(ep.host) == "" || strings.HasPrefix(ep.host, "/") {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
-		if _, err := policy.Destination(ep.host, ep.port); err != nil {
+		dest, err := policy.Destination(ep.host, ep.port)
+		if err != nil {
 			return fmt.Errorf("postgres: source destination is not approved")
 		}
+		ep.dest = *dest
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, ep.host)
+		if err != nil || len(ips) == 0 {
+			return fmt.Errorf("postgres: approved source host did not resolve")
+		}
+		for _, ip := range ips {
+			if !destinationAllowsIP(*dest, ip.IP) {
+				return fmt.Errorf("postgres: resolved source address is not approved")
+			}
+		}
 		host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(ep.host)), ".")
-		approvedByHost[host] = append(approvedByHost[host], ep)
+		approvedByHost[host] = append(approvedByHost[host], *ep)
 	}
 	// pgx resolves hostnames before DialFunc and passes DialFunc an IP address.
 	// Admit inside LookupFunc, retain the exact hostname/IP/port association,
@@ -164,18 +177,38 @@ func admitPostgresConfig(ctx context.Context, cfg *pgx.ConnConfig, policy *Sourc
 		if err != nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
-		if net.ParseIP(host) == nil {
+		dialIP := net.ParseIP(host)
+		if dialIP == nil {
+			return nil, fmt.Errorf("postgres: source destination is not approved")
+		}
+		port64, err := strconv.ParseUint(portText, 10, 16)
+		if err != nil {
 			return nil, fmt.Errorf("postgres: source destination is not approved")
 		}
 		resolvedMu.Lock()
 		_, admitted := resolved[net.JoinHostPort(host, portText)]
 		resolvedMu.Unlock()
-		if !admitted {
-			return nil, fmt.Errorf("postgres: source destination is not approved")
+		if admitted {
+			return (&net.Dialer{}).DialContext(dialCtx, network, address)
 		}
-		return (&net.Dialer{}).DialContext(dialCtx, network, address)
+		// A caller may supply its own LookupFunc. Re-resolve the policy hostname
+		// and require an exact address match before allowing that dial.
+		for _, ep := range endpoints {
+			if ep.port != uint16(port64) || !destinationAllowsIP(ep.dest, dialIP) {
+				continue
+			}
+			ips, err := net.DefaultResolver.LookupIPAddr(dialCtx, ep.host)
+			if err != nil {
+				continue
+			}
+			for _, ip := range ips {
+				if ip.IP.Equal(dialIP) {
+					return (&net.Dialer{}).DialContext(dialCtx, network, net.JoinHostPort(dialIP.String(), portText))
+				}
+			}
+		}
+		return nil, fmt.Errorf("postgres: resolved source address is not approved")
 	}
-	_ = ctx // resolution is intentionally deferred to pgx's per-connect lookup.
 	return nil
 }
 

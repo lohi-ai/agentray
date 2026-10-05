@@ -44,9 +44,10 @@ func TestWarmDurableOverEmptyStoreRefusesReady(t *testing.T) {
 	warm.serve(t)
 	publishParity(t, warm)
 	warm.waitReady(t, 20*time.Second)
-	if got := len(warm.eventIDs(t)); got != 2 {
+	if got := len(warm.waitEventIDs(t, 20*time.Second, func(ids []string) bool { return len(ids) == 2 })); got != 2 {
 		t.Fatalf("warm colour applied %d events, want 2", got)
 	}
+	warm.waitExternalRowKeys(t, parityTable, 20*time.Second, func(keys []string) bool { return len(keys) == 2 })
 	warm.park()
 
 	// The recreated volume: same durable, never-before-existing DuckDB file.
