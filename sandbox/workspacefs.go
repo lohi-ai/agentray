@@ -2,8 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -31,6 +34,8 @@ type workspaceFS interface {
 	Stat(ctx context.Context, rel string) (fsStat, error)
 	// ReadFile returns the whole contents of a workspace-relative file.
 	ReadFile(ctx context.Context, rel string) ([]byte, error)
+	// ReadRange returns a bounded byte window and a hash of the full file.
+	ReadRange(ctx context.Context, rel string, offset int64, limit int) ([]byte, string, error)
 	// WriteFile writes data at rel, creating parent directories.
 	WriteFile(ctx context.Context, rel string, data []byte) error
 	// List returns every regular file under the workspace-relative directory
@@ -38,7 +43,8 @@ type workspaceFS interface {
 	// filepath.WalkDir would visit them.
 	List(ctx context.Context, root string) ([]string, error)
 	// ReadEach calls fn once per readable file in rels, in order, skipping any
-	// file larger than maxBytes and any file that cannot be read. It exists so a
+	// file larger than maxBytes and any file that cannot be read (fn receives nil
+	// data for these skipped files). It exists so a
 	// tree-wide search is one round trip on the sandbox substrate instead of one
 	// exec per file. fn returning an error stops the walk and is returned as-is,
 	// so a caller can stop early with errStopRead.
@@ -91,7 +97,10 @@ func walkOrderLess(a, b string) bool {
 // out on write.
 type hostFS struct{ ws *Workspace }
 
-func (h hostFS) Stat(_ context.Context, rel string) (fsStat, error) {
+func (h hostFS) Stat(ctx context.Context, rel string) (fsStat, error) {
+	if err := ctx.Err(); err != nil {
+		return fsStat{}, err
+	}
 	resolved, err := h.resolveExisting(rel)
 	if err != nil {
 		return fsStat{}, err
@@ -103,12 +112,19 @@ func (h hostFS) Stat(_ context.Context, rel string) (fsStat, error) {
 	return fsStat{Size: info.Size(), IsDir: info.IsDir()}, nil
 }
 
-func (h hostFS) ReadFile(_ context.Context, rel string) ([]byte, error) {
+func (h hostFS) ReadFile(ctx context.Context, rel string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	resolved, err := h.resolveExisting(rel)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(resolved)
+	data, err := os.ReadFile(resolved)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return data, err
 }
 
 func (h hostFS) WriteFile(_ context.Context, rel string, data []byte) error {
@@ -133,13 +149,16 @@ func (h hostFS) WriteFile(_ context.Context, rel string, data []byte) error {
 	return os.WriteFile(abs, data, 0o644)
 }
 
-func (h hostFS) List(_ context.Context, root string) ([]string, error) {
+func (h hostFS) List(ctx context.Context, root string) ([]string, error) {
 	abs, err := searchRoot(h.ws, root)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
 	walkErr := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil // skip unreadable entries rather than aborting the search
 		}
@@ -153,23 +172,35 @@ func (h hostFS) List(_ context.Context, root string) ([]string, error) {
 			return nil // never follow symlinks out of the workspace
 		}
 		out = append(out, workspaceRel(h.ws, path))
+		if len(out) > 100000 {
+			return fmt.Errorf("file listing exceeds 100000 entries; narrow path")
+		}
 		return nil
 	})
 	if walkErr != nil {
 		return nil, walkErr
 	}
-	return out, nil
+	return filterIgnored(ctx, h, out, root)
 }
 
-func (h hostFS) ReadEach(_ context.Context, rels []string, maxBytes int64, fn func(string, []byte) error) error {
+func (h hostFS) ReadEach(ctx context.Context, rels []string, maxBytes int64, fn func(string, []byte) error) error {
 	for _, rel := range rels {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		abs := filepath.Join(h.ws.Root(), filepath.FromSlash(rel))
 		info, err := os.Stat(abs)
 		if err != nil || info.IsDir() || info.Size() > maxBytes {
+			if err := fn(rel, nil); err != nil {
+				return err
+			}
 			continue
 		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
+			if err := fn(rel, nil); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := fn(rel, data); err != nil {
@@ -177,6 +208,63 @@ func (h hostFS) ReadEach(_ context.Context, rels []string, maxBytes int64, fn fu
 		}
 	}
 	return nil
+}
+
+func (h hostFS) ReadRange(ctx context.Context, rel string, offset int64, limit int) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	path, err := h.resolveExisting(rel)
+	if err != nil {
+		return nil, "", err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+	before, err := f.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("read range requires a regular file")
+	}
+	hash := sha256.New()
+	buf := make([]byte, 64*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		n, err := f.Read(buf)
+		if n > 0 {
+			_, _ = hash.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	if _, err = f.Seek(offset, io.SeekStart); err != nil {
+		return nil, "", err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)))
+	if err != nil {
+		return nil, "", err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return nil, "", fmt.Errorf("file changed while reading; read it again")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	return data, strings.ToUpper(hex.EncodeToString(hash.Sum(nil)[:fileHashHexLen/2])), err
 }
 
 // resolveExisting applies the read-path guard: resolve the relative path, follow
@@ -272,7 +360,9 @@ func (s sandboxFS) ReadFile(ctx context.Context, rel string) ([]byte, error) {
 	var out []byte
 	found := false
 	err := s.ReadEach(ctx, []string{rel}, maxReadWholeFileBytes, func(_ string, data []byte) error {
-		out, found = data, true
+		if data != nil {
+			out, found = data, true
+		}
 		return nil
 	})
 	if err != nil {
@@ -315,6 +405,9 @@ cat > "$p"`
 
 func (s sandboxFS) List(ctx context.Context, root string) ([]string, error) {
 	root = strings.TrimSpace(root)
+	if root == "." {
+		root = ""
+	}
 	if root != "" {
 		if _, _, err := s.ws.Resolve(root); err != nil {
 			return nil, err
@@ -353,7 +446,35 @@ find . -type d \( ` + findPruneExpr() + ` \) -prune -o -type f -print`
 	// find(1) walks in directory order; the host walks in sorted order. Sort with
 	// the walk comparator so both substrates hand grep/glob the same sequence.
 	sort.Slice(out, func(i, j int) bool { return walkOrderLess(out[i], out[j]) })
-	return out, nil
+	if len(out) > 100000 {
+		return nil, fmt.Errorf("file listing exceeds 100000 entries; narrow path")
+	}
+	return filterIgnored(ctx, s, out, root)
+}
+
+func (s sandboxFS) ReadRange(ctx context.Context, rel string, offset int64, limit int) ([]byte, string, error) {
+	if _, _, err := s.ws.Resolve(rel); err != nil {
+		return nil, "", err
+	}
+	const script = `p="$1"
+if command -v sha256sum >/dev/null 2>&1; then sha256sum "$p" | cut -c1-16
+else shasum -a 256 "$p" | cut -c1-16; fi
+dd if="$p" bs=1 skip="$2" count="$3" 2>/dev/null`
+	res, err := s.exec(ctx, agentcore.SandboxExec{Argv: []string{"/bin/sh", "-c", script, "sh", rel, strconv.FormatInt(offset, 10), strconv.Itoa(limit)}})
+	if err != nil {
+		return nil, "", err
+	}
+	if res.ExitCode != 0 {
+		return nil, "", sandboxCmdErr("read range", res)
+	}
+	hash, data, ok := strings.Cut(res.Stdout, "\n")
+	if !ok {
+		return nil, "", fmt.Errorf("invalid range response")
+	}
+	if _, err := normalizeFileHash(hash); err != nil {
+		return nil, "", err
+	}
+	return []byte(data), strings.ToUpper(hash), nil
 }
 
 func (s sandboxFS) ReadEach(ctx context.Context, rels []string, maxBytes int64, fn func(string, []byte) error) error {
@@ -377,10 +498,9 @@ func (s sandboxFS) readEachWithBudget(ctx context.Context, rels []string, maxByt
 max_total=$2
 total=0
 while IFS= read -r p; do
-  [ -f "$p" ] || continue
-  n=$(wc -c < "$p" 2>/dev/null | tr -d ' ') || continue
-  [ -n "$n" ] || continue
-  [ "$n" -gt "$max_file" ] && continue
+  if [ ! -f "$p" ] || [ ! -r "$p" ]; then printf 'S %s\n' "$p"; continue; fi
+  n=$(wc -c < "$p" 2>/dev/null | tr -d ' ')
+  if [ -z "$n" ] || [ "$n" -gt "$max_file" ]; then printf 'S %s\n' "$p"; continue; fi
   total=$((total + n))
   if [ "$total" -gt "$max_total" ]; then exit 3; fi
   printf 'F %s %s\n' "$n" "$p"
@@ -414,6 +534,13 @@ func parseFramedFiles(stream string, fn func(string, []byte) error) error {
 			return nil
 		}
 		header, rest := stream[:nl], stream[nl+1:]
+		if strings.HasPrefix(header, "S ") {
+			if err := fn(strings.TrimPrefix(header[2:], "./"), nil); err != nil {
+				return err
+			}
+			stream = rest
+			continue
+		}
 		if !strings.HasPrefix(header, "F ") {
 			return nil
 		}

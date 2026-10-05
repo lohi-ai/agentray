@@ -62,16 +62,16 @@ func evalBridgeAgent(t *testing.T, language, code string, allowed []string, limi
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := agentcore.NewFauxProvider(
+	provider := sandboxNativeFixture(
 		agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
 		agentcore.AssistantText("done"),
 	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: provider,
-		Model:    "faux",
-		Tools:    agentcore.NewToolSet(eval, probe),
-		Policy:   agentcore.NewAllowList(allowed...),
-		Limits:   limits,
+		NativeProvider: provider,
+		Model:          "faux",
+		Tools:          agentcore.NewToolSet(eval, probe),
+		Policy:         agentcore.NewAllowList(allowed...),
+		Limits:         limits,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -111,10 +111,10 @@ func TestEvalHostToolBridgeJavaScriptAndPython(t *testing.T) {
 			if message := toolMessageFor(t, result, ToolEval); !strings.Contains(message.Content, test.want) {
 				t.Fatalf("eval result = %q, want %q", message.Content, test.want)
 			}
-			if len(result.Tools) != 2 || result.Tools[0].Tool != probeToolName || result.Tools[1].Tool != ToolEval {
-				t.Fatalf("traces = %+v, want nested probe then eval", result.Tools)
+			if len(result.Tools) != 2 || result.Tools[0].Tool != ToolEval || result.Tools[1].Tool != probeToolName {
+				t.Fatalf("traces = %+v, want outer eval then nested probe", result.Tools)
 			}
-			if !result.Tools[0].Allowed || !strings.HasPrefix(result.Tools[0].CallID, "eval-call/bridge-") {
+			if !result.Tools[1].Allowed || !strings.HasPrefix(result.Tools[1].CallID, "eval-call/bridge-") {
 				t.Fatalf("nested trace = %+v", result.Tools[0])
 			}
 		})
@@ -158,8 +158,8 @@ func TestEvalHostToolBridgeCannotBypassPolicyOrSchema(t *testing.T) {
 			if !strings.Contains(message.Content, test.want) {
 				t.Fatalf("eval result = %q, want %q", message.Content, test.want)
 			}
-			if len(result.Tools) != 2 || result.Tools[0].Allowed || !result.Tools[1].Allowed {
-				t.Fatalf("traces = %+v, want blocked nested trace and allowed eval", result.Tools)
+			if len(result.Tools) != 2 || !result.Tools[0].Allowed || result.Tools[1].Allowed {
+				t.Fatalf("traces = %+v, want allowed eval and blocked nested trace", result.Tools)
 			}
 		})
 	}
@@ -185,7 +185,7 @@ catch (error) { second = error.message; }
 	if len(result.Tools) != 3 {
 		t.Fatalf("traces = %+v, want allowed probe, blocked probe, eval", result.Tools)
 	}
-	if !result.Tools[0].Allowed || result.Tools[1].Allowed || !result.Tools[2].Allowed {
+	if !result.Tools[0].Allowed || !result.Tools[1].Allowed || result.Tools[2].Allowed {
 		t.Fatalf("trace permissions = %+v", result.Tools)
 	}
 }
@@ -201,7 +201,7 @@ catch (error) { second = error.message; }
 ({first, second})`
 	args, _ := json.Marshal(map[string]any{"language": "javascript", "code": code})
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: agentcore.NewFauxProvider(
+		NativeProvider: sandboxNativeFixture(
 			agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
 			agentcore.AssistantText("done"),
 		),
@@ -221,7 +221,7 @@ catch (error) { second = error.message; }
 	if message := toolMessageFor(t, result, ToolEval); !strings.Contains(message.Content, "per cell") {
 		t.Fatalf("eval result = %q", message.Content)
 	}
-	if len(result.Tools) != 3 || !result.Tools[0].Allowed || result.Tools[1].Allowed || result.Tools[1].Reason == "" {
+	if len(result.Tools) != 3 || !result.Tools[1].Allowed || result.Tools[2].Allowed || result.Tools[2].Reason == "" {
 		t.Fatalf("cap traces = %+v", result.Tools)
 	}
 }
@@ -250,7 +250,7 @@ func TestEvalHostToolBridgeRunsHooksAndPairsStreamEvents(t *testing.T) {
 		"code":     `await tool.bridge_probe({value: "hooked"})`,
 	})
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: agentcore.NewFauxProvider(
+		NativeProvider: sandboxNativeFixture(
 			agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
 			agentcore.AssistantText("done"),
 		),
@@ -348,7 +348,7 @@ func TestEvalHostToolBridgeHonorsParallelToolContract(t *testing.T) {
 			code := fmt.Sprintf(`await Promise.all([tool.%s({}), tool.%s({})])`, name, name)
 			args, _ := json.Marshal(map[string]any{"language": "javascript", "code": code})
 			agent, err := agentcore.New(agentcore.Config{
-				Provider: agentcore.NewFauxProvider(
+				NativeProvider: sandboxNativeFixture(
 					agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
 					agentcore.AssistantText("done"),
 				),
@@ -365,7 +365,7 @@ func TestEvalHostToolBridgeHonorsParallelToolContract(t *testing.T) {
 			if probe.maximum.Load() != wantMax {
 				t.Fatalf("maximum concurrency = %d, want %d; traces=%+v", probe.maximum.Load(), wantMax, result.Tools)
 			}
-			if len(result.Tools) != 3 || result.Tools[0].Tool != name || result.Tools[1].Tool != name {
+			if len(result.Tools) != 3 || result.Tools[1].Tool != name || result.Tools[2].Tool != name {
 				t.Fatalf("traces = %+v", result.Tools)
 			}
 		})
@@ -381,7 +381,7 @@ func TestEvalHostToolBridgeCancellationSettlesNestedTrace(t *testing.T) {
 		"code":            `await tool.bridge_slow({})`,
 	})
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: agentcore.NewFauxProvider(
+		NativeProvider: sandboxNativeFixture(
 			agentcore.AssistantToolCall("eval-call", ToolEval, string(args)),
 			agentcore.AssistantText("recovered from timeout"),
 		),
@@ -404,8 +404,8 @@ func TestEvalHostToolBridgeCancellationSettlesNestedTrace(t *testing.T) {
 	default:
 		t.Fatal("slow bridged tool never started")
 	}
-	if len(result.Tools) != 2 || result.Tools[0].Tool != slow.Name() || result.Tools[0].Error == "" || result.Tools[1].Tool != ToolEval {
-		t.Fatalf("timeout traces = %+v, want settled nested failure then eval", result.Tools)
+	if len(result.Tools) != 2 || result.Tools[1].Tool != slow.Name() || result.Tools[1].Error == "" || result.Tools[0].Tool != ToolEval {
+		t.Fatalf("timeout traces = %+v, want eval and settled nested failure", result.Tools)
 	}
 }
 

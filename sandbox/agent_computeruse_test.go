@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,13 +79,13 @@ func newWorkspaceDir(t *testing.T) *Workspace {
 // computerUseAgent wires a real agent loop around the computer_use tool over the
 // given sandbox + workspace, granting the tool in the policy. provider is the
 // only thing that varies between the faux and real tests.
-func computerUseAgent(t *testing.T, provider agentcore.LLMProvider, model string, sb agentcore.Sandbox, ws *Workspace) *agentcore.Agent {
+func computerUseAgent(t *testing.T, provider *ai.FallbackProvider, model string, sb agentcore.Sandbox, ws *Workspace) *agentcore.Agent {
 	t.Helper()
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: provider,
-		Model:    model,
-		Tools:    agentcore.NewToolSet(NewComputerUseTool(sb, ws)),
-		Policy:   agentcore.NewAllowList(ToolComputerUse),
+		NativeProvider: provider,
+		Model:          model,
+		Tools:          agentcore.NewToolSet(NewComputerUseTool(sb, ws)),
+		Policy:         agentcore.NewAllowList(ToolComputerUse),
 	})
 	if err != nil {
 		t.Fatalf("agentcore.New: %v", err)
@@ -131,7 +132,7 @@ func TestComputerUseAgent_PersistsStateAndWritesArtifact_Faux(t *testing.T) {
 	sb := newTestSandbox(t)
 	ws := newWorkspaceDir(t)
 
-	faux := agentcore.NewFauxProvider(
+	faux := sandboxNativeFixture(
 		// Turn 1: stash state inside the session container (not the workspace).
 		agentcore.AssistantToolCall("c1", ToolComputerUse, `{"command":"echo step1-state > /tmp/agent_state"}`),
 		// Turn 2: read the prior call's state and persist a real artifact to the
@@ -184,15 +185,15 @@ func TestComputerUseAgent_BlockedWithoutGrant_Faux(t *testing.T) {
 	stub := &recordingSandbox{}
 	ws := newWorkspaceDir(t)
 
-	faux := agentcore.NewFauxProvider(
+	faux := sandboxNativeFixture(
 		agentcore.AssistantToolCall("c1", ToolComputerUse, `{"command":"echo i should never run"}`),
 		agentcore.AssistantText("understood, I cannot use that tool"),
 	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "faux-model",
-		Tools:    agentcore.NewToolSet(NewComputerUseTool(stub, ws)),
-		Policy:   agentcore.NewAllowList(), // computer_use deliberately NOT granted
+		NativeProvider: faux,
+		Model:          "faux-model",
+		Tools:          agentcore.NewToolSet(NewComputerUseTool(stub, ws)),
+		Policy:         agentcore.NewAllowList(), // computer_use deliberately NOT granted
 	})
 	if err != nil {
 		t.Fatalf("agentcore.New: %v", err)
@@ -210,12 +211,14 @@ func TestComputerUseAgent_BlockedWithoutGrant_Faux(t *testing.T) {
 	}
 	var sawBlock bool
 	for _, m := range res.Messages {
-		if m.Role == agentcore.RoleTool && strings.Contains(m.Content, "blocked:") {
+		// The native engine does not advertise ungranted tools; a scripted
+		// attempt receives an unavailable-tool result before host dispatch.
+		if m.Role == agentcore.RoleTool && strings.Contains(m.Content, "not found") {
 			sawBlock = true
 		}
 	}
 	if !sawBlock {
-		t.Fatal("block reason was not returned to the model")
+		t.Fatalf("block reason was not returned to the model: %+v", res.Messages)
 	}
 }
 
@@ -230,7 +233,7 @@ func TestComputerUseAgent_InstallAndGenerateDocument_Faux(t *testing.T) {
 	sb := newComputerUseSandbox(t)
 	ws := newWorkspaceDir(t)
 
-	faux := agentcore.NewFauxProvider(
+	faux := sandboxNativeFixture(
 		// Call 1: install a tiny pure-python package from the network, proving the
 		// session can `pip install` and that the install persists for the next call.
 		agentcore.AssistantToolCall("c1", ToolComputerUse,
@@ -284,12 +287,20 @@ func TestComputerUseAgent_RealProvider_GeneratesDocument(t *testing.T) {
 	sb := newComputerUseSandbox(t)
 	ws := newWorkspaceDir(t)
 
-	provider := ai.NewOpenAIProvider(apiKey, baseURL, ai.DefaultCompat())
+	rawModel, _ := json.Marshal(map[string]any{"id": model, "api": "openai-completions", "provider": "openai", "baseUrl": baseURL, "contextWindow": 128000})
+	provider := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: rawModel, Stream: func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		controls := map[string]any{}
+		for k, v := range options {
+			controls[k] = v
+		}
+		controls["apiKey"] = apiKey
+		return (ai.NativeProvider{}).Stream(ctx, model, view, controls)
+	}}}}
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: provider,
-		Model:    model,
-		Tools:    agentcore.NewToolSet(NewComputerUseTool(sb, ws)),
-		Policy:   agentcore.NewAllowList(ToolComputerUse),
+		NativeProvider: provider,
+		Model:          model,
+		Tools:          agentcore.NewToolSet(NewComputerUseTool(sb, ws)),
+		Policy:         agentcore.NewAllowList(ToolComputerUse),
 		Definition: agentcore.AgentDefinition{
 			Agents: "You can run shell commands and code via the computer_use tool in a " +
 				"Linux sandbox. The sandbox already has python3 with openpyxl, python-docx, " +

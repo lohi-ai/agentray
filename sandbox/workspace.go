@@ -5,13 +5,38 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Workspace guards file tools to one host directory. It accepts only relative
 // paths, cleans them, follows the root symlink once, and rejects traversal before
 // any filesystem operation happens.
 type Workspace struct {
-	root string
+	root         string
+	mu           sync.Mutex
+	partialReads map[string]string
+}
+
+func (w *Workspace) recordRead(path, hash string, partial bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !partial {
+		delete(w.partialReads, path)
+		return nil
+	}
+	if w.partialReads == nil {
+		w.partialReads = map[string]string{}
+	}
+	if _, exists := w.partialReads[path]; !exists && len(w.partialReads) >= 1024 {
+		return fmt.Errorf("partial read tracking is full; complete an earlier read before opening more partial files")
+	}
+	w.partialReads[path] = hash
+	return nil
+}
+func (w *Workspace) partialRead(path string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.partialReads[path]
 }
 
 func NewWorkspace(root string) (*Workspace, error) {

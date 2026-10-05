@@ -66,6 +66,7 @@ func (t *GrepTool) Schema() agentcore.ToolSchema {
 		Strict: agentcore.ToolStrictEnabled,
 		Description: "Search file contents in the agent workspace by regular expression (Go/RE2 syntax). " +
 			"Returns matching lines as path:line:text, capped at " + fmt.Sprint(maxGrepMatches) + " matches. " +
+			"Honors nested .gitignore files and excludes dependency/VCS directories. Files above 2MB are reported as skipped; read_file byte paging can inspect them. Use offset to continue a result page. " +
 			"Use glob to narrow which files are searched, path to scope to a subdirectory, and context " +
 			"to see surrounding lines without a follow-up read_file.",
 		Parameters: map[string]any{
@@ -90,6 +91,7 @@ func (t *GrepTool) Schema() agentcore.ToolSchema {
 					"type":        "integer",
 					"description": "Maximum matches to return. Defaults to " + fmt.Sprint(maxGrepMatches) + " (also the hard cap).",
 				},
+				"offset": map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000, "description": "Number of matching lines to skip; continuation notices supply the next offset."},
 			},
 			"required": []string{"pattern"},
 		},
@@ -105,12 +107,16 @@ func (t *GrepTool) Run(ctx context.Context, args string) (string, error) {
 		Literal         bool   `json:"literal"`
 		Context         int    `json:"context"`
 		Limit           int    `json:"limit"`
+		Offset          int    `json:"offset"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("grep: invalid arguments: %w", err)
 	}
 	if strings.TrimSpace(in.Pattern) == "" {
 		return "", fmt.Errorf("grep: pattern is empty")
+	}
+	if in.Offset < 0 || in.Offset > 1000000 {
+		return "", fmt.Errorf("grep: offset must be between 0 and 1000000")
 	}
 	expr := in.Pattern
 	if in.Literal {
@@ -161,17 +167,38 @@ func (t *GrepTool) Run(ctx context.Context, args string) (string, error) {
 	}
 
 	var out []string
+	var skipped []string
 	count := 0
+	seen := 0
 	truncated := false
 	readErr := t.fs.ReadEach(ctx, candidates, maxGrepFileBytes, func(rel string, data []byte) error {
+		if data == nil {
+			if len(skipped) < 20 {
+				skipped = append(skipped, rel)
+			}
+			return nil
+		}
 		if !utf8.Valid(data) {
 			return nil // binary
 		}
 		lines := strings.Split(string(data), "\n")
 		var hits []int
 		for i, line := range lines {
+			if i%1024 == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if re.MatchString(line) {
+				seen++
+				if seen <= in.Offset {
+					continue
+				}
 				hits = append(hits, i)
+				if count+len(hits) > limit {
+					truncated = true
+					break
+				}
 			}
 		}
 		if len(hits) == 0 {
@@ -191,12 +218,21 @@ func (t *GrepTool) Run(ctx context.Context, args string) (string, error) {
 	if readErr != nil && !errors.Is(readErr, errStopRead) {
 		return "", fmt.Errorf("grep: %w", readErr)
 	}
-	if count == 0 {
-		return "no matches", nil
-	}
 	joined := strings.Join(out, "\n")
+	if count == 0 {
+		joined = "no matches"
+	}
 	if truncated {
-		joined += fmt.Sprintf("\n…[truncated at %d matches — narrow with path/glob or raise limit]", limit)
+		joined += fmt.Sprintf("\n…[truncated at %d matches — use offset=%d to continue, or narrow path/glob; maximum limit is %d]", limit, in.Offset+count, maxGrepMatches)
+	}
+	if len(skipped) > 0 {
+		joined += "\n[Search coverage incomplete: unreadable files or files above 2MB were skipped (up to 20 shown): " + strings.Join(skipped, ", ") + ". Use read_file byte_offset/byte_limit to inspect large files.]"
+	}
+	for _, line := range out {
+		if strings.HasSuffix(line, "…") {
+			joined += "\n[Long matching lines were shortened; use read_file byte paging for full text.]"
+			break
+		}
 	}
 	return joined, nil
 }
@@ -262,7 +298,7 @@ func (t *GlobTool) Schema() agentcore.ToolSchema {
 	return agentcore.ToolSchema{
 		Name:   ToolGlob,
 		Strict: agentcore.ToolStrictEnabled,
-		Description: "List files in the agent workspace whose relative path matches a glob pattern " +
+		Description: "List files in the agent workspace, respecting nested .gitignore and dependency exclusions, whose relative path matches a glob pattern " +
 			"(supports *, ?, and ** for any depth, e.g. **/*.go or src/**/test_*.ts). " +
 			"Returns up to " + fmt.Sprint(maxGlobMatches) + " sorted paths.",
 		Parameters: map[string]any{
@@ -324,7 +360,7 @@ func (t *GlobTool) Run(ctx context.Context, args string) (string, error) {
 // substrate's half of scoping a search; the sandbox substrate scopes with the
 // same relative path inside the mount.
 func searchRoot(ws *Workspace, sub string) (string, error) {
-	if strings.TrimSpace(sub) == "" {
+	if strings.TrimSpace(sub) == "" || filepath.Clean(sub) == "." {
 		if ws.Root() == "" {
 			return "", fmt.Errorf("workspace is not configured")
 		}

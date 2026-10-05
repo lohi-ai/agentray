@@ -22,6 +22,8 @@ require (
 
 require github.com/gorilla/websocket v1.5.3
 
+require github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
+
 require (
 	github.com/apache/arrow-go/v18 v18.5.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
