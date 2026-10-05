@@ -57,6 +57,7 @@ interface DataTableProps<T extends Record<string, unknown>> {
   /** Row className resolver — e.g. error rows in red. */
   rowClassName?: (row: T) => string | undefined;
   emptyMessage?: string;
+  appearance?: 'lohi-evidence';
 }
 
 // Numbers sort numerically; everything else uses a locale-aware numeric-aware
@@ -79,6 +80,7 @@ export function DataTable<T extends Record<string, unknown>>({
   onRowClick,
   rowClassName,
   emptyMessage = 'No results.',
+  appearance,
 }: DataTableProps<T>) {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -203,7 +205,7 @@ export function DataTable<T extends Record<string, unknown>>({
     // which jams the labels against the card edge. The Table doesn't forward a
     // className to <table>, so even out the header's vertical padding from the
     // wrapper (`!` beats StyleX's atomic classes) — header now matches body rhythm.
-    <div className="flex w-full flex-col gap-3 [&_thead_th]:!pt-3 [&_thead_th]:!pb-3">
+    <div className={`flex w-full flex-col gap-3 [&_thead_th]:!pt-3 [&_thead_th]:!pb-3 ${appearance === 'lohi-evidence' ? 'lohi-evidence-table' : ''}`}>
 
       {hasHeader ? (
         <div className="flex flex-wrap items-center gap-3">

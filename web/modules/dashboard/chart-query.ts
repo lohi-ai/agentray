@@ -318,6 +318,15 @@ function scanSQL(sql: string): ScannedSQL {
   return { executable: out, standaloneDateTokens, dateLiterals, fullyClassified };
 }
 
+// Evidence consumers need the same lexical boundary as range binding: source
+// names in comments, quoted identifiers, escape strings, and dollar strings
+// are not executable declarations. Keep the scanner private and expose only
+// the position-preserving executable text plus its fail-closed verdict.
+export function scanExecutableSQL(sql: string): Pick<ScannedSQL, 'executable' | 'fullyClassified'> {
+  const { executable, fullyClassified } = scanSQL(sql);
+  return { executable, fullyClassified };
+}
+
 function exactDateTimestamp(value: string): number | null {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:(?:T| )(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?$/);
   if (!match) return null;

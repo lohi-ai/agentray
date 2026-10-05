@@ -19,11 +19,13 @@ import {
 } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
 import { formatCompact, formatRelative } from '@/lib/format';
-import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview } from '@/modules/app/hooks/connectors';
+import { useConnectors, useConnectorSchema, useConnectorSyncs, useDatasetPreview, useSourceReadinessOverview } from '@/modules/app/hooks/connectors';
 import { previewProjection } from './dataset-preview';
 import { ConfirmDialog, Modal, PromptDialog } from '@/modules/shared/components/modal';
 import { DataTable, type DataColumn } from '@/modules/shared/components/data-table';
-import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/signal-primitives';
+import { Button, EmptyState, Loading, Panel } from '@/modules/shared/components/lohi-evidence-primitives';
+import { ConnectorReadinessSummary, SourceReadinessCell } from './source-readiness';
+import { useProjectAccess } from '@/modules/app/hooks';
 
 // Data connectors settings tab: configure an external source (DSN write-only),
 // test it, browse its schema, and set up per-table syncs into the analytics
@@ -37,6 +39,8 @@ export function ConnectorsTab() {
   const [deleting, setDeleting] = useState<DataConnector | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; error?: string } | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const readiness = useSourceReadinessOverview(connectors.map((connector) => ({ id: connector.id, name: connector.name })));
+  const access = useProjectAccess();
 
   const selected = connectors.find((c) => c.id === selectedID) ?? null;
 
@@ -65,6 +69,13 @@ export function ConnectorsTab() {
     },
     { key: 'kind', header: 'Kind' },
     {
+      key: 'readiness',
+      header: 'Data ready to query',
+      sortable: false,
+      width: { type: 'proportional', value: 2, minWidth: 200 },
+      renderCell: (c) => <ConnectorReadinessSummary readiness={readiness.syncs.filter((sync) => sync.connector_id === c.id).map((sync) => sync.readiness)} loading={readiness.loading} denied={readiness.denied} error={!!readiness.error} />,
+    },
+    {
       key: 'created_at',
       header: 'Added',
       sortValue: (c) => c.created_at,
@@ -79,10 +90,10 @@ export function ConnectorsTab() {
       width: { type: 'pixel', value: 150 },
       renderCell: (c) => (
         <span className="flex justify-end gap-1">
-          <Button variant="ghost" size="sm" onClick={() => void testConnector(c.id)}>
+          <Button variant="ghost" size="sm" disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => void testConnector(c.id)}>
             {testing === c.id ? 'Testing…' : 'Test'}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setDeleting(c)}>
+          <Button variant="ghost" size="sm" disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setDeleting(c)}>
             <span style={{ color: 'var(--danger)' }}>Delete</span>
           </Button>
         </span>
@@ -90,7 +101,7 @@ export function ConnectorsTab() {
     },
     // testConnector is stable enough for this table; testing drives the label.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [selectedID, testing]);
+  ], [selectedID, testing, readiness.syncs, readiness.loading, readiness.denied, readiness.error, access.canWrite, access.reason]);
 
   return (
     <>
@@ -120,7 +131,7 @@ export function ConnectorsTab() {
       ) : connectors.length === 0 ? (
         <Panel
           title="Data connectors"
-          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setAdding(true)}>Add connector</Button>}
+          action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setAdding(true)}>Add connector</Button>}
         >
           <EmptyState title="No connectors" detail="Connect an external database to sync its tables into analytics. Agents query the synced rows via run_sql." />
         </Panel>
@@ -130,7 +141,8 @@ export function ConnectorsTab() {
             title="Data connectors"
             columns={columns}
             data={connectors}
-            action={<Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setAdding(true)}>Add connector</Button>}
+            appearance="lohi-evidence"
+            action={<Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!access.canWrite} tooltip={access.reason || undefined} onClick={() => setAdding(true)}>Add connector</Button>}
             onRowClick={(c) => setSelectedID(c.id)}
           />
           {testResult ? (
@@ -142,7 +154,13 @@ export function ConnectorsTab() {
           ) : null}
           <div className="mt-4">
             {selected ? (
-              <SyncsPanel connector={selected} />
+              <SyncsPanel
+                connector={selected}
+                syncs={readiness.syncs.filter((sync) => sync.connector_id === selected.id)}
+                loading={readiness.loadingByConnector[selected.id] ?? false}
+                canWrite={access.canWrite}
+                writeReason={access.reason}
+              />
             ) : (
               <Panel title="Table syncs">
                 <EmptyState title="Pick a connector" detail="Select a connector above to configure which tables to sync." />
@@ -207,8 +225,8 @@ function AddConnectorDialog({ kinds, onSubmit, onClose }: {
   );
 }
 
-function SyncsPanel({ connector }: { connector: DataConnector }) {
-  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id);
+function SyncsPanel({ connector, syncs: statusSyncs, loading: statusLoading, canWrite, writeReason }: { connector: DataConnector; syncs: ConnectorSync[]; loading: boolean; canWrite: boolean; writeReason: string }) {
+  const { syncs, loading, create, update, remove, run, cancel, setEnabled } = useConnectorSyncs(connector.id, { syncs: statusSyncs, loading: statusLoading });
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
   const [adding, setAdding] = useState(false);
@@ -219,7 +237,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
   const [draftLoading, setDraftLoading] = useState(false);
   const [running, setRunning] = useState<string | null>(null);
   async function requestDraft(hint: string) {
-    if (!projectID) return;
+    if (!projectID || !canWrite) return;
     setDraftLoading(true);
     try {
       setDraft(await new AgentRayAPI(projectID).draftConnectorSyncs(connector.id, hint));
@@ -232,6 +250,13 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
 
   const columns = useMemo<DataColumn<ConnectorSync>[]>(() => [
     { key: 'source_table', header: 'Table', width: { type: 'proportional', value: 1, minWidth: 90 } },
+    {
+      key: 'readiness',
+      header: 'Data ready to query',
+      sortable: false,
+      width: { type: 'proportional', value: 2, minWidth: 210 },
+      renderCell: (s) => <SourceReadinessCell readiness={s.readiness} />,
+    },
     {
       key: 'key_column',
       header: 'Key / cursor',
@@ -327,7 +352,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       header: 'Enabled',
       width: { type: 'pixel', value: 72 },
       renderCell: (s) => (
-        <Button variant="ghost" size="sm" onClick={() => void setEnabled.mutate({ sync: s, enabled: !s.enabled })}>
+        <Button variant="ghost" size="sm" disabled={!canWrite} tooltip={writeReason || undefined} onClick={() => void setEnabled.mutate({ sync: s, enabled: !s.enabled })}>
           {s.enabled ? 'On' : 'Off'}
         </Button>
       ),
@@ -342,12 +367,13 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
       renderCell: (s) => (
         <span className="flex justify-end gap-1">
           <Button variant="ghost" size="sm" onClick={() => setPreviewing(s)}>Preview</Button>
-          <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
+          <Button variant="ghost" size="sm" disabled={!canWrite} tooltip={writeReason || undefined} onClick={() => setEditing(s)}>Edit</Button>
           {s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running') ? (
             <Button
               variant="ghost"
               size="sm"
-              disabled={s.latest_run.cancel_requested}
+              disabled={!canWrite || s.latest_run.cancel_requested}
+              tooltip={writeReason || undefined}
               onClick={() => void cancel.mutate(s.latest_run!.id)}
             >
               {s.latest_run.cancel_requested ? 'Cancelling…' : 'Cancel'}
@@ -356,6 +382,8 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
             <Button
               variant="ghost"
               size="sm"
+              disabled={!canWrite}
+              tooltip={writeReason || undefined}
               onClick={() => {
                 setRunning(s.id);
                 void run.mutateAsync({ id: s.id, idempotencyKey: newIdempotencyKey() }).finally(() => setRunning(null));
@@ -364,7 +392,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
               {running === s.id ? 'Running…' : 'Run now'}
             </Button>
           )}
-          <Button variant="ghost" size="sm" onClick={() => void remove.mutate(s.id)}>
+          <Button variant="ghost" size="sm" disabled={!canWrite} tooltip={writeReason || undefined} onClick={() => void remove.mutate(s.id)}>
             <span style={{ color: 'var(--danger)' }}>Delete</span>
           </Button>
         </span>
@@ -372,7 +400,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
     },
     // update/run/cancel/remove are react-query mutations (stable identities).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [running, setError]);
+  ], [running, setError, canWrite, writeReason]);
 
   const lastError = syncs.find((s) => s.last_status === 'error')?.last_error;
 
@@ -419,10 +447,10 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
         title={`Table syncs — ${connector.name}`}
         action={
           <span className="flex gap-2">
-            <Button variant="ghost" size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting(true)}>
+            <Button variant="ghost" size="sm" icon={<Sparkles size={14} />} disabled={!canWrite} tooltip={writeReason || undefined} onClick={() => setDrafting(true)}>
               {draftLoading ? 'Drafting…' : 'AI draft'}
             </Button>
-            <Button variant="outline" size="sm" icon={<Plus size={15} />} onClick={() => setAdding(true)}>Add sync</Button>
+            <Button variant="outline" size="sm" icon={<Plus size={15} />} disabled={!canWrite} tooltip={writeReason || undefined} onClick={() => setAdding(true)}>Add sync</Button>
           </span>
         }
       >
@@ -432,7 +460,7 @@ function SyncsPanel({ connector }: { connector: DataConnector }) {
           <EmptyState title="No syncs configured" detail="Add a table sync (or let AI draft one) to start pulling rows into analytics." />
         ) : (
           <>
-            <DataTable columns={columns} data={syncs} pageSize={10} />
+            <DataTable columns={columns} data={syncs} pageSize={10} appearance="lohi-evidence" />
             {lastError ? (
               <Text type="supporting" className="mt-2 block" style={{ color: 'var(--danger)' }}>Last error: {lastError}</Text>
             ) : null}

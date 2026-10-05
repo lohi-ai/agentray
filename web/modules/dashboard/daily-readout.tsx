@@ -5,7 +5,8 @@ import { ArrowRight, Check, MessageSquare, Sparkles, TrendingUp, X } from 'lucid
 import type { AgentRecommendation, AgentRun } from '@/lib/api';
 import { formatCost, formatRelative } from '@/lib/format';
 import { useDailyReadout, useProjectAccess } from '@/modules/app/hooks';
-import { Button, Loading } from '@/modules/shared/components/signal-primitives';
+import { Button as LegacyButton, Loading as LegacyLoading } from '@/modules/shared/components/signal-primitives';
+import { Button as EvidenceButton, Loading as EvidenceLoading } from '@/modules/shared/components/lohi-evidence-primitives';
 import { AgentMarkdown } from '@/modules/shared/components/agent-markdown';
 import { useStackSheet } from '@/modules/shared/components/stack-sheet';
 
@@ -100,8 +101,10 @@ function RunNarration({ run }: { run: AgentRun }) {
 // agent saw on its last run, the open recommendations it wrote, and a one-click
 // way to ask it a follow-up. This is what makes AgentRay's home "agent-led"
 // rather than a static dashboard.
-export function DailyReadout() {
+export function DailyReadout({ appearance }: { appearance?: 'lohi-evidence' } = {}) {
   const { latestRun, recommendations, loading, ackRec, acking } = useDailyReadout();
+  const Button = appearance === 'lohi-evidence' ? EvidenceButton : LegacyButton;
+  const Loading = appearance === 'lohi-evidence' ? EvidenceLoading : LegacyLoading;
 
   const ask = (
     <Link href="/chat">
