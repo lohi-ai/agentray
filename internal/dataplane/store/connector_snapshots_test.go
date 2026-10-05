@@ -530,13 +530,23 @@ VALUES(?,?,?,?,?,2,?,0,0,?,?,?,?)`, projectID, sync.ConnectorID, sync.SourceTabl
 		t.Fatal(err)
 	}
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	candidates, err := s.ListStagingGenerations(ctx, cutoff, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
 	found := false
-	for _, candidate := range candidates {
-		found = found || candidate.Generation == oldGeneration
+	cursor := stagingGenerationCursor{}
+	for !found {
+		candidates, nextCursor, hasMore, err := s.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, candidate := range candidates {
+			if candidate.Generation == oldGeneration {
+				found = true
+				break
+			}
+		}
+		if !hasMore {
+			break
+		}
+		cursor = nextCursor
 	}
 	if !found {
 		t.Fatal("superseded sealed generation was not discovered")
@@ -616,16 +626,23 @@ VALUES(?,?,?,?,?,1,?,0,0,?,?,?,?)`, projectID, sync.ConnectorID, sync.SourceTabl
 			}
 
 			cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-			candidates, err := s.ListStagingGenerations(ctx, cutoff, 256)
-			if err != nil {
-				t.Fatal(err)
-			}
 			var candidate *StagingGenerationDescriptor
-			for i := range candidates {
-				if candidates[i].Generation == generation {
-					candidate = &candidates[i]
+			cursor := stagingGenerationCursor{}
+			for candidate == nil {
+				candidates, nextCursor, hasMore, err := s.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for i := range candidates {
+					if candidates[i].Generation == generation {
+						candidate = &candidates[i]
+						break
+					}
+				}
+				if !hasMore {
 					break
 				}
+				cursor = nextCursor
 			}
 			if candidate == nil {
 				t.Fatal("sealed generation was not discovered")
