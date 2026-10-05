@@ -45,6 +45,7 @@ type devinChatControls struct {
 	sessionID         string
 	hasParallel       bool
 	parallelToolCalls bool
+	toolChoice        string
 }
 
 func devinDecodeControls(controls map[string]any) devinChatControls {
@@ -78,6 +79,9 @@ func devinDecodeControls(controls map[string]any) devinChatControls {
 	}
 	if value, ok := controls["parallelToolCalls"].(bool); ok {
 		out.hasParallel, out.parallelToolCalls = true, value
+	}
+	if value, ok := controls["toolChoice"].(string); ok && (value == "none" || value == "auto") {
+		out.toolChoice = value
 	}
 	return out
 }
@@ -235,6 +239,7 @@ func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript 
 		configuration:            devinCompletionConfiguration{maxTokens: uint64(maxTokens), temperature: control.temperature, topP: 1, stopPatterns: devinStopPatterns},
 		tools:                    devinBuildTools(transcript),
 		disableParallelToolCalls: !parallel,
+		toolChoice:               control.toolChoice,
 		systemPromptCacheOptions: devinPromptCacheOptions(devinCacheTypeEphemeral),
 		cascadeID:                cascadeID,
 		plannerMode:              devinPlannerDefault,

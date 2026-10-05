@@ -16,6 +16,29 @@ import (
 
 // --- proto codec -------------------------------------------------------------
 
+func TestDevinSummaryDisablesToolChoiceOnWire(t *testing.T) {
+	control := devinDecodeControls(map[string]any{"toolChoice": "none"})
+	r := devinChatRequest{toolChoice: control.toolChoice}
+	fields, err := pbScan(r.encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fields {
+		if f.Number == 12 {
+			inner, err := pbScan(f.Bytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range inner {
+				if v.Number == 1 && string(v.Bytes) == "none" {
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("none tool choice did not reach Devin request")
+}
+
 func TestDevinProtoRequestFields(t *testing.T) {
 	metadata := devinCLIIdentity()
 	metadata.apiKey = devinSessionPrefix + "session-token"

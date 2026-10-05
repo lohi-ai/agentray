@@ -619,6 +619,14 @@ func toolInvocationScope(ctx context.Context) string {
 	return id
 }
 
+// ToolInvocationScope returns the host identity for this invocation. Native
+// checkpoint consumers journal effects with this scope and ToolCallID rather
+// than treating identical arguments as the same intended action.
+func ToolInvocationScope(ctx context.Context) (string, bool) {
+	id := toolInvocationScope(ctx)
+	return id, id != ""
+}
+
 // toolIdempotencyKey derives the stable key for one tool invocation. Hashing
 // keeps the key fixed-length and opaque (session IDs may embed user-visible
 // naming), sized for external APIs' idempotency-key fields.

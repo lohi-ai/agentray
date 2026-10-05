@@ -294,6 +294,7 @@ type devinChatRequest struct {
 	configuration            devinCompletionConfiguration
 	tools                    []devinChatToolDefinition
 	disableParallelToolCalls bool
+	toolChoice               string
 	systemPromptCacheOptions []byte
 	cascadeID                string
 	plannerMode              int
@@ -314,7 +315,11 @@ func (m devinChatRequest) encode() []byte {
 		w.msg(10, t.encode())
 	}
 	w.boolean(11, m.disableParallelToolCalls)
-	if tc := devinChatToolChoice("auto"); tc != nil {
+	choice := m.toolChoice
+	if choice == "" {
+		choice = "auto"
+	}
+	if tc := devinChatToolChoice(choice); tc != nil {
 		w.msg(12, tc)
 	}
 	w.msg(13, m.systemPromptCacheOptions)

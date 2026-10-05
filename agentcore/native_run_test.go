@@ -99,6 +99,46 @@ func TestPublicNativeRunFallbackToolsAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestPublicNativeRunDiscardsMalformedSavedSummary(t *testing.T) {
+	requests := 0
+	p := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: func(ctx context.Context, _ json.RawMessage, view ai.TranscriptContext, _ map[string]any) (*ai.AssistantMessageEventStream, error) {
+		requests++
+		if requests == 2 {
+			raw, _ := json.Marshal(view)
+			if !strings.Contains(string(raw), "ORIGINAL-EVIDENCE") {
+				t.Error("invalid summary replaced original history")
+			}
+		}
+		return nativeReply(ctx, &ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "done"})})
+	}}}}
+	makeAgent := func() *agentcore.Agent {
+		a, err := agentcore.New(agentcore.Config{NativeProvider: p, Model: "test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	first, err := makeAgent().Prompt(context.Background(), "ORIGINAL-EVIDENCE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint map[string]json.RawMessage
+	if err := json.Unmarshal(first.NativeState, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint["summary"], _ = json.Marshal(map[string]any{"revision": first.NativeRevision, "prefix_count": 1, "prefix_digest": strings.Repeat("0", 64), "message": map[string]any{"role": "user", "content": "[Earlier work summary]\n<|open|>tools<|sep|>session_query", "agentrayContextSummary": "bad", "timestamp": 1}})
+	state, _ := json.Marshal(checkpoint)
+	discarded := false
+	second, err := makeAgent().RunNative(context.Background(), agentcore.NativeRun{State: state, Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "continue"}}, Sink: func(e agentcore.StreamEvent) {
+		if e.Type == agentcore.StreamProgress && strings.Contains(e.Note, "Discarding") {
+			discarded = true
+		}
+	}})
+	if err != nil || second.Final != "done" || !discarded || requests != 2 {
+		t.Fatal("bad summary did not recover", err, discarded, requests)
+	}
+}
+
 func TestPublicNativeRunRejectsDisplayHistoryAndInvalidCheckpoint(t *testing.T) {
 	calls := 0
 	provider := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: func(ctx context.Context, _ json.RawMessage, _ ai.TranscriptContext, _ map[string]any) (*ai.AssistantMessageEventStream, error) {

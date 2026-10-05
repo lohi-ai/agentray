@@ -91,7 +91,7 @@ func TestPiRequestCompactionIteratesWithoutLosingEarlierSummary(t *testing.T) {
 
 func TestPiRequestCompactionFailuresUseSafeNativeView(t *testing.T) {
 	raw := piRequestJSON(piLongRequest())
-	for _, kind := range []string{"error", "panic", "empty", "too long", "storage", "cancel"} {
+	for _, kind := range []string{"error", "panic", "empty", "tool markup", "too long", "storage", "cancel"} {
 		t.Run(kind, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -105,6 +105,8 @@ func TestPiRequestCompactionFailuresUseSafeNativeView(t *testing.T) {
 					panic("broken observer")
 				case "empty":
 					return " ", u, nil
+				case "tool markup":
+					return `<|open|>tools<|sep|>call tool="session_query"<|close|>tools`, u, nil
 				case "too long":
 					return strings.Repeat("larger ", 5000), u, nil
 				case "cancel":
@@ -125,6 +127,26 @@ func TestPiRequestCompactionFailuresUseSafeNativeView(t *testing.T) {
 				t.Fatal("failed model work was counted as free")
 			}
 		})
+	}
+}
+
+func TestCompactionKeepsCurrentRequestDespiteLossySummary(t *testing.T) {
+	raw := piRequestJSON(piLongRequest())
+	task := "Write synthesis.json with release_code, budget, sites and total_cost; do not edit policy.json."
+	c := Compactor{revision: "r", config: CompactionPolicy{Budget: 1500, KeepRecent: 500, Task: task, Summarize: func(context.Context, json.RawMessage, string) (string, protocol.Usage, error) {
+		return "facts only", protocol.Usage{}, nil
+	}}}
+	view := c.Transform(context.Background(), raw)
+	if c.saved == nil || !strings.Contains(string(view), task) {
+		t.Fatal("exact current request missing", string(view))
+	}
+	if !SameJSON(view, c.Transform(context.Background(), raw)) {
+		t.Fatal("restored view dropped or duplicated task")
+	}
+	bad := *c.saved
+	bad.Message = piRequestJSON(map[string]any{"role": "user", "content": "[Earlier work summary]\n<|open|>tools<|sep|>session_query", "agentrayContextSummary": "id", "timestamp": 1})
+	if _, err := ParseSummary(string(piRequestJSON(bad))); err == nil {
+		t.Fatal("persisted wire output accepted as summary")
 	}
 }
 

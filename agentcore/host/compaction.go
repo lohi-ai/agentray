@@ -20,7 +20,10 @@ type CompactionPolicy struct {
 	// ForWindow can derive or cap it from a model window. KeepRecent is bounded
 	// to at least one token and at most half the effective budget.
 	Budget, KeepRecent int
-	Summarize          func(context.Context, json.RawMessage, string) (string, protocol.Usage, error)
+	// Task is the consumer's current user request, retained verbatim alongside
+	// summaries. It is data, never a system instruction or extra permission.
+	Task      string
+	Summarize func(context.Context, json.RawMessage, string) (string, protocol.Usage, error)
 }
 
 // Summary binds a persisted summary to an exact native transcript prefix.
@@ -38,7 +41,7 @@ func ParseSummary(raw string) (Summary, error) {
 		Role, Content, AgentrayContextSummary string
 		Timestamp                             int64
 	}
-	if json.Unmarshal([]byte(raw), &summary) != nil || summary.Revision == "" || summary.PrefixCount <= 0 || len(summary.PrefixDigest) != 64 || json.Unmarshal(summary.Message, &message) != nil || message.Role != "user" || strings.TrimSpace(message.Content) == "" || message.AgentrayContextSummary == "" || message.Timestamp <= 0 {
+	if json.Unmarshal([]byte(raw), &summary) != nil || summary.Revision == "" || summary.PrefixCount <= 0 || len(summary.PrefixDigest) != 64 || json.Unmarshal(summary.Message, &message) != nil || message.Role != "user" || !validSummaryText(message.Content) || message.AgentrayContextSummary == "" || message.Timestamp <= 0 {
 		return summary, errors.New("invalid native context summary")
 	}
 	if _, err := hex.DecodeString(summary.PrefixDigest); err != nil {
@@ -96,7 +99,7 @@ func (c *Compactor) TransformWithPolicy(ctx context.Context, raw json.RawMessage
 		var boundary struct{ Role string }
 		_ = json.Unmarshal(original[saved.PrefixCount], &boundary)
 		if boundary.Role == "assistant" || boundary.Role == "user" {
-			view = SummaryView(original, saved.PrefixCount, saved.Message)
+			view = summaryViewWithTask(original, saved.PrefixCount, saved.Message, policy.Task)
 			baseCount = saved.PrefixCount
 			headCount = len(view) - (len(original) - baseCount)
 		}
@@ -111,12 +114,12 @@ func (c *Compactor) TransformWithPolicy(ctx context.Context, raw json.RawMessage
 	if c.usage != nil {
 		c.usage(usage)
 	}
-	if err != nil || ctx.Err() != nil || strings.TrimSpace(text) == "" {
+	if err != nil || ctx.Err() != nil || !validSummaryText(text) {
 		return
 	}
 	count := baseCount + cut - headCount
 	message, _ := json.Marshal(map[string]any{"role": "user", "content": "[Earlier work summary]\n" + strings.TrimSpace(text), "agentrayContextSummary": uuid.NewString(), "timestamp": time.Now().UnixMilli()})
-	next := SummaryView(original, count, message)
+	next := summaryViewWithTask(original, count, message, policy.Task)
 	nextRaw, _ := json.Marshal(next)
 	// A summary which grows the request is not compaction. Keep the last useful
 	// view while still accounting for the auxiliary model work already performed.
@@ -145,6 +148,30 @@ func SummaryView(messages []json.RawMessage, cut int, summary json.RawMessage) [
 	}
 	kept = append(kept, summary)
 	return append(kept, messages[cut:]...)
+}
+
+func summaryViewWithTask(messages []json.RawMessage, cut int, summary json.RawMessage, task string) []json.RawMessage {
+	view := SummaryView(messages, cut, summary)
+	if task == "" {
+		return view
+	}
+	// Insert before the retained tail so later user messages keep their order.
+	index := len(view) - (len(messages) - cut)
+	pinned, _ := json.Marshal(map[string]any{"role": "user", "content": "[Current request — verbatim]\n" + task})
+	view = append(view[:index:index], append([]json.RawMessage{pinned}, view[index:]...)...)
+	return view
+}
+
+func validSummaryText(text string) bool {
+	if strings.TrimSpace(strings.TrimPrefix(text, "[Earlier work summary]")) == "" {
+		return false
+	}
+	for _, marker := range []string{"<|open|>", "<|close|>", "<|sep|>", "<tool_call>", "<function_calls>"} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 // A long autonomous run may contain only one user prompt. Cut at a completed
