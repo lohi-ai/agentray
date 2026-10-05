@@ -967,14 +967,18 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// same exception on the conversation /messages route.
 		if liveReg != nil && payload.SessionID != "" && !agentruntime.IsHandledCommand(payload.Message) {
 			mode := "steer"
-			var delivered bool
+			var control agentruntime.LiveControlResult
+			authority := agentruntime.LiveAuthority{CanWrite: !agentRunReadOnly(c, auth)}
 			if payload.Mode == "followup" {
 				mode = "followup"
-				delivered = liveReg.FollowUp(project.ID, payload.SessionID, payload.Message)
+				control = liveReg.FollowUp(project.ID, payload.SessionID, payload.Message, authority)
 			} else {
-				delivered = liveReg.Steer(project.ID, payload.SessionID, payload.Message)
+				control = liveReg.Steer(project.ID, payload.SessionID, payload.Message, authority)
 			}
-			if delivered {
+			if control == agentruntime.LiveControlDenied {
+				return echo.NewHTTPError(http.StatusForbidden, "caller cannot control a write-authorized live run")
+			}
+			if control == agentruntime.LiveControlDelivered {
 				if wantsEventStream(c) {
 					return steerAck(c, mode)
 				}
@@ -989,7 +993,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProjectID: project.ID, AgentID: c.QueryParam("agent"),
 			Message: payload.Message, History: chatHistory(payload.History),
 			SessionID: payload.SessionID,
-			ReadOnly:  !sessionAllowsWrite(project),
+			ReadOnly:  agentRunReadOnly(c, auth),
 		}
 
 		if wantsEventStream(c) {
@@ -1062,7 +1066,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			CallID:         payload.CallID,
 			Answer:         payload.Answer,
 			ConversationID: payload.ConversationID,
-			ReadOnly:       !sessionAllowsWrite(project),
+			ReadOnly:       agentRunReadOnly(c, auth),
 		}
 		if wantsEventStream(c) {
 			return streamAnswer(c, svc, opts)
@@ -1141,7 +1145,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			Message: message, History: history,
 			PiHistory: piHistory, InputID: inputID,
 			SessionID: conv.ID, ConversationID: conv.ID,
-			ReadOnly: !sessionAllowsWrite(project),
+			ReadOnly: agentRunReadOnly(c, ctx),
 		}
 		if wantsEventStream(c) {
 			return streamChat(c, svc, opts)
@@ -1272,11 +1276,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if actingAgent == "" {
 			actingAgent = conv.AgentID
 		}
-		if payload.AgentID != "" && payload.AgentID != conv.AgentID {
-			if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
-				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-			}
-		}
 
 		// A second message while a run is live on this conversation is an amendment,
 		// not a new run: steer/follow-up it (same auto-route as /chat), keyed on the
@@ -1290,7 +1289,12 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			if payload.Mode == "followup" {
 				mode = "followup"
 			}
-			delivered, err := liveReg.QueueInput(project.ID, convID, mode == "followup", func() (agentcore.Message, error) {
+			control, err := liveReg.QueueInput(project.ID, convID, mode == "followup", agentruntime.LiveAuthority{CanWrite: !agentRunReadOnly(c, ctx)}, func() (agentcore.Message, error) {
+				if payload.AgentID != "" && payload.AgentID != conv.AgentID {
+					if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
+						return agentcore.Message{}, echo.NewHTTPError(http.StatusBadRequest, err.Error())
+					}
+				}
 				entry, err := agentruntime.AppendMessageEntry(c.Request().Context(), store, convID,
 					string(agentcore.RoleUser), payload.Message, actingAgent, ctx.User.ID, "", 0)
 				return agentcore.Message{Role: agentcore.RoleUser, Content: payload.Message, InputID: entry.ID}, err
@@ -1298,11 +1302,19 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			if err != nil {
 				return err
 			}
-			if delivered {
+			if control == agentruntime.LiveControlDenied {
+				return echo.NewHTTPError(http.StatusForbidden, "caller cannot control a write-authorized live run")
+			}
+			if control == agentruntime.LiveControlDelivered {
 				if wantsEventStream(c) {
 					return steerAck(c, mode)
 				}
 				return c.JSON(http.StatusOK, map[string]any{"steered": true, "delivered": true, "mode": mode})
+			}
+		}
+		if payload.AgentID != "" && payload.AgentID != conv.AgentID {
+			if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 		}
 
@@ -1536,17 +1548,26 @@ func userTurnAbove(ctx context.Context, store interface {
 	return storage.AgentConversationEntry{}, fmt.Errorf("agentray: no user message above entry")
 }
 
-// authProject resolves the auth context + project for a request in one step.
+// authProject resolves the auth context + project for a session-owned request
+// in one step. Membership proves the user may own history in the selected
+// project; the selected principal separately decides runtime authority. Retain
+// Role/IsDemo for session behavior without lending that membership's grants (or
+// capture key) to a supplied management credential.
 func authProject(c echo.Context, store *storage.Store) (authContext, storage.Project, error) {
 	ctx, err := authFromRequest(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}
-	project, err := projectFromRequest(c, store)
+	principal, admitted, err := principalAndProject(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}
-	return ctx, project, nil
+	project, err := store.ProjectByIDForUser(c.Request().Context(), ctx.User.ID, admitted.ID)
+	if err != nil {
+		return authContext{}, storage.Project{}, echo.NewHTTPError(http.StatusForbidden, "project not available")
+	}
+	ctx.Principal = principal
+	return ctx, projectForPrincipal(project, principal), nil
 }
 
 // wantsEventStream reports whether the client asked for an SSE token stream.

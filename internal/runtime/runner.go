@@ -454,8 +454,8 @@ type RunOptions struct {
 	NativeHistoryRevision string
 	InputID               string
 	// ReadOnly strips the run down to the analytics reads (see
-	// BuildParams.ReadOnly). Set for a question asked from inside the shared
-	// demo by someone whose membership there is read-only.
+	// BuildParams.ReadOnly). Set when the selected caller may inspect but not
+	// change the project, including shared-demo viewers and restricted credentials.
 	ReadOnly bool
 	// StepGate is the optional pause-before-each-turn hook for the Lab's explain
 	// mode. Threaded straight into BuildParams; nil keeps the run continuous.
@@ -547,7 +547,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// working" by the client's resume poll.
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
-	live := r.Live.register(opts.SessionID, opts.ProjectID, cancelRun)
+	live := r.Live.register(opts.SessionID, opts.ProjectID, LiveAuthority{CanWrite: !opts.ReadOnly}, cancelRun)
 	defer r.Live.unregister(opts.SessionID)
 	// A caller-supplied source (the Lab) takes precedence; both are nil for a plain
 	// run, leaving the loop's defaults.

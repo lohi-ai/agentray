@@ -3,9 +3,11 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
@@ -33,7 +35,7 @@ func TestChatKeywordEntryPersists(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 
-	boot, err := st.CreateAccount(ctx, "kw-qa@example.com", "QA", "password1234", "kw ws", "kw proj")
+	boot, err := st.CreateAccount(ctx, fmt.Sprintf("kw-qa-%d@example.com", time.Now().UnixNano()), "QA", "password1234", "kw ws", "kw proj")
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}

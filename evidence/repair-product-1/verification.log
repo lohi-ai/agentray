@@ -1,0 +1,29 @@
+WORKDIR: /Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config
+DATABASE: postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable
+
+COMMAND: go build ./...
+EXIT_CODE: 0
+
+COMMAND: go vet ./...
+EXIT_CODE: 0
+
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./internal/app -count=1 -timeout=20m
+OUTPUT: ok github.com/lohi-ai/agentray/internal/app 9.356s
+EXIT_CODE: 0
+
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./internal/dataplane ./internal/dataplane/store ./internal/runtime ./internal/app -run 'TestLayerImportRules|TestLohiEvidenceV1|TestChatKeywordEntryPersists|TestInstalledDataAnalystBoardAuthorJourney' -count=1 -v -timeout=15m
+OUTPUT SUMMARY:
+  PASS internal/dataplane TestLayerImportRules
+  PASS internal/dataplane/store all TestLohiEvidenceV1* cases (R01-R11 included)
+  PASS internal/runtime TestChatKeywordEntryPersists
+  PASS internal/app TestInstalledDataAnalystBoardAuthorJourney
+EXIT_CODE: 0
+
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./... -count=1 -timeout=30m
+OUTPUT SUMMARY:
+  all packages passed; integration packages used the required PostgreSQL URL
+  internal/app 15.082s
+  internal/dataplane/store 51.275s
+  internal/runtime 13.555s
+  no package reported skipped tests
+EXIT_CODE: 0

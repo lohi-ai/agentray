@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,8 +16,29 @@ import (
 
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/querytest"
-	"github.com/lohi-ai/agentray/internal/workloads"
 )
+
+var lohiEvidenceRecipeBlock = regexp.MustCompile(`(?s)<!-- recipe:(R[0-9]{2}) -->\s*` + "```sql\\s*(.*?)\\s*```")
+
+// lohiEvidenceRecipes reads the cross-layer contract fixture as data instead of
+// importing the workloads package into dataplane. The app-level installation
+// journey verifies that this same file is the skill installed on Data Analyst;
+// these storage tests only need the canonical SQL text they execute.
+func lohiEvidenceRecipes(t *testing.T) map[string]string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "workloads", "config", "lohi-evidence-v1", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read lohi evidence contract: %v", err)
+	}
+	out := make(map[string]string, 11)
+	for _, match := range lohiEvidenceRecipeBlock.FindAllStringSubmatch(string(body), -1) {
+		out[match[1]] = strings.TrimSpace(match[2])
+	}
+	if len(out) != 11 {
+		t.Fatalf("lohi evidence contract has %d recipes, want 11", len(out))
+	}
+	return out
+}
 
 func seedLohiEvidenceFixture(t *testing.T, d *DuckDB) querytest.LohiEvidenceFixture {
 	t.Helper()
@@ -63,7 +87,7 @@ func TestLohiEvidenceV1RecipesExecuteAndRepeatExactly(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedLohiEvidenceFixture(t, d)
 	pool, ctx := newTestSandboxPool(t, d, nil)
-	recipes := workloads.LohiEvidenceRecipes()
+	recipes := lohiEvidenceRecipes(t)
 	if len(recipes) != 11 {
 		t.Fatalf("recipe count = %d, want 11", len(recipes))
 	}
@@ -111,7 +135,7 @@ func TestLohiEvidenceV1HonestAnswerBoundaries(t *testing.T) {
 	d := openTestDuckDB(t)
 	fixture := seedLohiEvidenceFixture(t, d)
 	pool, ctx := newTestSandboxPool(t, d, nil)
-	recipes := workloads.LohiEvidenceRecipes()
+	recipes := lohiEvidenceRecipes(t)
 	run := func(ref string) []map[string]any {
 		t.Helper()
 		query, args, err := scopedReadonlySQL(recipes[ref], fixture.ProjectID, nil)
@@ -193,7 +217,7 @@ func TestLohiEvidenceV1SettlementAndSubsecondAgeStayHonest(t *testing.T) {
 	pool, queryCtx := newTestSandboxPool(t, d, nil)
 	run := func(ref string) []map[string]any {
 		t.Helper()
-		query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()[ref], projectID, nil)
+		query, args, err := scopedReadonlySQL(lohiEvidenceRecipes(t)[ref], projectID, nil)
 		if err != nil {
 			t.Fatalf("scope %s: %v", ref, err)
 		}
@@ -224,7 +248,7 @@ func TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows(t *testing.T)
 		t.Fatalf("remove partial-day revenue control: %v", err)
 	}
 	pool, queryCtx := newTestSandboxPool(t, d, nil)
-	query, args, err := scopedReadonlySQL(workloads.LohiEvidenceRecipes()["R11"], fixture.ProjectID, nil)
+	query, args, err := scopedReadonlySQL(lohiEvidenceRecipes(t)["R11"], fixture.ProjectID, nil)
 	if err != nil {
 		t.Fatalf("scope R11: %v", err)
 	}
@@ -294,62 +318,4 @@ func sameFixtureNumber(got, want any) bool {
 	gotNumber, gotErr := strconv.ParseFloat(fmt.Sprint(got), 64)
 	wantNumber, wantErr := strconv.ParseFloat(fmt.Sprint(want), 64)
 	return gotErr == nil && wantErr == nil && gotNumber == wantNumber
-}
-
-func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
-	s := plansTestStore(t)
-	ctx := context.Background()
-	userID, projectID := seedConvProject(t, s)
-	pack := workloads.MustBySlug("data-analyst")
-	preset := AgentPreset{
-		Slug: pack.Slug, Name: pack.Name, Tagline: pack.Tagline, Description: pack.Description,
-		Category: string(pack.Category), Icon: pack.Icon, SoulMD: pack.SoulMD, AgentsMD: pack.AgentsMD,
-		Scopes: pack.Scopes,
-	}
-	for _, skill := range pack.Skills {
-		preset.Skills = append(preset.Skills, AgentPresetSkill(skill))
-	}
-	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
-		return preset, slug == preset.Slug
-	})
-	t.Cleanup(func() { SetPackCatalog(nil, nil) })
-
-	agent, err := s.InstallAgentPreset(ctx, userID, projectID, "data-analyst")
-	if err != nil {
-		t.Fatalf("install data analyst: %v", err)
-	}
-	skills, err := s.ListAgentSkills(ctx, userID, projectID, agent.ID)
-	if err != nil {
-		t.Fatalf("list installed skills: %v", err)
-	}
-	var installed AgentSkill
-	for _, skill := range skills {
-		if skill.Name == workloads.LohiEvidenceVersion {
-			installed = skill
-		}
-	}
-	if installed.ID == "" || installed.Body != workloads.LohiEvidenceSkill().Body {
-		t.Fatalf("portable skill was not installed verbatim: id=%q body_equal=%v", installed.ID, installed.Body == workloads.LohiEvidenceSkill().Body)
-	}
-
-	installed.Body += "\n\nOperator note: preserve this local edit."
-	if _, err := s.UpsertAgentSkill(ctx, userID, projectID, agent.ID, installed); err != nil {
-		t.Fatalf("edit installed skill: %v", err)
-	}
-	reinstalled, err := s.InstallAgentPreset(ctx, userID, projectID, "data-analyst")
-	if err != nil {
-		t.Fatalf("reinstall data analyst: %v", err)
-	}
-	if reinstalled.ID != agent.ID {
-		t.Fatalf("reinstall created agent %s, want existing %s", reinstalled.ID, agent.ID)
-	}
-	skills, err = s.ListAgentSkills(ctx, userID, projectID, agent.ID)
-	if err != nil {
-		t.Fatalf("list reinstalled skills: %v", err)
-	}
-	for _, skill := range skills {
-		if skill.Name == workloads.LohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
-			t.Fatal("reinstall overwrote the operator-edited Lohi skill")
-		}
-	}
 }

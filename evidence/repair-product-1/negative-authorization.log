@@ -1,0 +1,11 @@
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./internal/app -run '^TestInstalledDataAnalystBoardAuthorJourney$' -count=1 -v -timeout=10m
+NEGATIVE ASSERTIONS FROM OUTPUT:
+
+negative credential scopes=analytics:read,sources:read advertised create_dashboard=false create_chart=false direct_create=denied
+
+investigate-only runtime advertised create_dashboard=false create_chart=false tools=[dataset_preview explore_events list_sources persons preview_source run_sql source_status test_source]
+
+The first assertion is the network authorization case: tools/list omits both
+mutations and a direct tools/call is denied. The second assertion is the
+configuration case: a generic investigate-only agent with data_quality scope
+retains read/query tools but receives no dashboard/chart authoring capability.

@@ -1,0 +1,199 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/labstack/echo/v4"
+	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
+	runtime "github.com/lohi-ai/agentray/internal/runtime"
+	"github.com/lohi-ai/agentray/internal/workloads"
+)
+
+// TestInstalledDataAnalystBoardAuthorJourney is the product-level seam that the
+// Lohi evidence-pack acceptance originally missed. It installs the marketplace
+// preset, proves the browser session retains its board-author grant, and then
+// creates a board and chart through the same MCP adapter an external client
+// uses. The two negative cases keep least privilege explicit: an investigator
+// credential and an investigate-only runtime never receive authoring tools.
+func TestInstalledDataAnalystBoardAuthorJourney(t *testing.T) {
+	s := openRequiredAppTestStore(t)
+	ctx := context.Background()
+	storage.SetPackCatalog(marketplacePresets, marketplacePresetBySlug)
+	t.Cleanup(func() { storage.SetPackCatalog(marketplacePresets, marketplacePresetBySlug) })
+
+	stamp := time.Now().UnixNano()
+	boot, err := s.CreateAccount(ctx, fmt.Sprintf("lohi-board-author-%d@test.local", stamp), "Board Author", "password-123", "ws", "lohi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.InstallAgentPreset(ctx, boot.User.ID, boot.Project.ID, "data-analyst")
+	if err != nil {
+		t.Fatalf("install Data Analyst: %v", err)
+	}
+	skills, err := s.ListAgentSkills(ctx, boot.User.ID, boot.Project.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("list installed skills: %v", err)
+	}
+	var lohiSkill storage.AgentSkill
+	for _, skill := range skills {
+		if skill.Name == workloads.LohiEvidenceVersion {
+			lohiSkill = skill
+		}
+	}
+	if lohiSkill.ID == "" || lohiSkill.Body != workloads.LohiEvidenceSkill().Body {
+		t.Fatalf("portable skill was not installed verbatim: id=%q body_equal=%v", lohiSkill.ID, lohiSkill.Body == workloads.LohiEvidenceSkill().Body)
+	}
+	lohiSkill.Body += "\n\nOperator note: preserve this local edit."
+	if _, err := s.UpsertAgentSkill(ctx, boot.User.ID, boot.Project.ID, agent.ID, lohiSkill); err != nil {
+		t.Fatalf("edit installed skill: %v", err)
+	}
+	reinstalled, err := s.InstallAgentPreset(ctx, boot.User.ID, boot.Project.ID, "data-analyst")
+	if err != nil {
+		t.Fatalf("reinstall Data Analyst: %v", err)
+	}
+	if reinstalled.ID != agent.ID {
+		t.Fatalf("reinstall created agent %s, want existing %s", reinstalled.ID, agent.ID)
+	}
+	skills, err = s.ListAgentSkills(ctx, boot.User.ID, boot.Project.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("list reinstalled skills: %v", err)
+	}
+	for _, skill := range skills {
+		if skill.Name == workloads.LohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
+			t.Fatal("reinstall overwrote the operator-edited Lohi skill")
+		}
+	}
+	caps, err := s.AgentCapabilitiesForRun(ctx, boot.Project.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("resolve installed capabilities: %v", err)
+	}
+	installedTools := runtime.ScopeToolNames(runtime.ScopesFromMap(caps))
+	slices.Sort(installedTools)
+	for _, name := range []string{runtime.ToolRunSQL, runtime.ToolCreateDashboard, runtime.ToolCreateChart} {
+		if !slices.Contains(installedTools, name) {
+			t.Fatalf("installed Data Analyst lacks %q: %v", name, installedTools)
+		}
+	}
+	t.Logf("installed preset agent=%s tools include run_sql=%v create_dashboard=%v create_chart=%v",
+		agent.ID, slices.Contains(installedTools, runtime.ToolRunSQL), slices.Contains(installedTools, runtime.ToolCreateDashboard), slices.Contains(installedTools, runtime.ToolCreateChart))
+
+	_, sessionToken, err := s.CreateUserSession(ctx, boot.User.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("create board-author session: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat?project_id="+boot.Project.ID, nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionToken})
+	chatContext := echo.New().NewContext(req, httptest.NewRecorder())
+	_, authorizedProject, err := authProject(chatContext, s)
+	if err != nil {
+		t.Fatalf("authorize chat session: %v", err)
+	}
+	if authorizedProject.Role != "owner" || !sessionAllowsWrite(authorizedProject) {
+		t.Fatalf("board-author chat session resolved role=%q demo=%v write=%v; want owner write authorization",
+			authorizedProject.Role, authorizedProject.IsDemo, sessionAllowsWrite(authorizedProject))
+	}
+	t.Logf("chat session role=%s demo=%v board_authorized=%v", authorizedProject.Role, authorizedProject.IsDemo, sessionAllowsWrite(authorizedProject))
+
+	_, investigatorSecret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "investigator", []string{"analytics:read", "sources:read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, authorSecret, err := s.CreateProjectCredential(ctx, boot.User.ID, boot.Project.ID, "board-author", []string{"analytics:read", "sources:read", "dashboards:write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := mountServerRoutes(t, s)
+	registerMcpRoutes(e, s, nil, nil)
+
+	investigatorTools := listedMCPTools(t, e, investigatorSecret)
+	if investigatorTools[runtime.ToolCreateDashboard] || investigatorTools[runtime.ToolCreateChart] {
+		t.Fatalf("investigator credential received authoring tools: %v", investigatorTools)
+	}
+	if out := mcpInvoker(e, investigatorSecret)(t, runtime.ToolCreateDashboard, `{"name":"must not exist"}`); out.class != "denied" {
+		t.Fatalf("investigator create_dashboard = %s %s, want denied", out.class, out.raw)
+	} else {
+		t.Logf("negative credential scopes=analytics:read,sources:read advertised create_dashboard=%v create_chart=%v direct_create=%s",
+			investigatorTools[runtime.ToolCreateDashboard], investigatorTools[runtime.ToolCreateChart], out.class)
+	}
+
+	authorTools := listedMCPTools(t, e, authorSecret)
+	for _, name := range []string{runtime.ToolRunSQL, runtime.ToolListSources, runtime.ToolCreateDashboard, runtime.ToolCreateChart} {
+		if !authorTools[name] {
+			t.Fatalf("board-author MCP session lacks %q: %v", name, authorTools)
+		}
+	}
+	inv := mcpInvoker(e, authorSecret)
+	dashboard := expectOp(t, "mcp", inv, runtime.ToolCreateDashboard,
+		`{"name":"Lohi Revenue Post-mortem","description":"lohi-evidence-v1 governed figures"}`, "ok")
+	dashboardID, _ := field(t, dashboard, "id").(string)
+	if dashboardID == "" {
+		t.Fatalf("create_dashboard returned no id: %s", dashboard.raw)
+	}
+	chart := expectOp(t, "mcp", inv, runtime.ToolCreateChart,
+		fmt.Sprintf(`{"dashboard_id":%q,"name":"Daily Gross Topups (lohi-evidence-v1/R01)","kind":"line","sql":"SELECT '2026-10-02' AS date, 0 AS value","x_field":"date","y_field":"value"}`, dashboardID), "ok")
+	chartID, _ := field(t, chart, "id").(string)
+	if chartID == "" {
+		t.Fatalf("create_chart returned no id: %s", chart.raw)
+	}
+	persistedCharts, err := s.ListCharts(ctx, boot.Project.ID, dashboardID)
+	if err != nil {
+		t.Fatalf("list persisted charts: %v", err)
+	}
+	if len(persistedCharts) != 1 || persistedCharts[0].ID != chartID || persistedCharts[0].DashboardID != dashboardID {
+		t.Fatalf("persisted charts = %+v, want chart %s on dashboard %s", persistedCharts, chartID, dashboardID)
+	}
+	t.Logf("board-author MCP created dashboard=%s chart=%s", dashboardID, chartID)
+
+	investigateOnly := runtime.ScopeToolNames(runtime.Scopes{DataQuality: true})
+	slices.Sort(investigateOnly)
+	if slices.Contains(investigateOnly, runtime.ToolCreateDashboard) || slices.Contains(investigateOnly, runtime.ToolCreateChart) {
+		t.Fatalf("investigate-only runtime received authoring tools: %v", investigateOnly)
+	}
+	t.Logf("investigate-only runtime advertised create_dashboard=%v create_chart=%v tools=%v",
+		slices.Contains(investigateOnly, runtime.ToolCreateDashboard), slices.Contains(investigateOnly, runtime.ToolCreateChart), investigateOnly)
+}
+
+// Review-only probe: exercise the actual write guard and authProject resolver,
+// observing the exact ReadOnly expression used by chat/answer/conversation turns.
+func TestReviewMixedCredentialChatRemainsReadOnly(t *testing.T) {
+ s := openRequiredAppTestStore(t)
+ ctx := context.Background()
+ boot, err := s.CreateAccount(ctx, fmt.Sprintf("review-mixed-%d@test.local",time.Now().UnixNano()), "Review", "password-123", "ws", "proj")
+ if err != nil { t.Fatal(err) }
+ _, token, err := s.CreateUserSession(ctx, boot.User.ID, time.Hour)
+ if err != nil { t.Fatal(err) }
+ _, secret, err := s.CreateProjectCredential(ctx,boot.User.ID,boot.Project.ID,"reader",[]string{"analytics:read","sources:read"})
+ if err != nil { t.Fatal(err) }
+ for _, tc := range []struct{name, bearer string; wantReadOnly bool}{
+  {"owner_session", "", false},
+  {"owner_cookie_plus_investigator_bearer", secret, true},
+ } {
+  t.Run(tc.name,func(t *testing.T) {
+   e := echo.New()
+   e.Use(demoWriteGuard(s,nil))
+   reached:=false
+   e.POST("/api/agent/chat",func(c echo.Context) error {
+    reached=true
+    auth,p,err:=authProject(c,s)
+    if err != nil { return err }
+    got:=agentRunReadOnly(c,auth)
+    t.Logf("role=%q guard_read_only=%v chat_ReadOnly=%v want=%v",p.Role,readOnlyCaller(c),got,tc.wantReadOnly)
+    if got!=tc.wantReadOnly { t.Errorf("chat ReadOnly=%v; want %v for selected credential",got,tc.wantReadOnly) }
+    return c.NoContent(http.StatusNoContent)
+   })
+   req:=httptest.NewRequest(http.MethodPost,"/api/agent/chat?project_id="+boot.Project.ID,nil)
+   req.AddCookie(&http.Cookie{Name:sessionCookieName,Value:token})
+   if tc.bearer!="" { req.Header.Set("Authorization","Bearer "+tc.bearer) }
+   rec:=httptest.NewRecorder()
+   e.ServeHTTP(rec,req)
+   if !reached||rec.Code!=http.StatusNoContent { t.Fatalf("did not reach chat auth boundary: status=%d body=%s",rec.Code,rec.Body.String()) }
+  })
+ }
+}

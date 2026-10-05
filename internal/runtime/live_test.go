@@ -12,12 +12,12 @@ import (
 // a pushed message and the steering source drains exactly what arrived.
 func TestLiveRegistrySteerRoundTrip(t *testing.T) {
 	reg := NewLiveRegistry()
-	lr := reg.register("sess-1", "proj-1", nil)
+	lr := reg.register("sess-1", "proj-1", LiveAuthority{CanWrite: true}, nil)
 	if lr == nil {
 		t.Fatal("register returned nil for a non-empty session id")
 	}
 
-	if !reg.Steer("proj-1", "sess-1", "use last 7 days") {
+	if reg.Steer("proj-1", "sess-1", "use last 7 days", LiveAuthority{CanWrite: true}) != LiveControlDelivered {
 		t.Fatal("Steer returned false for a live, project-matched session")
 	}
 	got := lr.steeringSource()(context.Background())
@@ -34,8 +34,8 @@ func TestLiveRegistrySteerRoundTrip(t *testing.T) {
 // of the steer queue.
 func TestLiveRegistryFollowUpRoundTrip(t *testing.T) {
 	reg := NewLiveRegistry()
-	lr := reg.register("sess-1", "proj-1", nil)
-	if !reg.FollowUp("proj-1", "sess-1", "now break it down by country") {
+	lr := reg.register("sess-1", "proj-1", LiveAuthority{CanWrite: true}, nil)
+	if reg.FollowUp("proj-1", "sess-1", "now break it down by country", LiveAuthority{CanWrite: true}) != LiveControlDelivered {
 		t.Fatal("FollowUp returned false for a live session")
 	}
 	if got := lr.steeringSource()(context.Background()); len(got) != 0 {
@@ -51,12 +51,12 @@ func TestLiveRegistryFollowUpRoundTrip(t *testing.T) {
 // a run, and an unknown session is reported as not live.
 func TestLiveRegistryProjectScoping(t *testing.T) {
 	reg := NewLiveRegistry()
-	reg.register("sess-1", "proj-1", nil)
+	reg.register("sess-1", "proj-1", LiveAuthority{CanWrite: true}, nil)
 
-	if reg.Steer("proj-2", "sess-1", "x") {
+	if reg.Steer("proj-2", "sess-1", "x", LiveAuthority{CanWrite: true}) != LiveControlNotFound {
 		t.Fatal("Steer must return false when the project does not own the session")
 	}
-	if reg.Steer("proj-1", "missing", "x") {
+	if reg.Steer("proj-1", "missing", "x", LiveAuthority{CanWrite: true}) != LiveControlNotFound {
 		t.Fatal("Steer must return false for an unknown session")
 	}
 }
@@ -64,9 +64,9 @@ func TestLiveRegistryProjectScoping(t *testing.T) {
 // TestLiveRegistryUnregister verifies a run that exited is no longer steerable.
 func TestLiveRegistryUnregister(t *testing.T) {
 	reg := NewLiveRegistry()
-	reg.register("sess-1", "proj-1", nil)
+	reg.register("sess-1", "proj-1", LiveAuthority{CanWrite: true}, nil)
 	reg.unregister("sess-1")
-	if reg.Steer("proj-1", "sess-1", "x") {
+	if reg.Steer("proj-1", "sess-1", "x", LiveAuthority{CanWrite: true}) != LiveControlNotFound {
 		t.Fatal("Steer must return false after the run unregisters")
 	}
 }
@@ -76,7 +76,7 @@ func TestLiveRegistryUnregister(t *testing.T) {
 // defaults untouched.
 func TestLiveRegistryEmptySessionIsNoLiveControl(t *testing.T) {
 	reg := NewLiveRegistry()
-	lr := reg.register("", "proj-1", nil)
+	lr := reg.register("", "proj-1", LiveAuthority{}, nil)
 	if lr != nil {
 		t.Fatalf("register(\"\") = %v, want nil", lr)
 	}
@@ -89,11 +89,11 @@ func TestLiveRegistryEmptySessionIsNoLiveControl(t *testing.T) {
 // to call, mirroring how a Runner with no LiveRegistry behaves.
 func TestLiveRegistryNilSafe(t *testing.T) {
 	var reg *LiveRegistry
-	if reg.register("s", "p", nil) != nil {
+	if reg.register("s", "p", LiveAuthority{}, nil) != nil {
 		t.Fatal("nil registry register must return nil")
 	}
 	reg.unregister("s") // must not panic
-	if reg.Steer("p", "s", "x") {
+	if reg.Steer("p", "s", "x", LiveAuthority{}) != LiveControlNotFound {
 		t.Fatal("nil registry Steer must return false")
 	}
 	if reg.Cancel("p", "s") {
@@ -108,7 +108,7 @@ func TestLiveRegistryCancelStopsTheRun(t *testing.T) {
 	reg := NewLiveRegistry()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	reg.register("sess-1", "proj-1", cancel)
+	reg.register("sess-1", "proj-1", LiveAuthority{}, cancel)
 
 	if !reg.Cancel("proj-1", "sess-1") {
 		t.Fatal("Cancel returned false for a live, project-matched session")
@@ -135,7 +135,7 @@ func TestLiveRegistryCancelScoping(t *testing.T) {
 	reg := NewLiveRegistry()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	reg.register("sess-1", "proj-1", cancel)
+	reg.register("sess-1", "proj-1", LiveAuthority{}, cancel)
 
 	if reg.Cancel("proj-2", "sess-1") {
 		t.Fatal("Cancel must return false when the project does not own the session")
@@ -152,5 +152,54 @@ func TestLiveRegistryCancelScoping(t *testing.T) {
 	reg.unregister("sess-1")
 	if reg.Cancel("proj-1", "sess-1") {
 		t.Fatal("Cancel must return false after the run unregisters")
+	}
+}
+
+func TestLiveRegistryEnforcesCurrentRequestAuthority(t *testing.T) {
+	reg := NewLiveRegistry()
+	lr := reg.register("write-run", "project", LiveAuthority{CanWrite: true}, nil)
+	deniedPersist := false
+	if result := reg.Steer("project", "write-run", "restricted steer", LiveAuthority{}); result != LiveControlDenied {
+		t.Fatalf("restricted steer result=%v, want denied", result)
+	}
+	if result := reg.FollowUp("project", "write-run", "restricted followup", LiveAuthority{}); result != LiveControlDenied {
+		t.Fatalf("restricted follow-up result=%v, want denied", result)
+	}
+	if result, err := reg.QueueInput("project", "write-run", false, LiveAuthority{}, func() (agentcore.Message, error) {
+		deniedPersist = true
+		return agentcore.Message{Content: "restricted conversation input"}, nil
+	}); err != nil || result != LiveControlDenied {
+		t.Fatalf("restricted conversation input result=%v err=%v, want denied", result, err)
+	}
+	if deniedPersist || len(lr.steeringSource()(context.Background())) != 0 || len(lr.followUpSource()(context.Background())) != 0 {
+		t.Fatal("denied control persisted or reached the live run")
+	}
+
+	for _, control := range []LiveControlResult{
+		reg.Steer("project", "write-run", "owner steer", LiveAuthority{CanWrite: true}),
+		reg.FollowUp("project", "write-run", "owner follow-up", LiveAuthority{CanWrite: true}),
+	} {
+		if control != LiveControlDelivered {
+			t.Fatalf("authorized control result=%v, want delivered", control)
+		}
+	}
+	if result, err := reg.QueueInput("project", "write-run", false, LiveAuthority{CanWrite: true}, func() (agentcore.Message, error) {
+		return agentcore.Message{Role: agentcore.RoleUser, Content: "authorized conversation input"}, nil
+	}); err != nil || result != LiveControlDelivered {
+		t.Fatalf("authorized conversation input result=%v err=%v", result, err)
+	}
+	if got := lr.steeringSource()(context.Background()); len(got) != 2 {
+		t.Fatalf("authorized steer queue=%d, want 2", len(got))
+	}
+	if got := lr.followUpSource()(context.Background()); len(got) != 1 {
+		t.Fatalf("authorized follow-up queue=%d, want 1", len(got))
+	}
+
+	readRun := reg.register("read-run", "project", LiveAuthority{}, nil)
+	if result := reg.Steer("project", "read-run", "safe read-only steer", LiveAuthority{}); result != LiveControlDelivered {
+		t.Fatalf("read-only run control result=%v, want delivered", result)
+	}
+	if got := readRun.steeringSource()(context.Background()); len(got) != 1 {
+		t.Fatal("read-only request could not steer a read-only run")
 	}
 }
