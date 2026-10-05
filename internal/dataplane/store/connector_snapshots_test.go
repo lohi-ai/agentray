@@ -420,7 +420,35 @@ VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sy
 		generation, strings.Repeat("a", 64), old, runID); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if _, err := s.pg.Exec(ctx, `DELETE FROM connector_snapshot_cleanup_receipts WHERE generation IN
+(SELECT generation FROM connector_snapshot_generations WHERE project_id=$1)`, projectID); err != nil {
+			t.Error(err)
+		}
+		if _, err := s.pg.Exec(ctx, `DELETE FROM connector_snapshot_generations WHERE project_id=$1`, projectID); err != nil {
+			t.Error(err)
+		}
+	})
+	// Shared authority can sit behind a full page of protected generations.
+	// Make discovery exercise pagination even against an empty test database.
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch)
+SELECT $1,$2,$3,$4,gen_random_uuid(),i,$5,'sealed',$6,$6,$6,gen_random_uuid(),'retention-test',1
+FROM generate_series(2,257) AS series(i)`, projectID, sync.ConnectorID, sync.SourceTable, syncID, strings.Repeat("a", 64), old.Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 	green := &Store{pg: s.pg, duck: openTestDuckDB(t)}
+	blueStoreID, err := s.duck.storeIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	greenStoreID, err := green.duck.storeIdentity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blueStoreID == greenStoreID {
+		t.Fatal("blue and green stores share a cleanup identity")
+	}
 	for _, duck := range []*DuckDB{s.duck, green.duck} {
 		if err := duck.Write(ctx, func(tx *sql.Tx) error {
 			_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_rows
@@ -432,12 +460,19 @@ VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sy
 		}
 	}
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	if deleted, _, err := s.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || deleted != 1 {
-		t.Fatalf("blue cleanup = %d err=%v", deleted, err)
+	if deleted, eligible, err := s.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || !eligible || deleted != 1 {
+		t.Fatalf("blue cleanup = %d eligible=%v err=%v", deleted, eligible, err)
 	}
 	var authorityRows int
 	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM connector_snapshot_generations WHERE generation=$1`, generation).Scan(&authorityRows); err != nil || authorityRows != 1 {
 		t.Fatalf("shared cleanup authority rows = %d err=%v", authorityRows, err)
+	}
+	var blueCleaned, greenCleaned bool
+	if err := s.pg.QueryRow(ctx, `SELECT
+EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=$1 AND store_id=$2),
+EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=$1 AND store_id=$3)`,
+		generation, blueStoreID, greenStoreID).Scan(&blueCleaned, &greenCleaned); err != nil || !blueCleaned || greenCleaned {
+		t.Fatalf("cleanup receipts after blue cleanup: blue=%v green=%v err=%v", blueCleaned, greenCleaned, err)
 	}
 	rows := []connector.SnapshotRow{{Key: "late", Data: []byte(`{"n":1}`)}}
 	digest, err := connector.SnapshotPayloadDigest(rows)
@@ -456,19 +491,38 @@ VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sy
 	}); err != nil || blueRows != 0 {
 		t.Fatalf("blue tombstone retained %d late rows err=%v", blueRows, err)
 	}
-	candidates, err := green.ListStagingGenerations(ctx, cutoff, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
 	found := false
-	for _, candidate := range candidates {
-		found = found || candidate.Generation == generation
+	cursor := stagingGenerationCursor{}
+	for !found {
+		candidates, nextCursor, hasMore, err := green.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, candidate := range candidates {
+			if candidate.Generation == generation {
+				if !EligibleForStagingCleanup(candidate, cutoff) {
+					t.Fatalf("green colour lost cleanup eligibility after blue cleanup: %+v", candidate)
+				}
+				found = true
+				break
+			}
+		}
+		if !hasMore {
+			break
+		}
+		cursor = nextCursor
 	}
 	if !found {
 		t.Fatal("green colour lost shared cleanup authority after blue cleanup")
 	}
-	if deleted, _, err := green.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || deleted != 1 {
-		t.Fatalf("green cleanup = %d err=%v", deleted, err)
+	if deleted, eligible, err := green.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || !eligible || deleted != 1 {
+		t.Fatalf("green cleanup = %d eligible=%v err=%v", deleted, eligible, err)
+	}
+	if err := s.pg.QueryRow(ctx, `SELECT
+EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=$1 AND store_id=$2),
+EXISTS(SELECT 1 FROM connector_snapshot_cleanup_receipts WHERE generation=$1 AND store_id=$3)`,
+		generation, blueStoreID, greenStoreID).Scan(&blueCleaned, &greenCleaned); err != nil || !blueCleaned || !greenCleaned {
+		t.Fatalf("cleanup receipts after green cleanup: blue=%v green=%v err=%v", blueCleaned, greenCleaned, err)
 	}
 	if _, err := green.ApplySnapshotEnvelope(ctx, late, AppliedMark{}); err != nil {
 		t.Fatal(err)
@@ -480,14 +534,21 @@ VALUES($1,$2,$3,$4,$5,1,$6,'failed',$7,$7,$8,'retention-test',1)`, projectID, sy
 		t.Fatalf("green tombstone retained %d late rows err=%v", greenRows, err)
 	}
 	for name, colour := range map[string]*Store{"blue": s, "green": green} {
-		candidates, err := colour.ListStagingGenerations(ctx, cutoff, 256)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, candidate := range candidates {
-			if candidate.Generation == generation {
-				t.Fatalf("%s rediscovered locally completed cleanup", name)
+		cursor := stagingGenerationCursor{}
+		for {
+			candidates, nextCursor, hasMore, err := colour.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+			if err != nil {
+				t.Fatal(err)
 			}
+			for _, candidate := range candidates {
+				if candidate.Generation == generation {
+					t.Fatalf("%s rediscovered locally completed cleanup", name)
+				}
+			}
+			if !hasMore {
+				break
+			}
+			cursor = nextCursor
 		}
 	}
 }
