@@ -104,7 +104,6 @@ func TestSubmitRecommendationIsTerminal(t *testing.T) {
 	}
 }
 
-
 func (f *fakeRepo) CreateRecommendation(_ context.Context, rec storage.AgentRecommendation) (string, error) {
 	f.gotRec = rec
 	return "rec-1", nil

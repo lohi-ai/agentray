@@ -2,8 +2,10 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,26 +21,49 @@ import (
 	"github.com/lohi-ai/agentray/internal/dataplane/querytest"
 )
 
-var lohiEvidenceRecipeBlock = regexp.MustCompile(`(?s)<!-- recipe:(R[0-9]{2}) -->\s*` + "```sql\\s*(.*?)\\s*```")
+const (
+	lohiEvidenceVersion        = "lohi-evidence-v1"
+	lohiRevenueObserverVersion = "lohi-revenue-observer-v1"
+)
 
-// lohiEvidenceRecipes reads the cross-layer contract fixture as data instead of
-// importing the workloads package into dataplane. The app-level installation
-// journey verifies that this same file is the skill installed on Data Analyst;
-// these storage tests only need the canonical SQL text they execute.
+var lohiRecipeBlock = regexp.MustCompile(`(?s)<!-- recipe:(R[0-9]{2}) -->\s*` + "```sql\\s*(.*?)\\s*```")
+
+func lohiConfiguredSkillBody(t *testing.T, version string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "workloads", "config", version, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read %s skill: %v", version, err)
+	}
+	return string(body)
+}
+
 func lohiEvidenceRecipes(t *testing.T) map[string]string {
 	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "workloads", "config", "lohi-evidence-v1", "SKILL.md"))
-	if err != nil {
-		t.Fatalf("read lohi evidence contract: %v", err)
-	}
+	body := lohiConfiguredSkillBody(t, lohiEvidenceVersion)
 	out := make(map[string]string, 11)
-	for _, match := range lohiEvidenceRecipeBlock.FindAllStringSubmatch(string(body), -1) {
+	for _, match := range lohiRecipeBlock.FindAllStringSubmatch(body, -1) {
 		out[match[1]] = strings.TrimSpace(match[2])
 	}
 	if len(out) != 11 {
 		t.Fatalf("lohi evidence contract has %d recipes, want 11", len(out))
 	}
 	return out
+}
+
+func lohiPreset(t *testing.T, slug string) AgentPreset {
+	t.Helper()
+	preset := AgentPreset{
+		Slug: slug, Name: slug, Scopes: map[string]bool{"monitor": true, "data_quality": true, "analyze_build": true, "growth_suggest": true},
+		Skills: []AgentPresetSkill{{
+			Name: lohiEvidenceVersion, Description: "Governed Lohi evidence", Body: lohiConfiguredSkillBody(t, lohiEvidenceVersion),
+		}},
+	}
+	if slug == "insight-digest" {
+		preset.Skills = append(preset.Skills, AgentPresetSkill{
+			Name: lohiRevenueObserverVersion, Description: "Scheduled Lohi observation", Body: lohiConfiguredSkillBody(t, lohiRevenueObserverVersion),
+		})
+	}
+	return preset
 }
 
 func seedLohiEvidenceFixture(t *testing.T, d *DuckDB) querytest.LohiEvidenceFixture {
@@ -318,4 +344,166 @@ func sameFixtureNumber(got, want any) bool {
 	gotNumber, gotErr := strconv.ParseFloat(fmt.Sprint(got), 64)
 	wantNumber, wantErr := strconv.ParseFloat(fmt.Sprint(want), 64)
 	return gotErr == nil && wantErr == nil && gotNumber == wantNumber
+}
+
+func TestLohiEvidenceInstallsOnStockDataAnalystWithoutOverwrite(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+	preset := lohiPreset(t, "data-analyst")
+	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
+		return preset, slug == preset.Slug
+	})
+	t.Cleanup(func() { SetPackCatalog(nil, nil) })
+
+	agent, err := s.InstallAgentPreset(ctx, userID, projectID, "data-analyst")
+	if err != nil {
+		t.Fatalf("install data analyst: %v", err)
+	}
+	skills, err := s.ListAgentSkills(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list installed skills: %v", err)
+	}
+	var installed AgentSkill
+	for _, skill := range skills {
+		if skill.Name == lohiEvidenceVersion {
+			installed = skill
+		}
+	}
+	wantBody := lohiConfiguredSkillBody(t, lohiEvidenceVersion)
+	if installed.ID == "" || installed.Body != wantBody {
+		t.Fatalf("portable skill was not installed verbatim: id=%q body_equal=%v", installed.ID, installed.Body == wantBody)
+	}
+
+	installed.Body += "\n\nOperator note: preserve this local edit."
+	if _, err := s.UpsertAgentSkill(ctx, userID, projectID, agent.ID, installed); err != nil {
+		t.Fatalf("edit installed skill: %v", err)
+	}
+	reinstalled, err := s.InstallAgentPreset(ctx, userID, projectID, "data-analyst")
+	if err != nil {
+		t.Fatalf("reinstall data analyst: %v", err)
+	}
+	if reinstalled.ID != agent.ID {
+		t.Fatalf("reinstall created agent %s, want existing %s", reinstalled.ID, agent.ID)
+	}
+	skills, err = s.ListAgentSkills(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list reinstalled skills: %v", err)
+	}
+	for _, skill := range skills {
+		if skill.Name == lohiEvidenceVersion && !strings.Contains(skill.Body, "preserve this local edit") {
+			t.Fatal("reinstall overwrote the operator-edited Lohi skill")
+		}
+	}
+}
+
+func TestLohiRevenueObserverInstallsOnInsightDigestWithoutArmingSchedule(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	userID, projectID := seedConvProject(t, s)
+	preset := lohiPreset(t, "insight-digest")
+	SetPackCatalog(func() []AgentPreset { return []AgentPreset{preset} }, func(slug string) (AgentPreset, bool) {
+		return preset, slug == preset.Slug
+	})
+	t.Cleanup(func() { SetPackCatalog(nil, nil) })
+
+	agent, err := s.InstallAgentPreset(ctx, userID, projectID, "insight-digest")
+	if err != nil {
+		t.Fatalf("install insight digest: %v", err)
+	}
+	skills, err := s.ListAgentSkills(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list installed skills: %v", err)
+	}
+	installed := map[string]int{}
+	for _, skill := range skills {
+		installed[skill.Name]++
+	}
+	if installed[lohiEvidenceVersion] != 1 || installed[lohiRevenueObserverVersion] != 1 {
+		t.Fatalf("installed Lohi skills = %+v", installed)
+	}
+	triggers, err := s.ListAgentTriggers(ctx, userID, projectID, agent.ID)
+	if err != nil {
+		t.Fatalf("list triggers: %v", err)
+	}
+	if len(triggers) != 0 {
+		t.Fatalf("preset install armed %d trigger(s); observer templates must stay disabled until configured", len(triggers))
+	}
+}
+
+func TestLohiRevenueObserverFindingOverlapIsAtomic(t *testing.T) {
+	s := plansTestStore(t)
+	ctx := context.Background()
+	_, projectID := seedConvProject(t, s)
+	period := "2026-09-28/2026-10-04@Asia/Ho_Chi_Minh"
+	condition := "mature_cohort:conversion_14d_decline"
+	rawKey := strings.Join([]string{projectID, lohiEvidenceVersion, period, condition}, "|")
+	idemKey := fmt.Sprintf("%x", sha256.Sum256([]byte(rawKey)))
+	evidence, err := json.Marshal(map[string]any{
+		"query_ref":      "lohi-evidence-v1/R10",
+		"metric_version": lohiEvidenceVersion,
+		"range":          period,
+		"timezone":       "Asia/Ho_Chi_Minh",
+		"observation_key": map[string]string{
+			"project": projectID, "definition_version": lohiEvidenceVersion,
+			"period": period, "condition": condition,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := AgentRecommendation{
+		ProjectID: projectID, Category: "growth", Title: "Mature 14-day cohort conversion declined",
+		Rationale:    "R10 returned a complete mature cohort comparison with eligible and converted counts.",
+		EvidenceJSON: string(evidence), ImpactScore: 70,
+	}
+
+	const callers = 2
+	ids := make(chan string, callers)
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, callErr := s.CreateRecommendationIdempotent(ctx, rec, idemKey, "same-observer-request")
+			ids <- id
+			errs <- callErr
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	close(errs)
+	for callErr := range errs {
+		if callErr != nil {
+			t.Fatalf("overlap write: %v", callErr)
+		}
+	}
+	var first string
+	for id := range ids {
+		if first == "" {
+			first = id
+		} else if id != first {
+			t.Fatalf("overlap returned findings %s and %s", first, id)
+		}
+	}
+	var count int
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM agent_recommendations WHERE project_id = $1`, projectID).Scan(&count); err != nil {
+		t.Fatalf("count findings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("overlap created %d findings, want one", count)
+	}
+
+	changed := rec
+	changed.Rationale = "A different payload must not create a second finding."
+	if _, err := s.CreateRecommendationIdempotent(ctx, changed, idemKey, "different-observer-request"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed overlap = %v, want ErrIdempotencyConflict", err)
+	}
+	if err := s.pg.QueryRow(ctx, `SELECT count(*) FROM agent_recommendations WHERE project_id = $1`, projectID).Scan(&count); err != nil {
+		t.Fatalf("recount findings: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("conflicting overlap created %d findings, want one", count)
+	}
 }

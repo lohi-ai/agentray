@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -39,6 +40,9 @@ func registerAgentMonitorRoutes(e *echo.Echo, store *storage.Store) {
 		}
 		agentID := c.Param("id")
 		agent, err := store.GetAgentMonitor(c.Request().Context(), ctx.User.ID, project.ID, agentID)
+		if errors.Is(err, storage.ErrAgentForbidden) {
+			return echo.NewHTTPError(http.StatusNotFound, "agent not found")
+		}
 		if err != nil {
 			return err
 		}
