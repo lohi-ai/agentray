@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -125,17 +126,22 @@ func (p *DevinProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<
 		return nil, &protocol.ProviderError{Provider: p.Name(), Status: http.StatusUnauthorized,
 			Message: "devin: no session credential"}
 	}
-	model, controls, err := devinModelAndControls(req, session)
+	model, controls, err := devinModelAndControls(req, session, p.baseURL())
 	if err != nil {
 		return nil, err
 	}
+	options := OpenAICompletionsStreamOptions{Client: p.streamHTTP()}
+	options.Options, _ = json.Marshal(controls)
 	transcript := NormalizeContext(Context{
 		SystemPrompt: devinSystemPrompt(req.Messages),
 		Messages:     devinTranscriptMessages(req.Messages),
 		Tools:        devinTranscriptTools(req.Tools),
 	})
-	stream := NewAssistantMessageEventStreamFor(ctx)
-	go devinAgentStream(ctx, model, transcript, controls, p.baseURL(), p.streamHTTP(), stream)
+	// The capture carries the attempt's typed error to the adapter; the event
+	// itself can only carry a message string.
+	attemptCtx, capture := WithNativeProviderFailure(ctx)
+	stream := NewAssistantMessageEventStreamFor(attemptCtx)
+	go devinAgentStream(attemptCtx, model, transcript, options, stream)
 
 	out := make(chan protocol.ChatDelta, 32)
 	go func() {
@@ -175,11 +181,16 @@ func (p *DevinProvider) Stream(ctx context.Context, req protocol.ChatRequest) (<
 				return
 			case "error":
 				message := "devin request failed"
-				status := 0
 				if event.Error != nil && event.Error.ErrorMessage != nil {
 					message = *event.Error.ErrorMessage
 				}
-				out <- protocol.ChatDelta{Err: &protocol.ProviderError{Provider: VendorDevin, Status: status, Message: message}}
+				err := capture.Failure()
+				var providerError *protocol.ProviderError
+				if !errors.As(err, &providerError) {
+					providerError = &protocol.ProviderError{Provider: VendorDevin,
+						Status: devinStatusFromMessage(message), Message: message}
+				}
+				out <- protocol.ChatDelta{Err: providerError}
 				return
 			}
 		}
@@ -256,11 +267,13 @@ func (p *DevinProvider) Chat(ctx context.Context, req protocol.ChatRequest) (pro
 }
 
 // devinModelAndControls renders the neutral request into the model JSON the
-// native stream expects plus its serializable controls.
-func devinModelAndControls(req protocol.ChatRequest, session string) (json.RawMessage, map[string]any, error) {
+// native stream expects plus its serializable controls. base is the configured
+// endpoint (already defaulted); the model JSON must carry it — the stream
+// prefers the model's baseUrl over its own fallback.
+func devinModelAndControls(req protocol.ChatRequest, session, base string) (json.RawMessage, map[string]any, error) {
 	model, err := json.Marshal(map[string]any{
 		"id": req.Model, "name": req.Model, "api": VendorDevin, "provider": VendorDevin,
-		"baseUrl": DevinDefaultBaseURL, "reasoning": true, "input": []string{"text", "image"},
+		"baseUrl": base, "reasoning": true, "input": []string{"text", "image"},
 		"contextWindow": 262144, "maxTokens": devinDefaultMaxTokens,
 	})
 	if err != nil {
@@ -298,14 +311,23 @@ type devinCatalogEntry struct {
 	isDefault  bool
 }
 
+// devinCatalogCache memoizes catalog entries per (base URL, session token).
+// More than one slot is needed: the pooled wrapper rotates sessions, and a
+// single slot would bounce the entry on every other turn.
 var devinCatalogCache = struct {
 	sync.Mutex
-	key     string
+	entries map[string]devinCatalogCached
+}{entries: map[string]devinCatalogCached{}}
+
+type devinCatalogCached struct {
 	expires time.Time
 	entries []devinCatalogEntry
-}{}
+}
 
-const devinCatalogTTL = 10 * time.Minute
+const (
+	devinCatalogTTL      = 10 * time.Minute
+	devinCatalogCacheMax = 8
+)
 
 // devinFetchCatalog calls GetCliModelConfigs and returns the decoded configs.
 // The result is cached per (base URL, session token) for a short window so a
@@ -316,8 +338,8 @@ func devinFetchCatalog(ctx context.Context, client HTTPDoer, base, session strin
 	}
 	key := base + "\x00" + session
 	devinCatalogCache.Lock()
-	if devinCatalogCache.key == key && time.Now().Before(devinCatalogCache.expires) && devinCatalogCache.entries != nil {
-		entries := devinCatalogCache.entries
+	if cached, ok := devinCatalogCache.entries[key]; ok && time.Now().Before(cached.expires) && cached.entries != nil {
+		entries := cached.entries
 		devinCatalogCache.Unlock()
 		return entries, nil
 	}
@@ -362,9 +384,17 @@ func devinFetchCatalog(ctx context.Context, client HTTPDoer, base, session strin
 			family: config.family, isDefault: config.isDefaultModelInFamily,
 		})
 	}
-	devinCatalogCache.Lock()
-	devinCatalogCache.key, devinCatalogCache.expires, devinCatalogCache.entries = key, time.Now().Add(devinCatalogTTL), entries
-	devinCatalogCache.Unlock()
+	// An empty catalog means the endpoint is mid-deploy or the account is not
+	// provisioned yet — cache only real entries so a later turn refetches rather
+	// than spending the TTL on suffix-guessed uids.
+	if len(entries) > 0 {
+		devinCatalogCache.Lock()
+		if len(devinCatalogCache.entries) >= devinCatalogCacheMax {
+			devinCatalogCache.entries = map[string]devinCatalogCached{}
+		}
+		devinCatalogCache.entries[key] = devinCatalogCached{expires: time.Now().Add(devinCatalogTTL), entries: entries}
+		devinCatalogCache.Unlock()
+	}
 	return entries, nil
 }
 

@@ -229,15 +229,13 @@ func devinTokenExpiryMS(token string, options DevinOAuthOptions) float64 {
 		}
 		return r
 	}, parts[1])
-	var raw []byte
-	var err error
-	if strings.Contains(payload, "=") {
-		raw, err = base64.StdEncoding.DecodeString(payload)
-	} else {
-		raw, err = base64.RawStdEncoding.DecodeString(payload)
-	}
+	// JWT payloads are base64url — not Std — per RFC 7519.
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return options.Now() + devinOAuthFallbackLifetimeMS
+		// Some issuers pad.
+		if raw, err = base64.URLEncoding.DecodeString(payload); err != nil {
+			return options.Now() + devinOAuthFallbackLifetimeMS
+		}
 	}
 	latin := make([]rune, len(raw))
 	for i, b := range raw {

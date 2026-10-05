@@ -49,12 +49,15 @@ func recordNativeFailure(ctx context.Context, provider string, cause error, call
 	if cause != nil {
 		failure = errors.New(cause.Error())
 		if !callbackFailure && !codexNonTransportError(cause) {
+			var providerError *protocol.ProviderError
 			var openAI *completionsRequestError
 			var codex *codexHTTPError
 			var anthropic *AnthropicClientError
 			var piMessages *PiMessagesResponseError
 			var transport net.Error
 			switch {
+			case errors.As(cause, &providerError) && providerError.Provider == provider:
+				failure = providerError
 			case errors.As(cause, &openAI):
 				failure = protocol.NewProviderError(provider, &http.Response{StatusCode: openAI.status, Header: openAI.headers.Clone()}, openAI.message)
 			case errors.As(cause, &codex):

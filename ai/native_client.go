@@ -21,6 +21,10 @@ type NativeClient struct {
 func NewNativeClient(spec ClientSpec) (*NativeClient, error) {
 	c := &NativeClient{spec: spec}
 	vendor := NormalizeVendor(spec.Name)
+	// OAuth alias ids (e.g. "devin-agent", "claudecode") name the same vendors.
+	if alias := NormalizeOAuthVendor(vendor); alias != "" {
+		vendor = alias
+	}
 	switch vendor {
 	case VendorGoogleAntigravity:
 		c.api, c.provider, c.endpoint = vendor, vendor, strings.TrimRight(spec.BaseURL, "/")

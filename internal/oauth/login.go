@@ -472,9 +472,10 @@ func tokenJWTExpiry(token string, now time.Time) time.Time {
 		}
 		return r
 	}, parts[1])
-	raw, err := base64.RawStdEncoding.DecodeString(payload)
+	// JWT payloads are base64url — not Std — per RFC 7519; some issuers pad.
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		if raw, err = base64.StdEncoding.DecodeString(payload); err != nil {
+		if raw, err = base64.URLEncoding.DecodeString(payload); err != nil {
 			return now.Add(tokenJWTFallbackLifetime)
 		}
 	}

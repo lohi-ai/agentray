@@ -31,8 +31,6 @@ const (
 	// devinMaxFramePayload bounds one Connect frame so a corrupt length prefix
 	// fails fast instead of buffering unbounded memory.
 	devinMaxFramePayload = 16 << 20
-	// devinMaxOAuthAttempts mirrors the pooled wrapper's ceiling.
-	devinMaxOAuthAttempts = 64
 	// devinStopReasonMaxTokens is StopReason.MAX_TOKENS.
 	devinStopReasonMaxTokens = 3
 )
@@ -45,7 +43,6 @@ type devinChatControls struct {
 	maxTokens         int
 	temperature       float64
 	sessionID         string
-	disableParallel   bool
 	hasParallel       bool
 	parallelToolCalls bool
 }
@@ -93,134 +90,20 @@ func StreamDevinPooled(ctx context.Context, rawModel json.RawMessage, transcript
 	if source == nil {
 		return nil, errors.New("Devin account pool is required")
 	}
-	rawModel = append(json.RawMessage(nil), rawModel...)
-	options.Options = append(json.RawMessage(nil), options.Options...)
-	encoded, err := json.Marshal(transcript)
-	if err != nil {
-		return nil, err
-	}
-	var frozen Context
-	if err := json.Unmarshal(encoded, &frozen); err != nil {
-		return nil, err
-	}
-	transcript = NormalizeContext(frozen)
-
-	out := NewAssistantMessageEventStreamFor(ctx)
-	base := DevinDefaultBaseURL
-	var model struct {
-		BaseURL string `json:"baseUrl"`
-	}
-	if len(rawModel) > 0 {
-		_ = json.Unmarshal(rawModel, &model)
-		if strings.TrimSpace(model.BaseURL) != "" {
-			base = strings.TrimRight(model.BaseURL, "/")
-		}
-	}
-	httpClient := options.Client
-	if httpClient == nil {
-		httpClient = NewStreamHTTPClient(0)
-	}
-	now := time.Now().UnixMilli()
-	if options.Now != nil {
-		now = options.Now()
-	}
-
-	go func() {
-		defer out.End()
-		state := newOAuthAttemptState()
-		for {
-			if ctx.Err() != nil {
-				devinFailStream(out, "Request was aborted", true, now)
-				return
-			}
-			if state.attempts >= devinMaxOAuthAttempts {
-				devinFailStream(out, "OAuth account attempts exhausted", false, now)
-				return
-			}
-			token, err := source.Acquire(ctx)
-			if err != nil || !state.accept(token) {
-				if err == nil {
-					err = errors.New("OAuth token source returned an empty or repeated credential")
-				}
-				devinFailStream(out, err.Error(), ctx.Err() != nil, now)
-				return
-			}
-			controls := map[string]any{}
-			if len(options.Options) > 0 {
-				_ = json.Unmarshal(options.Options, &controls)
-			}
-			controls["apiKey"] = token.AccessToken
-			inner := NewAssistantMessageEventStreamFor(WithAssistantStreamSynchronization(ctx, out))
-			devinAgentStream(ctx, rawModel, transcript, controls, base, httpClient, inner)
-
-			buffered := []AssistantMessageEvent{}
-			committed := false
-			retry := false
-			for {
-				event, ok, readErr := inner.Next(context.WithoutCancel(ctx))
-				if readErr != nil || !ok {
-					if readErr == nil {
-						readErr = errors.New("Devin account stream ended without a terminal event")
-					}
-					devinFailStream(out, readErr.Error(), ctx.Err() != nil, now)
-					return
-				}
-				if event.Type == "error" {
-					report := devinEventError(event)
-					if !isOAuthConcurrencyCap(report) {
-						source.Report(ctx, token, report)
-					}
-					if !committed && ctx.Err() == nil && isOAuthAuthFailure(report) {
-						state.lastAuth = report
-						retry = true
-						break
-					}
-					for _, item := range buffered {
-						out.Push(item)
-					}
-					out.Push(event)
-					return
-				}
-				if event.Type == "done" {
-					if ctx.Err() == nil {
-						source.Report(ctx, token, nil)
-					}
-					for _, item := range buffered {
-						out.Push(item)
-					}
-					out.Push(event)
-					return
-				}
-				visible := (event.Type == "text_delta" || event.Type == "thinking_delta" || event.Type == "toolcall_delta") && event.Delta != "" ||
-					event.Type == "toolcall_start" || event.Type == "text_end" || event.Type == "thinking_end"
-				if !committed && !visible {
-					buffered = append(buffered, event)
-					continue
-				}
-				if !committed {
-					committed = true
-					for _, item := range buffered {
-						out.Push(item)
-					}
-					buffered = nil
-				}
-				out.Push(event)
-			}
-			if !retry {
-				return
-			}
-		}
-	}()
-	return out, nil
+	return nativeOAuthPoolStream(ctx, rawModel, transcript, options, source, "Devin",
+		func(ctx context.Context, rawModel json.RawMessage, transcript TranscriptContext, options OpenAICompletionsStreamOptions, _ OAuthToken) (*AssistantMessageEventStream, error) {
+			inner := NewAssistantMessageEventStreamFor(ctx)
+			go devinAgentStream(ctx, rawModel, transcript, options, inner)
+			return inner, nil
+		})
 }
 
-// devinEventError recovers the provider error a native failure event carries.
-func devinEventError(event AssistantMessageEvent) error {
-	if event.Error != nil && event.Error.ErrorMessage != nil {
-		return &protocol.ProviderError{Provider: VendorDevin, Status: devinStatusFromMessage(*event.Error.ErrorMessage),
-			Message: *event.Error.ErrorMessage}
-	}
-	return errors.New("Devin request failed")
+// devinFail settles the stream with a terminal error event and records the
+// typed cause into the ctx failure capture so the OAuth pool and the protocol
+// adapter see the real status (a message string cannot carry it).
+func devinFail(ctx context.Context, out *AssistantMessageEventStream, cause error, aborted bool, now int64) {
+	recordNativeFailure(ctx, VendorDevin, cause, false)
+	devinFailStream(out, cause.Error(), aborted, now)
 }
 
 // devinStatusFromMessage extracts a leading HTTP status from a formatted
@@ -250,24 +133,39 @@ func devinFailStream(out *AssistantMessageEventStream, message string, aborted b
 }
 
 // devinAgentStream runs one turn into out: auth, optional router assignment,
-// then the streaming chat call.
-func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript TranscriptContext, controls map[string]any, base string, httpClient *http.Client, out *AssistantMessageEventStream) {
+// then the streaming chat call. ctx carries the per-attempt failure capture.
+func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript TranscriptContext, options OpenAICompletionsStreamOptions, out *AssistantMessageEventStream) {
+	defer out.End()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			devinFail(ctx, out, fmt.Errorf("%v", recovered), false, time.Now().UnixMilli())
+		}
+	}()
 	now := time.Now().UnixMilli()
 	var model completionsModel
 	if err := json.Unmarshal(rawModel, &model); err != nil {
-		devinFailStream(out, "invalid Devin model: "+err.Error(), false, now)
+		devinFail(ctx, out, fmt.Errorf("invalid Devin model: %w", err), false, now)
 		return
 	}
+	base := DevinDefaultBaseURL
 	if strings.TrimSpace(model.BaseURL) != "" {
 		base = strings.TrimRight(model.BaseURL, "/")
+	}
+	httpClient := options.Client
+	if httpClient == nil {
+		httpClient = NewStreamHTTPClient(0)
+	}
+	controls := map[string]any{}
+	if len(options.Options) > 0 {
+		_ = json.Unmarshal(options.Options, &controls)
 	}
 	control := devinDecodeControls(controls)
 	session := devinNormalizeSessionToken(control.sessionToken)
 	if session == "" {
-		devinFailStream(out, "Devin auth error 401 Unauthorized: no session token", false, now)
+		devinFail(ctx, out, &protocol.ProviderError{Provider: VendorDevin, Status: http.StatusUnauthorized,
+			Message: "Devin auth error: no session token"}, false, now)
 		return
 	}
-
 	cascadeID := control.sessionID
 	if cascadeID == "" {
 		cascadeID = newDevinCascadeID()
@@ -292,7 +190,7 @@ func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript 
 	// may redirect to a custom API server.
 	userJWT, chatBase, err := devinFetchUserJWT(ctx, httpClient, base, metadata)
 	if err != nil {
-		devinFailStream(out, err.Error(), false, now)
+		devinFail(ctx, out, err, false, now)
 		return
 	}
 	if chatBase == "" {
@@ -312,7 +210,7 @@ func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript 
 		prompt := devinLastUserPrompt(list, cascadeID)
 		resolved, err := devinAssignModel(ctx, httpClient, chatBase, metadata, model.ID, cascadeID, prompt)
 		if err != nil {
-			devinFailStream(out, err.Error(), false, now)
+			devinFail(ctx, out, err, false, now)
 			return
 		}
 		assignment = &resolved
@@ -352,6 +250,7 @@ func devinAgentStream(ctx context.Context, rawModel json.RawMessage, transcript 
 	acc := newDevinAccumulator(model, control.sessionID, out, now)
 	acc.start()
 	if err := devinStreamChat(ctx, httpClient, chatBase, request, acc); err != nil {
+		recordNativeFailure(ctx, VendorDevin, err, false)
 		acc.fail(err.Error(), ctx.Err() != nil)
 		return
 	}
@@ -448,7 +347,9 @@ func (r *devinConnectReader) next() (byte, []byte, error) {
 			continue
 		}
 		if err != nil {
-			if err == io.EOF && len(r.buf) > 0 && len(r.buf) < 5 {
+			// A clean EOF arrives only with an empty buffer: leftover bytes are a
+			// truncated frame, not the end of the stream.
+			if err == io.EOF && len(r.buf) > 0 {
 				return 0, nil, io.ErrUnexpectedEOF
 			}
 			return 0, nil, err
@@ -747,7 +648,6 @@ type devinAccumulator struct {
 	session string
 	stream  *AssistantMessageEventStream
 	output  *Message
-	now     func() int64
 	ended   bool
 
 	textBlock     *ContentBlock
@@ -760,7 +660,7 @@ type devinAccumulator struct {
 
 func newDevinAccumulator(model completionsModel, session string, stream *AssistantMessageEventStream, now int64) *devinAccumulator {
 	return &devinAccumulator{
-		model: model, session: session, stream: stream,
+		model: model, cost: model.Cost, session: session, stream: stream,
 		output:     &Message{Role: "assistant", Content: BlockContent(), API: model.API, Provider: model.Provider, Model: model.ID, Usage: &Usage{}, StopReason: "pending", Timestamp: now},
 		toolBlocks: map[string]*ContentBlock{}, toolJSON: map[string]string{},
 	}

@@ -18,6 +18,7 @@ Current integration scope:
 | Codex | `StreamCodexResponsesPooled`, Responses SSE/WebSocket |
 | Claude Code | `StreamClaudeCodePooled`, Anthropic SSE with CLI OAuth identity |
 | Antigravity | `StreamAntigravityPooled`, Cloud Code SSE with per-account project |
+| Devin | `StreamDevinPooled`, Connect-RPC protobuf/gzip to Cascade (`devin-agent`) |
 | Gemini | `StreamOpenAICompletionsSimple`, Google OpenAI-compatible endpoint |
 
 The host resolves endpoints and binds credentials to a provider row. OAuth pools

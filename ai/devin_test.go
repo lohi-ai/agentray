@@ -224,7 +224,7 @@ func TestDevinResolveModelUIDFromCatalog(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(catalog)), Request: request}, nil
 	})}
 	devinCatalogCache.Lock()
-	devinCatalogCache.key, devinCatalogCache.entries = "", nil
+	devinCatalogCache.entries = map[string]devinCatalogCached{}
 	devinCatalogCache.Unlock()
 
 	base := "https://catalog.test"
@@ -247,7 +247,7 @@ func TestDevinResolveModelUIDOfflineFallback(t *testing.T) {
 		return nil, errors.New("offline")
 	})}
 	devinCatalogCache.Lock()
-	devinCatalogCache.key, devinCatalogCache.entries = "", nil
+	devinCatalogCache.entries = map[string]devinCatalogCached{}
 	devinCatalogCache.Unlock()
 
 	if got := devinResolveModelUID(context.Background(), client, "https://catalog.test", "tok", "swe-2", "high"); got != "swe-2-high" {
