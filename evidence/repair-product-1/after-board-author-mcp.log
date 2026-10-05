@@ -1,0 +1,17 @@
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./internal/app -run '^TestInstalledDataAnalystBoardAuthorJourney$' -count=1 -v -timeout=10m
+WORKDIR: /Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config
+
+=== RUN   TestInstalledDataAnalystBoardAuthorJourney
+    lohi_board_author_test.go:84: installed preset agent=f81c3ddf-f535-4781-a853-93267ab2ad4e tools include run_sql=true create_dashboard=true create_chart=true
+    lohi_board_author_test.go:102: chat session role=owner demo=false board_authorized=true
+    lohi_board_author_test.go:122: negative credential scopes=analytics:read,sources:read advertised create_dashboard=false create_chart=false direct_create=denied
+    lohi_board_author_test.go:152: board-author MCP created dashboard=176f6995-c67b-496f-8174-3285e7927496 chart=29236e18-db57-4a07-b9f7-5fa35b23e2c4
+    lohi_board_author_test.go:159: investigate-only runtime advertised create_dashboard=false create_chart=false tools=[dataset_preview explore_events list_sources persons preview_source run_sql source_status test_source]
+--- PASS: TestInstalledDataAnalystBoardAuthorJourney (0.36s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	1.514s
+
+The test installs the stock data-analyst marketplace preset, resolves the same
+workspace session the chat route uses, and then invokes tools/list and
+tools/call against the mounted /mcp adapter. The persisted dashboard and chart
+IDs above are returned by the real operation registry/store path.

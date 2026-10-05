@@ -236,3 +236,9 @@ func drainMessages(ch <-chan agentcore.Message) []agentcore.Message {
 		}
 	}
 }
+
+// ReviewRegister provides a real author-authorized live queue for HTTP regression probing.
+func (r *LiveRegistry) ReviewRegister(session, project string, authority LiveAuthority) (func(context.Context) []agentcore.Message, func(context.Context) []agentcore.Message) {
+ live := r.register(session, project, authority, nil)
+ return live.steeringSource(), live.followUpSource()
+}

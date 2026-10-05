@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
+	"github.com/lohi-ai/agentray/internal/shared/opcore"
 )
 
 const sessionCookieName = "agentray_session"
@@ -14,6 +15,9 @@ const sessionTTL = 14 * 24 * time.Hour
 type authContext struct {
 	User    storage.User
 	Session storage.UserSession
+	// Principal is the selected request credential, populated by authProject.
+	// User/Session own conversation history; they do not replace its authority.
+	Principal opcore.Principal
 }
 
 func authFromRequest(c echo.Context, store *storage.Store) (authContext, error) {

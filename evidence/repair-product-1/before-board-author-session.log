@@ -1,0 +1,14 @@
+COMMAND: AGENTRAY_TEST_DATABASE_URL='postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable' go test ./internal/app -run '^TestInstalledDataAnalystBoardAuthorJourney$' -count=1 -v -timeout=10m
+WORKDIR: /Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config
+
+=== RUN   TestInstalledDataAnalystBoardAuthorJourney
+    lohi_board_author_test.go:61: board-author chat session resolved role="" demo=false write=false; want owner write authorization
+--- FAIL: TestInstalledDataAnalystBoardAuthorJourney (0.28s)
+FAIL
+FAIL	github.com/lohi-ai/agentray/internal/app	1.317s
+FAIL
+
+Finding: the marketplace preset installed with run_sql/create_dashboard/create_chart
+in its resolved runtime scope, but authProject reloaded the project through the
+role-blind ProjectByID path. The owner session therefore reached the generic
+runtime as ReadOnly=true and lost every dashboard/chart mutation tool.
