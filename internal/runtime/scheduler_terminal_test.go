@@ -171,8 +171,10 @@ func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
 		if len(calls) != 0 {
 			t.Fatalf("deadline before model turn fabricated a model trace: %+v", calls)
 		}
-	} else if len(calls) != 1 || !strings.Contains(calls[0].Error, "context deadline exceeded") {
-		t.Fatalf("provider failure trace = %+v, want one auditable model timeout", calls)
+	} else if len(calls) != 1 || calls[0].StopReason != "aborted" || calls[0].Error != "Request aborted" {
+		// The scheduler records the deadline cause in the run summary; the native
+		// provider trace preserves its explicit abort result.
+		t.Fatalf("provider failure trace = %+v, want one auditable aborted model call", calls)
 	}
 	t.Logf("scheduled run=%s status=%s finished=%s summary=%q tools=%d model_calls=%d", run.ID, run.Status, run.FinishedAt, run.Summary, len(tools), len(calls))
 }

@@ -76,36 +76,66 @@ func TestConfiguredObserverOperationsRehearsal(t *testing.T) {
 			return
 		}
 		var request struct {
-			Messages []struct{ Role, Name, Content string }
-			Tools    []json.RawMessage
+			Stream   bool
+			Messages []struct {
+				Role, Name, Content string
+				ToolCallID          string `json:"tool_call_id"`
+				ToolCalls           []struct {
+					ID       string
+					Function struct{ Name string }
+				} `json:"tool_calls"`
+			}
+			Tools []json.RawMessage
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode provider: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		writeResponse := func(message map[string]any, finish string) {
+			field := "message"
+			if request.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				field = "delta"
+			}
+			payload := map[string]any{"choices": []any{map[string]any{
+				"index": 0, field: message, "finish_reason": finish,
+			}}, "usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2}}
+			if request.Stream {
+				raw, _ := json.Marshal(payload)
+				_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", raw)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(payload)
+		}
 		writeText := func(content string) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]string{"role": "assistant", "content": content}, "finish_reason": "stop",
-			}}, "usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2}})
+			writeResponse(map[string]any{"role": "assistant", "content": content}, "stop")
 		}
 		// The scheduler's optional reflection uses the same adapter after the run.
 		if len(request.Tools) == 0 {
 			writeText(`{"memories":[]}`)
 			return
 		}
+		toolNames := map[string]string{}
+		for _, message := range request.Messages {
+			for _, call := range message.ToolCalls {
+				toolNames[call.ID] = call.Function.Name
+			}
+		}
 		results := map[string]string{}
 		for _, message := range request.Messages {
 			if message.Role == "tool" {
-				results[message.Name] = message.Content
+				name := message.Name
+				if name == "" {
+					name = toolNames[message.ToolCallID]
+				}
+				results[name] = message.Content
 			}
 		}
 		writeTool := func(name, args string) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
-					"id": "call-" + name, "type": "function", "function": map[string]string{"name": name, "arguments": args},
-				}}}, "finish_reason": "tool_calls",
-			}}, "usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2}})
+			writeResponse(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+				"index": 0, "id": "call-" + name, "type": "function", "function": map[string]string{"name": name, "arguments": args},
+			}}}, "tool_calls")
 		}
 		switch {
 		case results["read_skill"] == "":

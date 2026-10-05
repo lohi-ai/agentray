@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )
@@ -63,6 +64,21 @@ func (t *submitBoundaryTool) Run(context.Context, string) (string, error) {
 	return "persisted finding", nil
 }
 
+// Use the runtime's native stream fixtures so hooks run in the production engine.
+func observerNativeProvider(script ...ai.ContentBlock) (*ai.FallbackProvider, *atomic.Int32) {
+	requests := &atomic.Int32{}
+	return &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{
+		Model: json.RawMessage(`{"id":"test"}`),
+		Stream: func(context.Context, json.RawMessage, ai.TranscriptContext, map[string]any) (*ai.AssistantMessageEventStream, error) {
+			index := int(requests.Add(1)) - 1
+			if index >= len(script) {
+				return nil, errors.New("observer native script exhausted")
+			}
+			return nativeChildResponse(script[index]), nil
+		},
+	}}}, requests
+}
+
 func TestObserverSkillGateAcceptsEveryReadSkillIdentifier(t *testing.T) {
 	observer := agentcore.Skill{
 		ID: "observer-skill-id", Name: lohiObserverVersion,
@@ -90,14 +106,14 @@ func TestObserverSkillGateAcceptsEveryReadSkillIdentifier(t *testing.T) {
 				TerminalFollowupSkills: observerTerminalFollowupSkills(tc.skills),
 			}, "scope")
 			tool := &submitBoundaryTool{}
-			provider := agentcore.NewFauxProvider(
-				agentcore.AssistantToolCall("read", "read_skill", fmt.Sprintf(`{"id":%q}`, tc.input)),
-				agentcore.AssistantToolCall("one", tool.Name(), `{}`),
-				agentcore.AssistantToolCall("two", tool.Name(), `{}`),
-				agentcore.AssistantText("done"),
+			provider, _ := observerNativeProvider(
+				nativeChildCall("read", "read_skill", fmt.Sprintf(`{"id":%q}`, tc.input)),
+				nativeChildCall("one", tool.Name(), `{}`),
+				nativeChildCall("two", tool.Name(), `{}`),
+				ai.ContentBlock{Type: "text", Text: "done"},
 			)
 			agent, err := agentcore.New(agentcore.Config{
-				Provider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
+				NativeProvider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
 				Definition: agentcore.AgentDefinition{Skills: tc.skills},
 				Policy:     agentcore.NewAllowList(tool.Name()), Hooks: hooks,
 			})
@@ -123,13 +139,13 @@ func TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary(t *testing.T) {
 		t.Run(trigger, func(t *testing.T) {
 			_, hooks := buildToolsAndHooks(BuildParams{Trigger: trigger}, "ordinary-marketer-scope")
 			tool := &submitBoundaryTool{}
-			provider := agentcore.NewFauxProvider(
-				agentcore.AssistantToolCall("one", tool.Name(), `{"title":"first"}`),
-				agentcore.AssistantToolCall("two", tool.Name(), `{"title":"second"}`),
-				agentcore.AssistantText("done"),
+			provider, requests := observerNativeProvider(
+				nativeChildCall("one", tool.Name(), `{"title":"first"}`),
+				nativeChildCall("two", tool.Name(), `{"title":"second"}`),
+				ai.ContentBlock{Type: "text", Text: "done"},
 			)
 			agent, err := agentcore.New(agentcore.Config{
-				Provider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
+				NativeProvider: provider, Model: "test", Tools: agentcore.NewToolSet(tool),
 				Policy: agentcore.NewAllowList(tool.Name()), Hooks: hooks,
 			})
 			if err != nil {
@@ -138,8 +154,8 @@ func TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary(t *testing.T) {
 			if _, err := agent.Prompt(context.Background(), "File the recommendation"); err != nil {
 				t.Fatal(err)
 			}
-			if tool.calls != 1 || len(provider.Recorded) != 1 {
-				t.Fatalf("ordinary %s run changed: writes=%d requests=%d, want 1/1", trigger, tool.calls, len(provider.Recorded))
+			if tool.calls != 1 || requests.Load() != 1 {
+				t.Fatalf("ordinary %s run changed: writes=%d requests=%d, want 1/1", trigger, tool.calls, requests.Load())
 			}
 		})
 	}
@@ -201,9 +217,16 @@ func testLohiObserverScheduledDeliveryRecovery(t *testing.T, identifier func(sto
 		}
 		var request struct {
 			Messages []struct {
-				Role    string `json:"role"`
-				Name    string `json:"name"`
-				Content string `json:"content"`
+				Role       string `json:"role"`
+				Name       string `json:"name"`
+				Content    string `json:"content"`
+				ToolCallID string `json:"tool_call_id"`
+				ToolCalls  []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"messages"`
 			Tools []struct {
 				Function struct {
@@ -227,37 +250,51 @@ func testLohiObserverScheduledDeliveryRecovery(t *testing.T, identifier func(sto
 			}
 		}
 
+		toolNames := map[string]string{}
+		for _, message := range request.Messages {
+			for _, call := range message.ToolCalls {
+				toolNames[call.ID] = call.Function.Name
+			}
+		}
 		results := map[string]string{}
 		var all strings.Builder
 		for _, message := range request.Messages {
 			all.WriteString(message.Content)
 			all.WriteByte('\n')
 			if message.Role == "tool" {
-				results[message.Name] = message.Content
+				name := message.Name
+				if name == "" {
+					name = toolNames[message.ToolCallID]
+				}
+				results[name] = message.Content
 			}
 		}
 		history := all.String()
 		writeTool := func(id, name, args string) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			w.Header().Set("Content-Type", "text/event-stream")
+			payload, _ := json.Marshal(map[string]any{
 				"choices": []any{map[string]any{
-					"message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
-						"id": id, "type": "function", "function": map[string]string{"name": name, "arguments": args},
+					"index": 0,
+					"delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+						"index": 0, "id": id, "type": "function", "function": map[string]string{"name": name, "arguments": args},
 					}}},
 					"finish_reason": "tool_calls",
 				}},
 				"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2},
 			})
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", payload)
 		}
 		writeText := func(text string) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			w.Header().Set("Content-Type", "text/event-stream")
+			payload, _ := json.Marshal(map[string]any{
 				"choices": []any{map[string]any{
-					"message":       map[string]string{"role": "assistant", "content": text},
+					"index":         0,
+					"delta":         map[string]string{"role": "assistant", "content": text},
 					"finish_reason": "stop",
 				}},
 				"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2},
 			})
+			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", payload)
 		}
 
 		switch {
