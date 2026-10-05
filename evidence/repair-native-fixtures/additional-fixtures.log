@@ -1,0 +1,15 @@
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun/model_call_timeout
+2026/10/05 23:49:47 scheduler: run failed project=b3d4959e-60ae-4e2a-a191-08fbdae1bd8b agent=b3d4959e-60ae-4e2a-a191-08fbdae1bd8b trigger=scheduled: context deadline exceeded
+Pi run: context canceled
+    scheduler_terminal_test.go:181: scheduled run=11cfcd74-04ad-4d82-8cce-5b7e5d1b5388 status=error finished=2026-10-05 23:49:47.273244 +0700 +07 summary="data_quality:availability — observation could not complete; readiness and business conditions remain unverified. context deadline exceeded\nPi run: context canceled" tools=0 model_calls=1
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun/deadline_before_first_model_turn
+2026/10/05 23:49:48 scheduler: run failed project=0e69d724-0c72-4254-8002-7f78e5e027dc agent=0e69d724-0c72-4254-8002-7f78e5e027dc trigger=scheduled: context deadline exceeded
+    scheduler_terminal_test.go:181: scheduled run=5eb68e94-ab4a-4080-8d7f-06c31c5a07ab status=error finished=2026-10-05 23:49:48.590072 +0700 +07 summary="data_quality:availability — observation could not complete; readiness and business conditions remain unverified. context deadline exceeded" tools=0 model_calls=0
+--- PASS: TestScheduledProviderTimeoutPersistsTerminalRun (2.70s)
+    --- PASS: TestScheduledProviderTimeoutPersistsTerminalRun/model_call_timeout (1.38s)
+    --- PASS: TestScheduledProviderTimeoutPersistsTerminalRun/deadline_before_first_model_turn (1.32s)
+=== RUN   TestPostgresChainedAskResumeKeepsDurableSession
+--- PASS: TestPostgresChainedAskResumeKeepsDurableSession (0.33s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/runtime	4.280s

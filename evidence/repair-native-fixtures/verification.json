@@ -1,0 +1,58 @@
+{
+  "rebased_base": "d4b333970e86db664873c884e10cd0ff9a1951a0",
+  "database": "postgres://long@127.0.0.1:5433/agentray_test?sslmode=disable",
+  "results": [
+    {
+      "command": "go test ./internal/runtime -run '^TestObserverSkillGateAcceptsEveryReadSkillIdentifier$' -count=1 -v",
+      "log": "TestObserverSkillGateAcceptsEveryReadSkillIdentifier.log",
+      "exit_code": 0,
+      "skips": 0
+    },
+    {
+      "command": "go test ./internal/runtime -run '^TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary$' -count=1 -v",
+      "log": "TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary.log",
+      "exit_code": 0,
+      "skips": 0
+    },
+    {
+      "command": "go test ./internal/runtime -run '^TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry$' -count=1 -v",
+      "log": "TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry.log",
+      "exit_code": 0,
+      "skips": 0
+    },
+    {
+      "command": "go test ./internal/runtime -count=1 -v",
+      "log": "runtime.log",
+      "exit_code": 0,
+      "passed_top_level_tests": 467,
+      "environment_only_skips": 4
+    },
+    {
+      "command": "go test ./internal/runtime ./internal/workloads ./internal/app -run '(Lohi.*Observer|ObserverSkillGate|OrdinaryAgentSubmitRecommendation|Scheduled|CronMatches)' -count=1 -v",
+      "log": "observer-scheduled.log",
+      "exit_code": 0,
+      "passed_top_level_tests": 9,
+      "skips": 0
+    },
+    {
+      "command": "go test ./internal/runtime -run '^TestScheduledProviderTimeoutPersistsTerminalRun$' -count=10 -v",
+      "log": "scheduled-deadline-cause-after.log",
+      "exit_code": 0,
+      "skips": 0
+    },
+    {
+      "command": "go build ./...",
+      "log": "build.log",
+      "exit_code": 0
+    },
+    {
+      "command": "go vet ./...",
+      "log": "vet.log",
+      "exit_code": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ]
+}

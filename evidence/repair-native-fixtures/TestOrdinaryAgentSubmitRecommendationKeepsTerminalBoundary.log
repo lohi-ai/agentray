@@ -1,0 +1,8 @@
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual
+--- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary (0.01s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled (0.01s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/runtime	0.917s

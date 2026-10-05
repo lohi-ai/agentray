@@ -209,13 +209,32 @@ func TestPostgresChainedAskResumeKeepsDurableSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const conversationID = "chained-ask-session"
+	conversation, err := st.CreateConversation(ctx, boot.User.ID, boot.Project.ID, "", "Chained ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationID := conversation.ID
 	rootRunID, err := st.CreateAgentRun(ctx, boot.Project.ID, "", "chat", conversationID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	adapter := NewSessionStore(st)
-	if err := adapter.Append(ctx, rootRunID, agentcore.SessionEntry{Kind: agentcore.EntryQuestion, CallID: "question-1"}); err != nil {
+	// AnswerQuestion validates both the conversation branch and native log
+	// before resuming; seed the checkpoint a parked production run would keep.
+	nativeState := json.RawMessage(`{"messages":[]}`)
+	if err := adapter.Append(ctx, rootRunID, agentcore.SessionEntry{Kind: agentcore.EntryPiState, Model: nativeAgentRevision, Content: string(nativeState)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendPiConversationTurn(ctx, st, conversationID, boot.Project.ID, rootRunID, PiConversationHistory{}, agentcore.RunResult{NativeRevision: nativeAgentRevision, NativeState: nativeState}); err != nil {
+		t.Fatal(err)
+	}
+	appendQuestion := func(id string) error {
+		outcome := agentcore.PiToolOutcome{Executed: true, Parked: true, QuestionID: id,
+			Trace: agentcore.ToolTrace{CallID: id, Allowed: true, Tool: "ask", Args: `{"question":"Which?"}`}}
+		receipt := piModelJSON(map[string]any{"effectId": id, "result": map[string]any{"details": outcome}})
+		return adapter.Append(ctx, rootRunID, agentcore.SessionEntry{Kind: agentcore.EntryPiEffectDone, CallID: id, Content: string(receipt)})
+	}
+	if err := appendQuestion("question-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ParkAgentRun(ctx, rootRunID, "first question", 0, 0, 0, false); err != nil {
@@ -235,7 +254,7 @@ func TestPostgresChainedAskResumeKeepsDurableSession(t *testing.T) {
 			if err != nil {
 				return ChatResult{}, err
 			}
-			if err := adapter.Append(ctx, rootRunID, agentcore.SessionEntry{Kind: agentcore.EntryQuestion, CallID: "question-2"}); err != nil {
+			if err := appendQuestion("question-2"); err != nil {
 				return ChatResult{}, err
 			}
 			if err := st.ParkAgentRun(ctx, continuationID, "second question", 0, 0, 0, false); err != nil {
@@ -270,7 +289,7 @@ func TestPostgresChainedAskResumeKeepsDurableSession(t *testing.T) {
 	}
 	answers := map[string]int{}
 	for _, entry := range log {
-		if entry.Kind == agentcore.EntryAnswer {
+		if entry.Kind == agentcore.EntryPiAnswer {
 			answers[entry.CallID]++
 		}
 	}

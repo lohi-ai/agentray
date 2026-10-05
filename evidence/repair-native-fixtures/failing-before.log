@@ -1,0 +1,42 @@
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID
+    lohi_observer_test.go:109: agentcore: native provider is required
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name
+    lohi_observer_test.go:109: agentcore: native provider is required
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name
+    lohi_observer_test.go:109: agentcore: native provider is required
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID
+    lohi_observer_test.go:109: agentcore: native provider is required
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read
+    lohi_observer_test.go:109: agentcore: native provider is required
+--- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier (0.00s)
+    --- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID (0.00s)
+    --- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name (0.00s)
+    --- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name (0.00s)
+    --- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID (0.00s)
+    --- FAIL: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read (0.00s)
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled
+    lohi_observer_test.go:139: agentcore: native provider is required
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual
+    lohi_observer_test.go:139: agentcore: native provider is required
+--- FAIL: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary (0.00s)
+    --- FAIL: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled (0.00s)
+    --- FAIL: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual (0.00s)
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID
+    lohi_observer_test.go:354: first scheduled run: Pi run: Stream ended without finish_reason
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name
+    lohi_observer_test.go:354: first scheduled run: Pi run: Stream ended without finish_reason
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name
+    lohi_observer_test.go:354: first scheduled run: Pi run: Stream ended without finish_reason
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID
+    lohi_observer_test.go:354: first scheduled run: Pi run: Stream ended without finish_reason
+--- FAIL: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry (2.67s)
+    --- FAIL: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID (0.72s)
+    --- FAIL: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name (0.65s)
+    --- FAIL: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name (0.66s)
+    --- FAIL: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID (0.64s)
+FAIL
+FAIL	github.com/lohi-ai/agentray/internal/runtime	3.911s
+FAIL

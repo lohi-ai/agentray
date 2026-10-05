@@ -1,0 +1,30 @@
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read
+--- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier (0.08s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read (0.01s)
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual
+--- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary (0.01s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled (0.00s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual (0.00s)
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID
+--- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry (9.26s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID (2.41s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name (2.26s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name (2.24s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID (2.35s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/runtime	10.470s

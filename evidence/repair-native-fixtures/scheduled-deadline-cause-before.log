@@ -1,0 +1,60 @@
+=== RUN   TestLohiObserverSubmitRecommendationAllowsScheduledFollowup
+=== RUN   TestLohiObserverSubmitRecommendationAllowsScheduledFollowup/scheduled
+=== RUN   TestLohiObserverSubmitRecommendationAllowsScheduledFollowup/manual
+--- PASS: TestLohiObserverSubmitRecommendationAllowsScheduledFollowup (0.00s)
+    --- PASS: TestLohiObserverSubmitRecommendationAllowsScheduledFollowup/scheduled (0.00s)
+    --- PASS: TestLohiObserverSubmitRecommendationAllowsScheduledFollowup/manual (0.00s)
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read
+--- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier (0.08s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read (0.01s)
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled
+=== RUN   TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual
+--- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary (0.01s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/scheduled (0.00s)
+    --- PASS: TestOrdinaryAgentSubmitRecommendationKeepsTerminalBoundary/manual (0.00s)
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name
+=== RUN   TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID
+--- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry (8.67s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/advertised_UUID (2.19s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/accepted_name (2.17s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/case-folded_name (2.15s)
+    --- PASS: TestLohiObserverScheduledRunPersistsDeliveryFailureAndRetry/whitespace-padded_UUID (2.16s)
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun/model_call_timeout
+2026/10/05 23:50:15 scheduler: run failed project=cd4a9111-e14f-4184-8487-18d1dbeb0533 agent=cd4a9111-e14f-4184-8487-18d1dbeb0533 trigger=scheduled: context deadline exceeded
+Pi run: context canceled
+    scheduler_terminal_test.go:181: scheduled run=f77059f6-06d0-47ab-b1d9-ab5183b16ca3 status=error finished=2026-10-05 23:50:15.666954 +0700 +07 summary="data_quality:availability — observation could not complete; readiness and business conditions remain unverified. context deadline exceeded\nPi run: context canceled" tools=0 model_calls=1
+=== RUN   TestScheduledProviderTimeoutPersistsTerminalRun/deadline_before_first_model_turn
+2026/10/05 23:50:16 scheduler: run failed project=915ddd67-7c82-415b-b204-56174201583d agent=915ddd67-7c82-415b-b204-56174201583d trigger=scheduled: context canceled
+    scheduler_terminal_test.go:154: provider timeout summary = "data_quality:availability — observation could not complete; readiness and business conditions remain unverified. context canceled", want an auditable deadline reason
+--- FAIL: TestScheduledProviderTimeoutPersistsTerminalRun (2.67s)
+    --- PASS: TestScheduledProviderTimeoutPersistsTerminalRun/model_call_timeout (1.36s)
+    --- FAIL: TestScheduledProviderTimeoutPersistsTerminalRun/deadline_before_first_model_turn (1.31s)
+=== RUN   TestCronMatches
+--- PASS: TestCronMatches (0.00s)
+FAIL
+FAIL	github.com/lohi-ai/agentray/internal/runtime	13.123s
+=== RUN   TestLohiRevenueObserverUsesExistingInsightDigestAndDisabledTriggers
+--- PASS: TestLohiRevenueObserverUsesExistingInsightDigestAndDisabledTriggers (0.00s)
+=== RUN   TestLohiRevenueObserverDedupAndHonestyContract
+--- PASS: TestLohiRevenueObserverDedupAndHonestyContract (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/workloads	1.858s
+=== RUN   TestLohiRevenueObserverCronResolvesNineAMHCMToUTC
+--- PASS: TestLohiRevenueObserverCronResolvesNineAMHCMToUTC (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	2.659s
+FAIL

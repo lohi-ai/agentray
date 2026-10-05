@@ -1,0 +1,14 @@
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID
+=== RUN   TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read
+--- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier (0.08s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/advertised_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/accepted_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/case-folded_name (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/whitespace-padded_UUID (0.02s)
+    --- PASS: TestObserverSkillGateAcceptsEveryReadSkillIdentifier/unrelated_successful_read (0.01s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/runtime	0.975s
