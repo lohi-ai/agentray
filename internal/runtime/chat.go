@@ -58,8 +58,8 @@ type ChatOptions struct {
 	// caller typically sets both to the same conversation id.
 	ConversationID string
 	// ReadOnly withholds the agent's writing tools for this turn (see
-	// RunOptions.ReadOnly). The HTTP layer sets it when the turn is a demo
-	// viewer's question about someone else's project.
+	// RunOptions.ReadOnly). The HTTP layer sets it when the selected caller may
+	// read but not write (for example a demo viewer or restricted credential).
 	ReadOnly bool
 	// OnRunID, when set, is called with the run id as soon as the run row opens —
 	// before any token — so a streaming caller can surface it to the client (which

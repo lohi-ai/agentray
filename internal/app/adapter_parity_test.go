@@ -200,9 +200,13 @@ func restInvoker(e *echo.Echo, secret string) opInvoker {
 // uses. Handler failures arrive as isError results whose content text is the
 // operation's error message.
 func mcpInvoker(e *echo.Echo, secret string) opInvoker {
+	return mcpInvokerWithHeaders(e, map[string]string{"Authorization": "Bearer " + secret})
+}
+
+func mcpInvokerWithHeaders(e *echo.Echo, headers map[string]string) opInvoker {
 	return func(t *testing.T, name, args string) opOutcome {
 		t.Helper()
-		rec := postJSON(t, e, "/mcp", mcpCall(name, args), map[string]string{"Authorization": "Bearer " + secret})
+		rec := postJSON(t, e, "/mcp", mcpCall(name, args), headers)
 		var resp struct {
 			Result struct {
 				IsError           bool            `json:"isError"`

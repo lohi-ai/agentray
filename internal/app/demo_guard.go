@@ -125,7 +125,7 @@ var writeClasses = map[string]writeClass{
 	// the demo is project-scoped, so it is shared by every visitor, and
 	// rewriting a turn rewrites someone else's thread. Adding a message to it
 	// only appends. ---
-	"/api/agent/chat":                       writeAgentAsk,
+	"/api/agent/chat": writeAgentAsk,
 	// Answering a parked ask question resumes the run — same spend class as
 	// asking, so it is metered the same way.
 	"/api/agent/chat/answer":                writeAgentAsk,
@@ -428,12 +428,21 @@ func withDemo(g writeGuardStore, scope writeScope) writeScope {
 // job just has to ask.
 const demoReadOnlyCallerKey = "agentray.demo_read_only_run"
 
-// readOnlyRun reports whether this request's agent run must be read-only.
-// Absent key means false, which is correct: the guard sets it only for the demo,
-// and every other run is the caller's own project.
+// readOnlyCaller reports whether the write guard admitted this read-like route
+// while withholding mutation authority. That can be a demo viewer or a scoped
+// management credential without dashboards:write; in both cases the handler
+// must carry the decision into the agent runtime instead of re-deriving it from
+// an ambient session membership.
 func readOnlyCaller(c echo.Context) bool {
 	value, _ := c.Get(demoReadOnlyCallerKey).(bool)
 	return value
+}
+
+// agentRunReadOnly honors the guard's refusal and the selected credential's
+// grants. Session membership owns history, but cannot broaden a restricted
+// Bearer or strip an explicitly granted dashboards:write capability.
+func agentRunReadOnly(c echo.Context, auth authContext) bool {
+	return readOnlyCaller(c) || !writeFloorReg.Allow(auth.Principal, legacyWrite(opcore.AccessDashboardsWrite))
 }
 
 // demoAskLimit is config.DemoAgentRunsPerUserPerDay, set at server start.

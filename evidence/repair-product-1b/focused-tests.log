@@ -1,0 +1,101 @@
+=== RUN   TestADemoViewersQuestionRunsReadOnly
+--- PASS: TestADemoViewersQuestionRunsReadOnly (0.00s)
+=== RUN   TestInstalledDataAnalystBoardAuthorJourney
+    lohi_board_author_test.go:88: installed preset agent=f49dee98-f14c-4cde-95fa-c6054afbdbdb tools include run_sql=true create_dashboard=true create_chart=true
+    lohi_board_author_test.go:106: chat session role=owner demo=false board_authorized=true
+    lohi_board_author_test.go:143: owner cookie + restricted Bearer scopes=analytics:read,sources:read advertised create_dashboard=false create_chart=false direct_create=denied persisted_dashboard_delta=0
+    lohi_board_author_test.go:180: owner cookie + dashboards:write Bearer created and persisted dashboard=6d1e2c91-9987-4439-9766-04dda505b5f2 chart=d2484889-9211-4133-a962-b5a1cac8bef4
+    lohi_board_author_test.go:192: investigate-only runtime advertised create_dashboard=false create_chart=false tools=[dataset_preview explore_events list_sources persons preview_source run_sql source_status test_source]
+--- PASS: TestInstalledDataAnalystBoardAuthorJourney (0.33s)
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_session
+    lohi_board_author_test.go:293: history_role=owner selected_principal=session guard_read_only=false agent_run_read_only=false writes_allowed=true
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_cookie_plus_investigator_bearer
+    lohi_board_author_test.go:293: history_role=owner selected_principal=management guard_read_only=false agent_run_read_only=true writes_allowed=false
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_cookie_plus_dashboard_author_bearer
+    lohi_board_author_test.go:293: history_role=owner selected_principal=management guard_read_only=false agent_run_read_only=false writes_allowed=true
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_session
+    lohi_board_author_test.go:293: history_role=owner selected_principal=session guard_read_only=false agent_run_read_only=false writes_allowed=true
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_cookie_plus_investigator_bearer
+    lohi_board_author_test.go:293: history_role=owner selected_principal=management guard_read_only=true agent_run_read_only=true writes_allowed=false
+=== RUN   TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_cookie_plus_dashboard_author_bearer
+    lohi_board_author_test.go:293: history_role=owner selected_principal=management guard_read_only=false agent_run_read_only=false writes_allowed=true
+--- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession (0.26s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_session (0.00s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_cookie_plus_investigator_bearer (0.00s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=false/owner_cookie_plus_dashboard_author_bearer (0.00s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_session (0.00s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_cookie_plus_investigator_bearer (0.00s)
+    --- PASS: TestAgentRunCredentialPrecedenceOverOwnerSession/guarded=true/owner_cookie_plus_dashboard_author_bearer (0.00s)
+=== RUN   TestEveryAgentTurnUsesCredentialAwareReadOnly
+--- PASS: TestEveryAgentTurnUsesCredentialAwareReadOnly (0.00s)
+=== RUN   TestAgentRunHonorsReadOnlyGuardWithAuthorGrant
+--- PASS: TestAgentRunHonorsReadOnlyGuardWithAuthorGrant (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	2.828s
+=== RUN   TestQueryAccessRuntimeScopeMatrix
+=== RUN   TestQueryAccessRuntimeScopeMatrix/monitor
+=== RUN   TestQueryAccessRuntimeScopeMatrix/data_quality
+=== RUN   TestQueryAccessRuntimeScopeMatrix/analysis_builder
+=== RUN   TestQueryAccessRuntimeScopeMatrix/growth
+=== RUN   TestQueryAccessRuntimeScopeMatrix/none
+--- PASS: TestQueryAccessRuntimeScopeMatrix (0.00s)
+    --- PASS: TestQueryAccessRuntimeScopeMatrix/monitor (0.00s)
+    --- PASS: TestQueryAccessRuntimeScopeMatrix/data_quality (0.00s)
+    --- PASS: TestQueryAccessRuntimeScopeMatrix/analysis_builder (0.00s)
+    --- PASS: TestQueryAccessRuntimeScopeMatrix/growth (0.00s)
+    --- PASS: TestQueryAccessRuntimeScopeMatrix/none (0.00s)
+=== RUN   TestQueryAccessReadOnlyRemovesEveryMutationAndEscape
+--- PASS: TestQueryAccessReadOnlyRemovesEveryMutationAndEscape (0.00s)
+=== RUN   TestQueryAccessExecutesThroughRealRegistryTool
+--- PASS: TestQueryAccessExecutesThroughRealRegistryTool (0.00s)
+=== RUN   TestReadOnlyRunKeepsReadsAndDropsWrites
+--- PASS: TestReadOnlyRunKeepsReadsAndDropsWrites (0.00s)
+=== RUN   TestPermittedToolNamesUnderReadOnly
+--- PASS: TestPermittedToolNamesUnderReadOnly (0.00s)
+=== RUN   TestReadOnlyPolicyBlocksAWriteTool
+--- PASS: TestReadOnlyPolicyBlocksAWriteTool (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/runtime	1.235s
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R01
+2026/10/05 13:47:27 agentray: sandbox child has no address-space bound on this platform (no RLIMIT_AS); process isolation and the engine memory_limit still apply
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R02
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R03
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R04
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R05
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R06
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R07
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R08
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R09
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R10
+=== RUN   TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R11
+--- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly (0.36s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R01 (0.07s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R02 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R03 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R04 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R05 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R06 (0.03s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R07 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R08 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R09 (0.02s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R10 (0.03s)
+    --- PASS: TestLohiEvidenceV1RecipesExecuteAndRepeatExactly/R11 (0.04s)
+=== RUN   TestLohiEvidenceV1HonestAnswerBoundaries
+2026/10/05 13:47:27 agentray: sandbox child has no address-space bound on this platform (no RLIMIT_AS); process isolation and the engine memory_limit still apply
+--- PASS: TestLohiEvidenceV1HonestAnswerBoundaries (0.20s)
+=== RUN   TestLohiEvidenceV1SettlementAndSubsecondAgeStayHonest
+2026/10/05 13:47:27 agentray: sandbox child has no address-space bound on this platform (no RLIMIT_AS); process isolation and the engine memory_limit still apply
+--- PASS: TestLohiEvidenceV1SettlementAndSubsecondAgeStayHonest (0.12s)
+=== RUN   TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows
+2026/10/05 13:47:27 agentray: sandbox child has no address-space bound on this platform (no RLIMIT_AS); process isolation and the engine memory_limit still apply
+--- PASS: TestLohiEvidenceV1NetRevenueCompletenessRespondsToPartialRows (0.12s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/dataplane/store	3.758s
+=== RUN   TestLohiEvidenceV1ConfigContract
+--- PASS: TestLohiEvidenceV1ConfigContract (0.00s)
+=== RUN   TestLohiEvidenceV1HonestyRulesStayPortable
+--- PASS: TestLohiEvidenceV1HonestyRulesStayPortable (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/workloads	0.428s

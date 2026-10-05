@@ -989,7 +989,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			ProjectID: project.ID, AgentID: c.QueryParam("agent"),
 			Message: payload.Message, History: chatHistory(payload.History),
 			SessionID: payload.SessionID,
-			ReadOnly:  !sessionAllowsWrite(project),
+			ReadOnly:  agentRunReadOnly(c, auth),
 		}
 
 		if wantsEventStream(c) {
@@ -1062,7 +1062,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			CallID:         payload.CallID,
 			Answer:         payload.Answer,
 			ConversationID: payload.ConversationID,
-			ReadOnly:       !sessionAllowsWrite(project),
+			ReadOnly:       agentRunReadOnly(c, auth),
 		}
 		if wantsEventStream(c) {
 			return streamAnswer(c, svc, opts)
@@ -1141,7 +1141,7 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			Message: message, History: history,
 			PiHistory: piHistory, InputID: inputID,
 			SessionID: conv.ID, ConversationID: conv.ID,
-			ReadOnly: !sessionAllowsWrite(project),
+			ReadOnly: agentRunReadOnly(c, ctx),
 		}
 		if wantsEventStream(c) {
 			return streamChat(c, svc, opts)
@@ -1537,18 +1537,16 @@ func userTurnAbove(ctx context.Context, store interface {
 }
 
 // authProject resolves the auth context + project for a session-owned request
-// in one step. Keep principalFromRequest in the path so a supplied credential
-// still has its normal precedence and failure semantics, then load the project
-// through the membership-aware reader. The role-blind ProjectByID projection
-// is sufficient for operation adapters, but using it here erased Role/IsDemo;
-// every ordinary owner/member chat consequently looked unauthorized to
-// sessionAllowsWrite and the generic runtime silently dropped its write tools.
+// in one step. Membership proves the user may own history in the selected
+// project; the selected principal separately decides runtime authority. Retain
+// Role/IsDemo for session behavior without lending that membership's grants (or
+// capture key) to a supplied management credential.
 func authProject(c echo.Context, store *storage.Store) (authContext, storage.Project, error) {
 	ctx, err := authFromRequest(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}
-	admitted, err := projectFromRequest(c, store)
+	principal, admitted, err := principalAndProject(c, store)
 	if err != nil {
 		return authContext{}, storage.Project{}, err
 	}
@@ -1556,7 +1554,8 @@ func authProject(c echo.Context, store *storage.Store) (authContext, storage.Pro
 	if err != nil {
 		return authContext{}, storage.Project{}, echo.NewHTTPError(http.StatusForbidden, "project not available")
 	}
-	return ctx, project, nil
+	ctx.Principal = principal
+	return ctx, projectForPrincipal(project, principal), nil
 }
 
 // wantsEventStream reports whether the client asked for an SSE token stream.

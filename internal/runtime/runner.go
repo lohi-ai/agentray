@@ -454,8 +454,8 @@ type RunOptions struct {
 	NativeHistoryRevision string
 	InputID               string
 	// ReadOnly strips the run down to the analytics reads (see
-	// BuildParams.ReadOnly). Set for a question asked from inside the shared
-	// demo by someone whose membership there is read-only.
+	// BuildParams.ReadOnly). Set when the selected caller may inspect but not
+	// change the project, including shared-demo viewers and restricted credentials.
 	ReadOnly bool
 	// StepGate is the optional pause-before-each-turn hook for the Lab's explain
 	// mode. Threaded straight into BuildParams; nil keeps the run continuous.

@@ -1,0 +1,4 @@
+=== RUN   TestNoRouteResolvesThroughTheReadResolver
+--- PASS: TestNoRouteResolvesThroughTheReadResolver (0.02s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	1.058s
