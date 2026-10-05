@@ -92,6 +92,12 @@ func NewClient(spec ClientSpec) (protocol.LLMProvider, error) {
 			inner.BaseURL = strings.TrimRight(b, "/")
 		}
 		return newPooledProvider(VendorGoogleAntigravity, inner, spec.TokenSource, spec.SessionScope)
+	case VendorDevin:
+		inner := NewDevinProvider()
+		if b := strings.TrimSpace(spec.BaseURL); b != "" {
+			inner.BaseURL = strings.TrimRight(b, "/")
+		}
+		return newPooledProvider(VendorDevin, inner, spec.TokenSource, spec.SessionScope)
 	case "google", "gemini":
 		// Gemini on Google's OpenAI-compatible surface. An explicit BaseURL
 		// overrides the default endpoint (e.g. a regional proxy).

@@ -187,16 +187,17 @@ func (m *Manager) startLogin(vendor, workspaceID, providerID string) (LoginStart
 		}
 	}
 
-	q := url.Values{
-		"response_type": {"code"},
-		"client_id":     {d.clientID},
-		"redirect_uri":  {d.redirectURI},
-		"scope":         {strings.Join(d.scopes, " ")},
-		"state":         {state},
-	}
-	if d.pkce {
-		q.Set("code_challenge", challenge)
-		q.Set("code_challenge_method", "S256")
+	q := url.Values{}
+	if !d.minimalAuthorize {
+		q.Set("response_type", "code")
+		q.Set("client_id", d.clientID)
+		q.Set("redirect_uri", d.redirectURI)
+		q.Set("scope", strings.Join(d.scopes, " "))
+		q.Set("state", state)
+		if d.pkce {
+			q.Set("code_challenge", challenge)
+			q.Set("code_challenge_method", "S256")
+		}
 	}
 	for k, v := range d.extraAuthParams {
 		q.Set(k, v)
@@ -317,12 +318,14 @@ func (m *Manager) exchangeLogin(ctx context.Context, p PendingLogin, code string
 
 // --- token endpoint ----------------------------------------------------------
 
-// tokenResponse is the union of the three vendors' token-endpoint bodies.
+// tokenResponse is the union of the vendors' token-endpoint bodies.
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	IDToken      string `json:"id_token"`
 	ExpiresIn    int64  `json:"expires_in"`
+	// Token is Devin's session-token field name.
+	Token string `json:"token"`
 
 	Account *struct {
 		UUID         string `json:"uuid"`
@@ -339,7 +342,22 @@ type tokenResponse struct {
 // JSON body).
 func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code, verifier, redirectURI, state string) (TokenResult, error) {
 	var body io.Reader
-	if d.tokenBody == tokenBodyJSON {
+	contentType := "application/x-www-form-urlencoded"
+	switch {
+	case d.minimalTokenBody:
+		// The CLI client id is implicit: the endpoint accepts only the code and
+		// its PKCE verifier.
+		payload := map[string]string{"code": code}
+		if verifier != "" {
+			payload["code_verifier"] = verifier
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return TokenResult{}, err
+		}
+		body = strings.NewReader(string(raw))
+		contentType = "application/json"
+	case d.tokenBody == tokenBodyJSON:
 		payload := map[string]string{
 			"grant_type":    "authorization_code",
 			"client_id":     d.clientID,
@@ -353,7 +371,8 @@ func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code,
 			return TokenResult{}, err
 		}
 		body = strings.NewReader(string(raw))
-	} else {
+		contentType = "application/json"
+	default:
 		form := url.Values{
 			"grant_type":   {"authorization_code"},
 			"client_id":    {d.clientID},
@@ -373,11 +392,7 @@ func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code,
 	if err != nil {
 		return TokenResult{}, err
 	}
-	if d.tokenBody == tokenBodyJSON {
-		req.Header.Set("Content-Type", "application/json")
-	} else {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
+	req.Header.Set("Content-Type", contentType)
 
 	client := m.client
 	if d.tokenTimeout > 0 {
@@ -407,15 +422,22 @@ func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code,
 	if err := json.Unmarshal(raw, &tr); err != nil {
 		return TokenResult{}, &Error{Kind: "validation", Message: "token endpoint returned invalid JSON: " + truncate(string(raw), 300)}
 	}
-	if tr.AccessToken == "" {
+	accessToken := tr.AccessToken
+	if d.tokenAccessField == "token" {
+		accessToken = tr.Token
+	}
+	if accessToken == "" {
 		return TokenResult{}, &Error{Kind: "validation", Message: "token response missing access_token"}
 	}
 
 	res := TokenResult{
-		AccessToken:  tr.AccessToken,
+		AccessToken:  accessToken,
 		RefreshToken: tr.RefreshToken,
 		IDToken:      tr.IDToken,
 		ExpiresAt:    time.Now().Add(time.Duration(tr.ExpiresIn)*time.Second - d.expiresSkew),
+	}
+	if d.jwtExpiry {
+		res.ExpiresAt = tokenJWTExpiry(accessToken, time.Now())
 	}
 	if tr.Account != nil {
 		res.AccountID = tr.Account.UUID
@@ -430,6 +452,39 @@ func (m *Manager) exchangeCode(ctx context.Context, d *providerDescriptor, code,
 
 func truncate(s string, n int) string {
 	return agentcore.TruncateBytes(strings.TrimSpace(s), n)
+}
+
+// tokenJWTFallbackLifetime matches the Devin CLI rule's `fallback-ms`: a token
+// whose `exp` cannot be read is treated as valid for one year.
+const tokenJWTFallbackLifetime = 365 * 24 * time.Hour
+
+// tokenJWTExpiry reads a JWT's `exp` claim (seconds since epoch). Unreadable or
+// absent claims fall back to the one-year lifetime so a valid session is not
+// needlessly treated as expired.
+func tokenJWTExpiry(token string, now time.Time) time.Time {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return now.Add(tokenJWTFallbackLifetime)
+	}
+	payload := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == '\f' {
+			return -1
+		}
+		return r
+	}, parts[1])
+	raw, err := base64.RawStdEncoding.DecodeString(payload)
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(payload); err != nil {
+			return now.Add(tokenJWTFallbackLifetime)
+		}
+	}
+	var claims struct {
+		Exp float64 `json:"exp"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil || claims.Exp <= 0 {
+		return now.Add(tokenJWTFallbackLifetime)
+	}
+	return time.Unix(int64(claims.Exp), 0)
 }
 
 // --- after-exchange enrichment ----------------------------------------------

@@ -33,8 +33,6 @@ func (t ModelTier) resolvePiWire(nativeOAuthPool bool, streamOptions map[string]
 		}
 		return piModelWire{api: ai.VendorGoogleAntigravity, provider: ai.VendorGoogleAntigravity, endpoint: endpoint, compat: map[string]any{"antigravityDefaultEndpoints": defaults}}, nil
 	}
-	var provider agentcore.LLMProvider
-	var err error
 	if nativeOAuthPool && ai.NormalizeOAuthVendor(t.Provider) == ai.VendorClaudeCode {
 		endpoint := t.BaseURL
 		if strings.TrimSpace(endpoint) == "" {
@@ -42,7 +40,21 @@ func (t ModelTier) resolvePiWire(nativeOAuthPool bool, streamOptions map[string]
 		}
 		return piModelWire{api: "anthropic-messages", provider: ai.VendorClaudeCode, endpoint: endpoint}, nil
 	}
+	if nativeOAuthPool && ai.NormalizeOAuthVendor(t.Provider) == ai.VendorDevin {
+		endpoint := strings.TrimSpace(t.BaseURL)
+		if endpoint == "" {
+			endpoint = ai.DevinDefaultBaseURL
+		}
+		return piModelWire{api: "devin-agent", provider: ai.VendorDevin, endpoint: endpoint}, nil
+	}
+	var provider agentcore.LLMProvider
+	var err error
 	if nativeOAuthPool {
+		if ai.NormalizeOAuthVendor(t.Provider) != ai.VendorOpenAICodex {
+			// Only the vendors handled above have a native pooled stream; refusing
+			// here beats silently building a Codex wire for an unknown vendor.
+			return piModelWire{}, fmt.Errorf("native OAuth pool has no wire for vendor %q", t.Provider)
+		}
 		p := ai.NewCodexProvider()
 		p.BaseURL = t.BaseURL
 		provider = p

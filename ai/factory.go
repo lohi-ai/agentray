@@ -48,7 +48,7 @@ func New(spec Spec) (Provider, error) {
 		inner, err = NewClient(ClientSpec{
 			Name: "google", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
-	case VendorClaudeCode, VendorOpenAICodex, VendorGoogleAntigravity:
+	case VendorClaudeCode, VendorOpenAICodex, VendorGoogleAntigravity, VendorDevin:
 		// OAuth subscription vendors: no API key — the wire client draws a live
 		// token from the account pool per request.
 		inner, err = NewClient(ClientSpec{
@@ -135,6 +135,11 @@ func oauthModelLister(vendor string, inner protocol.LLMProvider, http HTTPDoer, 
 		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
 			return p.listAntigravityModels(ctx, http, tok)
 		}
+	case VendorDevin:
+		p, _ := inner.(*DevinProvider)
+		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
+			return p.listDevinModels(ctx, http, tok)
+		}
 	}
 	return nil
 }
@@ -160,6 +165,9 @@ func injectHTTP(inner protocol.LLMProvider, client HTTPDoer) {
 		p.HTTP = std
 		p.StreamHTTP = std
 	case *AntigravityProvider:
+		p.HTTP = std
+		p.StreamHTTP = std
+	case *DevinProvider:
 		p.HTTP = std
 		p.StreamHTTP = std
 	case *pooledProvider:

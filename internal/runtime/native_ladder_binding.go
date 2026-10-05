@@ -9,7 +9,7 @@ import (
 
 func supportsNativeOAuthPool(provider string) bool {
 	switch ai.NormalizeOAuthVendor(provider) {
-	case ai.VendorOpenAICodex, ai.VendorClaudeCode, ai.VendorGoogleAntigravity:
+	case ai.VendorOpenAICodex, ai.VendorClaudeCode, ai.VendorGoogleAntigravity, ai.VendorDevin:
 		return true
 	default:
 		return false

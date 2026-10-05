@@ -64,6 +64,15 @@ func CapabilitiesFor(vendor, model string) protocol.ModelCapabilities {
 			ReasoningEffort:   unsupported,
 			StatefulResponses: unsupported,
 		}
+	case VendorDevin:
+		// The Cascade envelope carries tool definitions, images and thinking
+		// effort; there is no structured-output or prompt-caching knob.
+		return protocol.ModelCapabilities{
+			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,
+			ImageInput: supported, MaxInputImages: 20,
+			MaxOutputTokens:   128000,
+			StatefulResponses: unsupported,
+		}
 	case "google":
 		return protocol.ModelCapabilities{
 			Tools: supported, ToolChoice: supported, ReasoningEffort: supported,

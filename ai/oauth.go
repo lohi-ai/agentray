@@ -15,6 +15,7 @@ const (
 	VendorClaudeCode        = "claude-code"
 	VendorOpenAICodex       = "openai-codex"
 	VendorGoogleAntigravity = "google-antigravity"
+	VendorDevin             = "devin"
 )
 
 // OAuthPoolKey is the sentinel ResolveWorkspaceRun puts in the per-tier key
@@ -75,6 +76,8 @@ func NormalizeOAuthVendor(v string) string {
 		return VendorOpenAICodex
 	case "google-antigravity", "antigravity":
 		return VendorGoogleAntigravity
+	case "devin", "devin-agent", "codeium-devin", "windsurf-devin":
+		return VendorDevin
 	}
 	return ""
 }

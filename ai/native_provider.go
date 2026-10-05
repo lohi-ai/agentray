@@ -13,7 +13,7 @@ func ValidateNativeModel(raw json.RawMessage) error {
 		return err
 	}
 	switch model.API {
-	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses", "pi-messages", VendorGoogleAntigravity:
+	case "openai-completions", "openai-responses", "anthropic-messages", "openai-codex-responses", "azure-openai-responses", "pi-messages", VendorGoogleAntigravity, "devin-agent":
 		return nil
 	}
 	return fmt.Errorf("native Go provider for API %q is not ported", model.API)
@@ -53,6 +53,9 @@ func (p NativeProvider) Stream(ctx context.Context, model json.RawMessage, trans
 		if selected.API == "anthropic-messages" && selected.Provider == VendorClaudeCode {
 			return StreamClaudeCodePooled(ctx, model, transcript, provider, p.Tokens)
 		}
+		if selected.API == "devin-agent" && selected.Provider == VendorDevin {
+			return StreamDevinPooled(ctx, model, transcript, provider, p.Tokens)
+		}
 		if selected.API != "openai-codex-responses" {
 			return nil, fmt.Errorf("native Codex account pool cannot serve API %q", selected.API)
 		}
@@ -60,6 +63,9 @@ func (p NativeProvider) Stream(ctx context.Context, model json.RawMessage, trans
 	}
 	if selected.API == VendorGoogleAntigravity {
 		return nil, fmt.Errorf("Antigravity requires an account pool")
+	}
+	if selected.API == "devin-agent" {
+		return nil, fmt.Errorf("Devin requires an account pool")
 	}
 	if selected.API == VendorPiMessages {
 		return StreamPiMessagesJSON(ctx, model, transcript, provider)

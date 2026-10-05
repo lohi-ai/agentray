@@ -39,6 +39,11 @@ func NewNativeClient(spec ClientSpec) (*NativeClient, error) {
 		if c.endpoint == "" {
 			c.endpoint = "https://chatgpt.com/backend-api"
 		}
+	case VendorDevin:
+		c.api, c.provider, c.endpoint = "devin-agent", vendor, strings.TrimRight(spec.BaseURL, "/")
+		if c.endpoint == "" {
+			c.endpoint = DevinDefaultBaseURL
+		}
 	default:
 		// Share established vendor/compat defaults with the existing client factory;
 		// execution below uses only native transports.

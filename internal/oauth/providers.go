@@ -63,6 +63,15 @@ type providerDescriptor struct {
 	deviceVerifyURL   string
 	deviceRedirectURI string
 
+	// Devin-style flows: the CLI client id is implicit, so the authorize URL
+	// carries only extraAuthParams and the token exchange posts a minimal JSON
+	// body; the access token arrives as `token` and its lifetime is read from
+	// the JWT `exp` claim.
+	minimalAuthorize bool
+	minimalTokenBody bool
+	tokenAccessField string
+	jwtExpiry        bool
+
 	instructions string
 }
 
@@ -159,6 +168,24 @@ func defaultDescriptors() map[string]*providerDescriptor {
 			usageURL:          "/v1internal:retrieveUserQuotaSummary",
 			usageMethod:       http.MethodPost,
 			instructions:      "Complete the sign-in in your browser.",
+		},
+		ai.VendorDevin: {
+			vendor:       ai.VendorDevin,
+			authorizeURL: "https://app.devin.ai/auth/cli/continue",
+			tokenURL:     "https://api.devin.ai/auth/cli/token",
+			// The Devin CLI client owns this loopback port; the authorize URL
+			// omits redirect_uri because the endpoint implies it.
+			redirectURI:  "http://127.0.0.1:59653/callback",
+			extraAuthParams: map[string]string{
+				"prompt": "select_account",
+			},
+			pkce:             true,
+			tokenBody:        tokenBodyJSON,
+			minimalAuthorize: true,
+			minimalTokenBody: true,
+			tokenAccessField: "token",
+			jwtExpiry:        true,
+			instructions:      "Sign in to Devin in your browser.",
 		},
 	}
 }
