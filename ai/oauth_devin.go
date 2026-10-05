@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/internal/jsonjs"
 )
 
@@ -104,32 +106,43 @@ func loginDevinOAuth(interaction ProviderAuthInteraction, options DevinOAuthOpti
 	if err != nil {
 		return nil, err
 	}
-	// Devin's CLI authorize endpoint carries only the account-prompt hint: the
-	// client id/redirect are implied by the Devin CLI client.
-	authURL := options.authorizeURL + "?prompt=select_account"
 	ctx := interaction.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Devin's authorize endpoint is a real OAuth flow: it needs the PKCE
+	// challenge, a state the callback echoes back, and the exact redirect_uri
+	// the browser will land on — without these the page just sits there.
+	state := uuid.NewString()
 	var callback *OAuthCallbackServer
 	_, _ = invokeAuth(func() (any, error) {
 		server, err := options.StartCallback(&OAuthCallbackServerOptions{
 			ProviderName: "Devin", Host: options.CallbackHost(), Port: devinOAuthCallbackPort,
-			Path: devinOAuthCallbackPath, Context: ctx, Complete: func(code string) (any, error) { return code, nil },
+			Path: devinOAuthCallbackPath, State: &state, Context: ctx,
+			Complete: func(code string) (any, error) { return code, nil },
 		})
 		if err == nil {
 			callback = server
 		}
 		return nil, err
 	})
+	if callback != nil {
+		defer callback.Close()
+	}
+	params := url.Values{
+		"response_type":         {"code"},
+		"redirect_uri":          {callbackRedirectURI(callback)},
+		"state":                 {state},
+		"code_challenge":        {pkce.Challenge},
+		"code_challenge_method": {"S256"},
+		"prompt":                {"select_account"},
+	}
+	authURL := options.authorizeURL + "?" + params.Encode()
 	interaction.Notify(NewObject(
 		Property{Name: "type", Value: "auth_url"},
 		Property{Name: "url", Value: authURL},
 		Property{Name: "instructions", Value: "Sign in to Devin in your browser."},
 	))
-	if callback != nil {
-		defer callback.Close()
-	}
 	result, err := WaitForCallbackOrManualInput(interaction, callback, OAuthManualPrompt{
 		Message:     "Complete login in your browser, or paste the authorization code / redirect URL here:",
 		Placeholder: "https://app.devin.ai/auth/cli/continue/callback",
@@ -156,6 +169,16 @@ func loginDevinOAuth(interaction ProviderAuthInteraction, options DevinOAuthOpti
 		return nil, errors.New("Missing authorization code")
 	}
 	return devinOAuthExchange(ctx, code, pkce.Verifier, options)
+}
+
+// callbackRedirectURI reports the callback's live redirect URI, falling back to
+// the preferred localhost endpoint when no listener could bind (manual paste
+// still works — the browser never leaves app.devin.ai in that mode anyway).
+func callbackRedirectURI(callback *OAuthCallbackServer) string {
+	if callback != nil && callback.RedirectURI != "" {
+		return callback.RedirectURI
+	}
+	return fmt.Sprintf("http://%s:%d%s", "127.0.0.1", devinOAuthCallbackPort, devinOAuthCallbackPath)
 }
 
 // devinOAuthExchange posts the code + verifier and maps the response onto the
@@ -249,5 +272,5 @@ func devinTokenExpiryMS(token string, options DevinOAuthOptions) float64 {
 	if !ok || exp <= 0 {
 		return options.Now() + devinOAuthFallbackLifetimeMS
 	}
-	return exp * 1000
+	return exp*1000 - 5*60*1000
 }

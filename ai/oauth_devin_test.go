@@ -72,7 +72,7 @@ func TestDevinOAuthExchangeMinimalBodyAndJWTExpiry(t *testing.T) {
 	if got := object.Get("type"); got != "oauth" {
 		t.Fatalf("type = %v", got)
 	}
-	if got, _ := object.Get("expires").(float64); int64(got) != expiry.UnixMilli() {
+	if got, _ := object.Get("expires").(float64); int64(got) != expiry.UnixMilli()-5*60*1000 {
 		t.Fatalf("expires = %v, want %d", got, expiry.UnixMilli())
 	}
 }
