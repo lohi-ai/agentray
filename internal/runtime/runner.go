@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
@@ -28,6 +29,12 @@ import (
 // complete instead of truncating at the gateway's low default with
 // stop_reason:"length".
 const defaultRunMaxTokens = 16000
+
+// terminalPersistenceTimeout gives trace and run-state writes a bounded context
+// that survives the model-loop deadline. Scheduled runs deliberately expire
+// their parent context; reusing it here would make FinishAgentRun fail instantly
+// and leave the row looking "running" after the provider had already timed out.
+const terminalPersistenceTimeout = 5 * time.Second
 
 // Runner builds, executes, and persists a Growth Analyst run end-to-end: it
 // resolves the project's config/key/definition/skills, opens an agent_run,
@@ -542,7 +549,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// is sent, so registering late would leave a window where the user has pressed
 	// Stop, the UI says "Stopped", and the run is still burning tokens because
 	// nothing was there to cancel. runCtx bounds only the model loop: the terminal
-	// FinishAgentRun below stays on the parent ctx, so a stopped run still records
+	// FinishAgentRun below uses a detached bounded ctx, so a stopped run still records
 	// its status and partial answer rather than being resurrected as "still
 	// working" by the client's resume poll.
 	runCtx, cancelRun := context.WithCancelCause(ctx)
@@ -810,6 +817,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// and through agent_runs.agent_id, to this agent. agentcore treats the id as
 	// opaque; the run→agent mapping stays here in the consumer.
 	ctx = observe.WithTraceID(ctx, runID)
+	runCtx = observe.WithTraceID(runCtx, runID)
 
 	// The durable log this run appends to: continues the prior run when
 	// resuming, otherwise keys off this run's own id.
@@ -834,6 +842,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		sandboxSession = runID
 	}
 	ctx = agentcore.WithSandboxSession(ctx, sandboxSession)
+	runCtx = agentcore.WithSandboxSession(runCtx, sandboxSession)
 	if ss, ok := r.Sandbox.(agentcore.SessionSandbox); ok && opts.SessionID == "" {
 		// No durable conversation to keep alive past this run: reap on completion.
 		defer func() { _ = ss.CloseSession(sandboxSession) }()
@@ -977,10 +986,25 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 		},
 	}
 	// Run on the cancellable context; trace and terminal persistence below use
-	// ctx so a user stop still settles the run row.
+	// detached, bounded contexts so a user stop or scheduler timeout still settles
+	// the run row.
 	res, runErr := r.runModelLoop(runCtx, params, opts, runTier, sink)
+	// AgentCore treats cancellation observed between turns as a graceful loop
+	// stop and reports it in StopReason. At the product boundary that distinction
+	// matters: an unattended deadline is an availability failure, not a successful
+	// empty observation. Promote only the explicit aborted result, so a complete
+	// answer that won a cancellation race remains complete (see the status switch
+	// below).
+	if runErr == nil && res.StopReason == "aborted" && runCtx.Err() != nil {
+		runErr = context.Cause(runCtx)
+		if runErr == nil {
+			runErr = runCtx.Err()
+		}
+	}
 
-	r.persistTrace(ctx, runID, res)
+	traceCtx, cancelTrace := context.WithTimeout(context.WithoutCancel(ctx), terminalPersistenceTimeout)
+	r.persistTrace(traceCtx, runID, res)
+	cancelTrace()
 	status := "done"
 	summary := res.Final
 	switch {
@@ -1004,6 +1028,9 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	case runErr != nil:
 		status = "error"
 		summary = runErr.Error()
+		if len(observerTerminalFollowupSkills(skills)) > 0 {
+			summary = "data_quality:availability — observation could not complete; readiness and business conditions remain unverified. " + summary
+		}
 	}
 	// Surface a faulted durable log (pi's Faulted state, degraded to a flag): if
 	// buffered session entries could not be persisted even by the trailing
@@ -1012,10 +1039,16 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	if res.UnpersistedEntries > 0 {
 		summary = fmt.Sprintf("[warning: %d durable-log entries were not persisted — a resume may miss the last turn(s)]\n\n", res.UnpersistedEntries) + summary
 	}
+	finishCtx, cancelFinish := context.WithTimeout(context.WithoutCancel(ctx), terminalPersistenceTimeout)
+	var finishErr error
 	if res.Parked {
-		_ = r.Store.ParkAgentRun(ctx, runID, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
+		finishErr = r.Store.ParkAgentRun(finishCtx, runID, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
 	} else {
-		_ = r.Store.FinishAgentRun(ctx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
+		finishErr = r.Store.FinishAgentRun(finishCtx, runID, status, truncate(summary, 4000), res.Usage.InputTokens, res.Usage.OutputTokens, res.Usage.CostUSD, res.Usage.CostUnpriced)
+	}
+	cancelFinish()
+	if finishErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("persist agent run terminal state: %w", finishErr))
 	}
 	if opts.Reflect && runErr == nil {
 		// Reflection resolves the agent's "reflection" task tier (defaults to pro,

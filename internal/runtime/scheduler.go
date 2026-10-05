@@ -15,6 +15,8 @@ import (
 // off the HTTP path the same way ingestion decouples via NATS (§8).
 const DefaultRunSubject = "agentray.agent.run"
 
+const defaultScheduledRunTimeout = 10 * time.Minute
+
 // staleRunDeadline is how long a run may sit in 'running' before the sweeper
 // marks it errored. Generously past the detached-run ceiling (10m) so a healthy
 // long run is never swept, only one whose process actually died.
@@ -24,6 +26,7 @@ const staleRunDeadline = 15 * time.Minute
 // call may sit before the sweeper marks it errored. A day is enough for an
 // asynchronous human answer; after that the run is stalled, not waiting.
 const staleWaitingDeadline = 24 * time.Hour
+
 // MonitorPrompt is the canned task for a scheduled watchdog run.
 const MonitorPrompt = `Perform your scheduled check. Inspect recent activity and data quality for anomalies:
 ingestion gaps, volume/error spikes, latency or cost drift, and malformed or missing event properties.
@@ -60,6 +63,9 @@ type Scheduler struct {
 	// evaluator hooks here so alerting shares the one clock instead of a second
 	// timer). Failures are the callback's own concern — the ticker never blocks.
 	onTick func(ctx context.Context, now time.Time)
+	// runTimeout bounds one detached scheduled/webhook run. It is a field so the
+	// real NATS consumer path can be exercised under a short deadline in tests.
+	runTimeout time.Duration
 }
 
 // OnTick registers a callback fired every minute with the tick time (UTC). Used
@@ -73,11 +79,12 @@ func (s *Scheduler) OnTick(fn func(ctx context.Context, now time.Time)) {
 // isolation substrate as HTTP-chat runs.
 func NewScheduler(nc *nats.Conn, store *storage.Store, runnerOpts ...RunnerOption) *Scheduler {
 	return &Scheduler{
-		nc:      nc,
-		runner:  NewRunner(store, runnerOpts...),
-		store:   store,
-		subject: DefaultRunSubject,
-		stop:    make(chan struct{}),
+		nc:         nc,
+		runner:     NewRunner(store, runnerOpts...),
+		store:      store,
+		subject:    DefaultRunSubject,
+		stop:       make(chan struct{}),
+		runTimeout: defaultScheduledRunTimeout,
 	}
 }
 
@@ -101,7 +108,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		// not to an externally-driven webhook; a webhook run is one-shot work.
 		reflect := trigger == "scheduled"
 		// Each run gets a bounded context independent of the publish path.
-		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		runCtx, cancel := context.WithTimeout(context.Background(), s.runTimeout)
 		defer cancel()
 		if _, _, err := s.runner.Run(runCtx, RunOptions{
 			ProjectID: m.ProjectID, AgentID: m.AgentID, Trigger: trigger, Prompt: prompt, Reflect: reflect,
@@ -196,6 +203,7 @@ func (s *Scheduler) tickLoop(ctx context.Context) {
 func (s *Scheduler) sweepStaleRuns(ctx context.Context) {
 	_, _ = s.store.SweepStaleRuns(ctx, staleRunDeadline, staleWaitingDeadline)
 }
+
 // publishDue publishes a run for every due schedule. Two sources are scanned:
 // the legacy project-level schedule (agent_configs.schedule_cron → the default
 // agent) and the per-agent agent_triggers (AgentGarden §7), so existing
