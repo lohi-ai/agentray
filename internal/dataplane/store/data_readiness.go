@@ -339,19 +339,24 @@ WHERE stream_id=? AND subject=? AND stream_seq=? AND payload_sha256=? AND cleare
 	priorOrderingAmbiguous := false
 	if s.GenerationSeq == 0 {
 		var priorKey string
-		var priorSeq, priorBatches uint64
+		var priorSeq uint64
 		var priorCompletion bool
 		var priorExpected sql.Null[uint64]
 		err := tx.QueryRowContext(ctx, `SELECT s.generation_key,s.generation_seq,s.completion_seen,s.expected_batches,
-(SELECT count(*) FROM data_receipt_batches b WHERE b.project_id=s.project_id AND b.connector_id=s.connector_id
- AND b.table_name=s.table_name AND b.generation_key=s.generation_key),coalesce(s.ordering_ambiguous,false)
+coalesce(s.ordering_ambiguous,false)
 FROM data_receipt_sources s WHERE s.project_id=? AND s.connector_id=? AND s.table_name=?`,
-			pid, cid, s.Table).Scan(&priorKey, &priorSeq, &priorCompletion, &priorExpected, &priorBatches, &priorOrderingAmbiguous)
+			pid, cid, s.Table).Scan(&priorKey, &priorSeq, &priorCompletion, &priorExpected, &priorOrderingAmbiguous)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		priorIncrementalIncomplete = err == nil && priorSeq == 0 && priorKey != generationKey &&
-			(!priorCompletion || !priorExpected.Valid || priorBatches != priorExpected.V)
+		if err == nil && priorSeq == 0 && priorKey != generationKey {
+			var priorBatches uint64
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM data_receipt_batches
+WHERE project_id=? AND connector_id=? AND table_name=? AND generation_key=?`, pid, cid, s.Table, priorKey).Scan(&priorBatches); err != nil {
+				return err
+			}
+			priorIncrementalIncomplete = !priorCompletion || !priorExpected.Valid || priorBatches != priorExpected.V
+		}
 	}
 	if s.BatchID != "" {
 		var prior string
@@ -516,6 +521,15 @@ WHERE project_id = ? AND connector_id = ? AND table_name = ?`, s.ProjectID, s.Co
 			return false, nil
 		}
 		return true, nil
+	}
+	if s.GenerationSeq > 0 && priorGenerationSeq == 0 {
+		// An incremental-to-snapshot switch also starts a new ordering domain.
+		// A delayed snapshot from before the switch must not regain authority
+		// merely because snapshot sequences are positive; compare the capture
+		// boundaries across the mode transition just as the inverse case does.
+		if s.CaptureStartedAt == nil || (priorCaptureStarted.Valid && !s.CaptureStartedAt.UTC().After(priorCaptureStarted.Time.UTC())) {
+			return true, nil
+		}
 	}
 	if s.GenerationSeq > 0 && s.GenerationSeq == priorGenerationSeq && generationKey != priorGenerationKey {
 		return false, fmt.Errorf("generation sequence %d conflicts with current generation", s.GenerationSeq)

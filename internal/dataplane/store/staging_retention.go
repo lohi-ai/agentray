@@ -14,12 +14,17 @@ const (
 // StagingGenerationDescriptor is the frozen C1 eligibility handoff. C2 never
 // guesses these booleans from age, a failed run, or an absent lease.
 type StagingGenerationDescriptor struct {
-	Generation           string
-	State                string
-	TerminalAt           *time.Time
-	Resumable            bool
-	IsActiveOnThisStore  bool
-	HasUnpublishedOutbox bool
+	ProjectID               string
+	ConnectorID             string
+	Table                   string
+	Generation              string
+	GenerationSeq           int64
+	State                   string
+	TerminalAt              *time.Time
+	Resumable               bool
+	IsActiveOnThisStore     bool
+	IsSupersededOnThisStore bool
+	HasUnpublishedOutbox    bool
 }
 
 func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) bool {
@@ -33,6 +38,13 @@ func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) 
 	if g.TerminalAt == nil || g.TerminalAt.After(cutoff) {
 		return false
 	}
+	// Sealing proves that the producer is finished, not that this serving
+	// store has received enough of the generation to promote it. Preserve its
+	// staging until a newer generation for the same source has been promoted
+	// locally; age and inactivity alone cannot make a sealed snapshot obsolete.
+	if g.State == "sealed" && !g.IsSupersededOnThisStore {
+		return false
+	}
 	return !g.Resumable && !g.IsActiveOnThisStore && !g.HasUnpublishedOutbox
 }
 
@@ -42,6 +54,19 @@ func EligibleForStagingCleanup(g StagingGenerationDescriptor, cutoff time.Time) 
 type StagingRetentionBackend interface {
 	ListStagingGenerations(context.Context, time.Time, int) ([]StagingGenerationDescriptor, error)
 	DeleteEligibleStagingChunk(context.Context, string, time.Time, int) (deleted int, stillEligible bool, err error)
+}
+
+type stagingGenerationCursor struct {
+	terminalAt time.Time
+	generation string
+	valid      bool
+}
+
+// stagingRetentionPager lets the production backend advance past protected
+// terminal generations without widening the public retention contract. Test
+// and alternate backends keep the single-page interface above.
+type stagingRetentionPager interface {
+	listStagingGenerationsPage(context.Context, time.Time, stagingGenerationCursor, int) ([]StagingGenerationDescriptor, stagingGenerationCursor, bool, error)
 }
 
 type StagingRetention struct {
@@ -84,24 +109,38 @@ func (r *StagingRetention) sweep(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, stagingPassBudget)
 	defer cancel()
 	cutoff := r.now().UTC().Add(-r.ttl)
+	process := func(candidates []StagingGenerationDescriptor) bool {
+		for _, candidate := range candidates {
+			if !EligibleForStagingCleanup(candidate, cutoff) {
+				continue
+			}
+			for {
+				deleted, eligible, err := r.backend.DeleteEligibleStagingChunk(ctx, candidate.Generation, cutoff, stagingDeleteChunk)
+				if err != nil || !eligible || deleted < stagingDeleteChunk {
+					break
+				}
+			}
+			if ctx.Err() != nil {
+				return false
+			}
+		}
+		return true
+	}
+	if pager, ok := r.backend.(stagingRetentionPager); ok {
+		cursor := stagingGenerationCursor{}
+		for {
+			candidates, next, more, err := pager.listStagingGenerationsPage(ctx, cutoff, cursor, 256)
+			if err != nil || !process(candidates) || !more {
+				return
+			}
+			cursor = next
+		}
+	}
 	candidates, err := r.backend.ListStagingGenerations(ctx, cutoff, 256)
 	if err != nil {
 		return
 	}
-	for _, candidate := range candidates {
-		if !EligibleForStagingCleanup(candidate, cutoff) {
-			continue
-		}
-		for {
-			deleted, eligible, err := r.backend.DeleteEligibleStagingChunk(ctx, candidate.Generation, cutoff, stagingDeleteChunk)
-			if err != nil || !eligible || deleted < stagingDeleteChunk {
-				break
-			}
-		}
-		if ctx.Err() != nil {
-			return
-		}
-	}
+	process(candidates)
 }
 
 func (r *StagingRetention) Stop() {

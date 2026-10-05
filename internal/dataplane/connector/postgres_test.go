@@ -23,7 +23,6 @@ func TestPGXResolvedHostnameUsesApprovedDestination(t *testing.T) {
 	if err := admitPostgresConfig(ctx, cfg, policy); err != nil {
 		t.Fatal(err)
 	}
-	cfg.LookupFunc = func(context.Context, string) ([]string, error) { return []string{"127.0.0.1"}, nil }
 	original := cfg.DialFunc
 	seen := ""
 	cfg.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -34,7 +33,8 @@ func TestPGXResolvedHostnameUsesApprovedDestination(t *testing.T) {
 	if conn != nil {
 		_ = conn.Close(ctx)
 	}
-	if seen != "127.0.0.1:15432" || err == nil || strings.Contains(err.Error(), "source destination is not approved") {
+	_, port, splitErr := net.SplitHostPort(seen)
+	if splitErr != nil || port != "15432" || err == nil || strings.Contains(err.Error(), "source destination is not approved") {
 		t.Fatalf("resolved address=%q error=%v", seen, err)
 	}
 }

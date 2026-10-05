@@ -31,6 +31,10 @@ func TestStagingRetentionRequiresAuthoritativeTerminalEligibility(t *testing.T) 
 	}
 	sealed := base
 	sealed.State = "sealed"
+	if EligibleForStagingCleanup(sealed, time.Now().Add(-7*24*time.Hour)) {
+		t.Fatal("non-superseded sealed generation was eligible")
+	}
+	sealed.IsSupersededOnThisStore = true
 	if !EligibleForStagingCleanup(sealed, time.Now().Add(-7*24*time.Hour)) {
 		t.Fatal("superseded sealed generation was not eligible")
 	}

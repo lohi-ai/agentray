@@ -151,16 +151,19 @@ func OpenWithPolicy(ctx context.Context, kind, dsn, projectID, connectorID strin
 	if policy == nil {
 		return nil, ErrSourcePolicyDenied
 	}
-	bindings, err := policy.BindingsForConnector(projectID, connectorID)
-	if err != nil {
-		return nil, err
-	}
+	var bindings []SourceBinding
 	if len(relation) > 0 {
 		binding, err := policy.BindingForRelation(projectID, connectorID, relation[0])
 		if err != nil {
 			return nil, err
 		}
 		bindings = []SourceBinding{*binding}
+	} else {
+		var err error
+		bindings, err = policy.BindingsForConnector(projectID, connectorID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return openPostgresWithPolicy(ctx, dsn, policy, bindings)
 }

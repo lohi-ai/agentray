@@ -550,3 +550,165 @@ VALUES(?,?,?,?,?,2,?,0,0,?,?,?,?)`, projectID, sync.ConnectorID, sync.SourceTabl
 		t.Fatalf("sealed cleanup retained outbox=%d err=%v", outbox, err)
 	}
 }
+
+func TestStagingCleanupPreservesSealedGenerationUntilNewerLocalPromotion(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		seedOlderActive bool
+	}{
+		{name: "no_local_promotion"},
+		{name: "only_older_local_promotion", seedOlderActive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openConvTestStore(t)
+			ctx := context.Background()
+			projectID, syncID := seedConnectorSync(t, s)
+			sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.duck = openTestDuckDB(t)
+			started := time.Now().UTC().Add(-10 * 24 * time.Hour)
+			finished := started.Add(time.Hour)
+			generation, runID := uuid.NewString(), uuid.NewString()
+			bindingDigest := strings.Repeat("a", 64)
+			if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch)
+VALUES($1,$2,$3,$4,$5,2,$6,'sealed',$7,$8,$8,$9,'retention-test',1)`, projectID, sync.ConnectorID, sync.SourceTable,
+				syncID, generation, bindingDigest, started, finished, runID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_outbox
+(project_id,connector_id,table_name,generation,batch_id,batch_index,kind,payload,published,published_at)
+VALUES($1,$2,$3,$4,'batch-0',0,'batch',$5,true,now())`, projectID, sync.ConnectorID, sync.SourceTable,
+				generation, []byte("published-payload")); err != nil {
+				t.Fatal(err)
+			}
+
+			rows := []connector.SnapshotRow{{Key: "late", Data: []byte(`{"n":1}`)}}
+			payloadDigest, err := connector.SnapshotPayloadDigest(rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifestDigest, err := connector.SnapshotManifestDigest([]connector.SnapshotManifestEntry{{
+				Index: 0, BatchID: "batch-0", PayloadSHA256: payloadDigest, RowCount: 1,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			batch := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: sync.ConnectorID,
+				Table: sync.SourceTable, SyncID: syncID, RunID: runID, Generation: generation, GenerationSeq: 2,
+				BindingDigest: bindingDigest, CaptureStartedAt: started, Kind: connector.SnapshotKindBatch,
+				BatchID: "batch-0", BatchIndex: 0, PayloadSHA256: payloadDigest, Rows: rows}
+			if promotion, err := s.ApplySnapshotEnvelope(ctx, batch, AppliedMark{}); err != nil || promotion != nil {
+				t.Fatalf("stage delayed batch promotion=%+v err=%v", promotion, err)
+			}
+			if tc.seedOlderActive {
+				if err := s.duck.Write(ctx, func(tx *sql.Tx) error {
+					_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_promotions
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,expected_batches,expected_rows,batch_manifest_sha256,capture_started_at,capture_finished_at,promoted_at)
+VALUES(?,?,?,?,?,1,?,0,0,?,?,?,?)`, projectID, sync.ConnectorID, sync.SourceTable, syncID, uuid.NewString(),
+						strings.Repeat("b", 64), strings.Repeat("c", 64), started.Add(-2*time.Hour), started.Add(-time.Hour), started.Add(-time.Hour))
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
+			candidates, err := s.ListStagingGenerations(ctx, cutoff, 256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var candidate *StagingGenerationDescriptor
+			for i := range candidates {
+				if candidates[i].Generation == generation {
+					candidate = &candidates[i]
+					break
+				}
+			}
+			if candidate == nil {
+				t.Fatal("sealed generation was not discovered")
+			}
+			if candidate.IsSupersededOnThisStore || EligibleForStagingCleanup(*candidate, cutoff) {
+				t.Fatalf("non-superseded sealed generation became eligible: %+v", *candidate)
+			}
+			if deleted, eligible, err := s.DeleteEligibleStagingChunk(ctx, generation, cutoff, stagingDeleteChunk); err != nil || deleted != 0 || eligible {
+				t.Fatalf("sealed cleanup deleted=%d eligible=%v err=%v", deleted, eligible, err)
+			}
+
+			complete := connector.SnapshotEnvelope{Protocol: connector.SnapshotProtocolV1, ProjectID: projectID, ConnectorID: sync.ConnectorID,
+				Table: sync.SourceTable, SyncID: syncID, RunID: runID, Generation: generation, GenerationSeq: 2,
+				BindingDigest: bindingDigest, CaptureStartedAt: started, CaptureFinishedAt: &finished, Kind: connector.SnapshotKindComplete,
+				ExpectedBatches: 1, ExpectedRows: 1, BatchManifestSHA256: manifestDigest}
+			promotion, err := s.ApplySnapshotEnvelope(ctx, complete, AppliedMark{})
+			if err != nil || promotion == nil || promotion.Generation != generation {
+				t.Fatalf("delayed completion promotion=%+v err=%v", promotion, err)
+			}
+			if got := snapshotLiveCount(t, s.duck, projectID, sync.ConnectorID, sync.SourceTable); got != 1 {
+				t.Fatalf("promoted rows=%d, want 1", got)
+			}
+			var receiptGeneration string
+			var completionSeen bool
+			if err := s.duck.Read(ctx, func(conn *sql.Conn) error {
+				return conn.QueryRowContext(ctx, `SELECT generation::VARCHAR,completion_seen FROM data_receipt_sources
+WHERE project_id=? AND connector_id=? AND table_name=?`, projectID, sync.ConnectorID, sync.SourceTable).
+					Scan(&receiptGeneration, &completionSeen)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if receiptGeneration != generation || !completionSeen {
+				t.Fatalf("readiness receipt generation=%q complete=%v", receiptGeneration, completionSeen)
+			}
+		})
+	}
+}
+
+func TestStagingRetentionPaginatesPastProtectedSealedGenerations(t *testing.T) {
+	s := openConvTestStore(t)
+	ctx := context.Background()
+	projectID, syncID := seedConnectorSync(t, s)
+	sync, err := s.ConnectorSyncForProject(ctx, projectID, syncID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.duck = openTestDuckDB(t)
+	t.Cleanup(func() {
+		if _, err := s.pg.Exec(ctx, `DELETE FROM connector_snapshot_generations WHERE project_id=$1`, projectID); err != nil {
+			t.Error(err)
+		}
+	})
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,capture_finished_at,terminal_at,run_id,owner,lease_epoch,sync_revision,source_revision)
+SELECT $1,$2,$3,$4,gen_random_uuid(),i,$5,'sealed',$6,$6,$6,gen_random_uuid(),'retention-pagination',1,1,1
+FROM generate_series(1,256) AS series(i)`, projectID, sync.ConnectorID, sync.SourceTable, syncID, strings.Repeat("a", 64), old); err != nil {
+		t.Fatal(err)
+	}
+	target := uuid.NewString()
+	if _, err := s.pg.Exec(ctx, `INSERT INTO connector_snapshot_generations
+(project_id,connector_id,table_name,sync_id,generation,generation_seq,binding_digest,state,capture_started_at,terminal_at,run_id,owner,lease_epoch,sync_revision,source_revision)
+VALUES($1,$2,$3,$4,$5,257,$6,'failed',$7,$7,$8,'retention-pagination',1,1,1)`,
+		projectID, sync.ConnectorID, sync.SourceTable, syncID, target, strings.Repeat("a", 64), old.Add(time.Hour), uuid.NewString()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.duck.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO connector_snapshot_rows
+(project_id,connector_id,table_name,generation,batch_id,row_key,data) VALUES(?,?,?,?,?,?,?)`,
+			projectID, sync.ConnectorID, sync.SourceTable, target, "batch-0", "1", "{}")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := NewStagingRetention(s, 7*24*time.Hour)
+	r.sweep(ctx)
+	var rows int
+	if err := s.duck.Read(ctx, func(conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT count(*) FROM connector_snapshot_rows WHERE generation=?`, target).Scan(&rows)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Fatalf("eligible candidate after protected page retained %d staging rows", rows)
+	}
+}

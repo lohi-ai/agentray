@@ -173,17 +173,7 @@ func (c *colour) externalRowKeys(t *testing.T, table string) []string {
 
 func (c *colour) waitExternalRowKeys(t *testing.T, table string, within time.Duration, ok func([]string) bool) []string {
 	t.Helper()
-	deadline := time.Now().Add(within)
-	var last []string
-	for time.Now().Before(deadline) {
-		last = c.externalRowKeys(t, table)
-		if ok(last) {
-			return last
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("%s rows never satisfied the condition: %v", c.name, last)
-	return nil
+	return waitDuckRowKeys(t, c.duck, table, within, ok)
 }
 
 func (c *colour) eventIDs(t *testing.T) []string {

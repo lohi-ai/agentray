@@ -16,45 +16,63 @@ import (
 // authoritative C1 generation journal. Only terminal candidates cross this
 // boundary; deletion rechecks every predicate under a row lock.
 func (s *Store) ListStagingGenerations(ctx context.Context, cutoff time.Time, limit int) ([]StagingGenerationDescriptor, error) {
+	out, _, _, err := s.listStagingGenerationsPage(ctx, cutoff, stagingGenerationCursor{}, limit)
+	return out, err
+}
+
+func (s *Store) listStagingGenerationsPage(ctx context.Context, cutoff time.Time, after stagingGenerationCursor, limit int) ([]StagingGenerationDescriptor, stagingGenerationCursor, bool, error) {
 	if limit <= 0 {
-		return nil, nil
+		return nil, stagingGenerationCursor{}, false, nil
 	}
 	var storeID any
 	if s.duck != nil {
 		id, err := s.duck.storeIdentity(ctx)
 		if err != nil {
-			return nil, err
+			return nil, stagingGenerationCursor{}, false, err
 		}
 		storeID = id
 	}
-	rows, err := s.pg.Query(ctx, `SELECT generation::text,state,terminal_at,
+	var afterGeneration any
+	if after.valid {
+		afterGeneration = after.generation
+	}
+	rows, err := s.pg.Query(ctx, `SELECT project_id::text,connector_id::text,table_name,generation::text,generation_seq,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g
 WHERE state IN ('sealed','failed','cancelled') AND terminal_at IS NOT NULL AND terminal_at <= $1
   AND ($3::uuid IS NULL OR NOT EXISTS (
 	SELECT 1 FROM connector_snapshot_cleanup_receipts c WHERE c.generation=g.generation AND c.store_id=$3
   ))
-ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID)
+  AND (NOT $4::boolean OR (terminal_at,generation) > ($5,$6::uuid))
+ORDER BY terminal_at, generation LIMIT $2`, cutoff.UTC(), limit, storeID, after.valid, after.terminalAt, afterGeneration)
 	if err != nil {
-		return nil, err
+		return nil, stagingGenerationCursor{}, false, err
 	}
-	defer rows.Close()
 	out := []StagingGenerationDescriptor{}
 	for rows.Next() {
 		var d StagingGenerationDescriptor
-		if err := rows.Scan(&d.Generation, &d.State, &d.TerminalAt, &d.HasUnpublishedOutbox); err != nil {
-			return nil, err
-		}
-		if s.duck != nil {
-			active, err := s.duck.snapshotGenerationActive(ctx, d.Generation)
-			if err != nil {
-				return nil, err
-			}
-			d.IsActiveOnThisStore = active
+		if err := rows.Scan(&d.ProjectID, &d.ConnectorID, &d.Table, &d.Generation, &d.GenerationSeq, &d.State, &d.TerminalAt, &d.HasUnpublishedOutbox); err != nil {
+			rows.Close()
+			return nil, stagingGenerationCursor{}, false, err
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, stagingGenerationCursor{}, false, err
+	}
+	rows.Close()
+	if s.duck != nil {
+		if err := s.duck.classifySnapshotGenerations(ctx, out); err != nil {
+			return nil, stagingGenerationCursor{}, false, err
+		}
+	}
+	next := after
+	if len(out) > 0 {
+		last := out[len(out)-1]
+		next = stagingGenerationCursor{terminalAt: last.TerminalAt.UTC(), generation: last.Generation, valid: true}
+	}
+	return out, next, len(out) == limit, nil
 }
 
 func (s *Store) DeleteEligibleStagingChunk(ctx context.Context, generation string, cutoff time.Time, limit int) (int, bool, error) {
@@ -68,10 +86,11 @@ func (s *Store) DeleteEligibleStagingChunk(ctx context.Context, generation strin
 	defer tx.Rollback(ctx)
 	var descriptor StagingGenerationDescriptor
 	var pending bool
-	err = tx.QueryRow(ctx, `SELECT generation::text,state,terminal_at,
+	err = tx.QueryRow(ctx, `SELECT project_id::text,connector_id::text,table_name,generation::text,generation_seq,state,terminal_at,
 EXISTS(SELECT 1 FROM connector_snapshot_outbox o WHERE o.generation=g.generation AND NOT o.published)
 FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generation).
-		Scan(&descriptor.Generation, &descriptor.State, &descriptor.TerminalAt, &pending)
+		Scan(&descriptor.ProjectID, &descriptor.ConnectorID, &descriptor.Table, &descriptor.Generation, &descriptor.GenerationSeq,
+			&descriptor.State, &descriptor.TerminalAt, &pending)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -84,6 +103,13 @@ FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generatio
 		return 0, false, err
 	}
 	descriptor.IsActiveOnThisStore = active
+	if descriptor.State == "sealed" {
+		superseded, err := s.duck.snapshotGenerationSuperseded(ctx, descriptor)
+		if err != nil {
+			return 0, false, err
+		}
+		descriptor.IsSupersededOnThisStore = superseded
+	}
 	if !EligibleForStagingCleanup(descriptor, cutoff) {
 		return 0, false, nil
 	}
@@ -93,9 +119,13 @@ FROM connector_snapshot_generations g WHERE generation=$1 FOR UPDATE`, generatio
 	}
 	deleted, more := 0, false
 	if !cleaned {
-		deleted, more, err = s.duck.deleteSnapshotStagingChunk(ctx, generation, limit)
+		var locallyEligible bool
+		deleted, more, locallyEligible, err = s.duck.deleteSnapshotStagingChunk(ctx, descriptor, limit)
 		if err != nil {
 			return 0, false, err
+		}
+		if !locallyEligible {
+			return 0, false, nil
 		}
 	}
 	if !more {
