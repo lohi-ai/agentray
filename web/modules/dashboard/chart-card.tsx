@@ -42,13 +42,17 @@ type EvidenceFacts = { definition?: string; unit?: string; cohortEligibility?: s
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 const MAX_TABLE_ROWS = 500;
 
-function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
+export function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
   const first = rows[0];
   if (!first) return {};
   const text = (...keys: string[]) => {
     const value = keys.map((key) => first[key]).find((candidate) => typeof candidate === 'string' && candidate.trim());
     return typeof value === 'string' ? value.trim() : undefined;
   };
+  const declaredUnit = [...new Set(rows
+    .map((row) => row.unit)
+    .filter((value): value is string => typeof value === 'string' && !!value.trim())
+    .map((value) => value.trim()))];
   const eligible = first.eligible ?? first.eligible_count;
   const excluded = first.excluded ?? first.excluded_count;
   const counts = (typeof eligible === 'number' || typeof eligible === 'string') && (typeof excluded === 'number' || typeof excluded === 'string')
@@ -56,7 +60,10 @@ function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts
     : undefined;
   return {
     definition: text('metric_definition', 'definition'),
-    unit: text('unit'),
+    // A sparse first row must not hide a unit declared by the result. Multiple
+    // units are intentionally left unverified: a single chart cannot honestly
+    // label unlike scales as one unit.
+    unit: declaredUnit.length === 1 ? declaredUnit[0] : undefined,
     cohortEligibility: text('cohort_eligibility') || counts,
   };
 }

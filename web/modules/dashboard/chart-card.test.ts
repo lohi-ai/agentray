@@ -68,6 +68,15 @@ describe('SqlGraph', () => {
     const chartModule = {};
     new Function('require', 'exports', `${compile('modules/dashboard/chart-card.tsx')}\nexports.SqlGraph = SqlGraph;`)(requireForGraph, chartModule);
 
+    expect(chartModule.queryEvidenceFacts([
+      { value: 1, unit: null },
+      { value: 2, unit: 'VND' },
+    ])).toMatchObject({ unit: 'VND' });
+    expect(chartModule.queryEvidenceFacts([
+      { value: 1, unit: 'VND' },
+      { value: 2, unit: 'people' },
+    ]).unit).toBeUndefined();
+
     let chart = { sql: '', kind: 'line' };
     function flatten(node) {
       if (node == null || node === false) return '';

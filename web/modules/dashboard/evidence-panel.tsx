@@ -7,6 +7,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger, Button, C
 import { StatusPill } from '@/modules/shared/components/lohi-evidence-primitives';
 import type { ReadinessSync } from '@/modules/app/hooks/connectors';
 import { evidenceTime } from '@/modules/settings/source-readiness';
+import { scanExecutableSQL } from './chart-query';
 
 export type ChartEvidenceStatus = 'loading' | 'ready' | 'bounded' | 'unknown' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied';
 export type ChartEvidence = {
@@ -21,7 +22,137 @@ export type ChartEvidence = {
 };
 export type EvidenceState = 'ready' | 'syncing' | 'empty' | 'stale' | 'error' | 'immature' | 'read-only-denied' | 'query-denied' | 'readiness-error';
 
+type DeclaredSourceBinding = { connectorID: string; table: string };
+type SQLToken = { kind: 'word' | 'string' | 'punctuation'; value: string };
+export type SourceEvidence = { coverage: string; bindings: string };
+
 const SAVED_LIMITATION_FALLBACK = 'No limitation was supplied with this saved board.';
+const COVERAGE_FALLBACK = 'Coverage not verified';
+const BINDINGS_FALLBACK = 'Bindings not verified';
+
+function executableTokens(sql: string): SQLToken[] | null {
+  const scanned = scanExecutableSQL(sql);
+  if (!scanned.fullyClassified) return null;
+  const tokens: SQLToken[] = [];
+  for (let index = 0; index < scanned.executable.length;) {
+    const character = scanned.executable[index];
+    if (/\s/u.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === "'") {
+      let value = '';
+      let closed = false;
+      index += 1;
+      while (index < scanned.executable.length) {
+        if (scanned.executable[index] === "'" && scanned.executable[index + 1] === "'") {
+          value += "'";
+          index += 2;
+        } else if (scanned.executable[index] === "'") {
+          index += 1;
+          closed = true;
+          break;
+        } else {
+          value += scanned.executable[index];
+          index += 1;
+        }
+      }
+      if (!closed) return null;
+      tokens.push({ kind: 'string', value });
+      continue;
+    }
+    const word = scanned.executable.slice(index).match(/^[A-Za-z_][A-Za-z0-9_$]*/)?.[0];
+    if (word) {
+      tokens.push({ kind: 'word', value: word.toLowerCase() });
+      index += word.length;
+      continue;
+    }
+    tokens.push({ kind: 'punctuation', value: character });
+    index += 1;
+  }
+  return tokens;
+}
+
+function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
+  const tokens = executableTokens(sql);
+  if (!tokens) return null;
+  const sourceIndexes = tokens.flatMap((token, index) => (
+    token.kind === 'word' && (token.value === 'from' || token.value === 'join')
+      && tokens[index + 1]?.kind === 'word' && tokens[index + 1]?.value === 'external_rows'
+      ? [index]
+      : []
+  ));
+  if (sourceIndexes.length === 0) return [];
+
+  const bindings: DeclaredSourceBinding[] = [];
+  for (let source = 0; source < sourceIndexes.length; source += 1) {
+    const start = sourceIndexes[source] + 2;
+    const end = sourceIndexes[source + 1] ?? tokens.length;
+    const connectors = new Set<string>();
+    const tables = new Set<string>();
+    for (let index = start; index < end - 2; index += 1) {
+      if (tokens[index].kind !== 'word' || tokens[index + 1]?.value !== '=' || tokens[index + 2]?.kind !== 'string') continue;
+      if (tokens[index].value === 'connector_id') connectors.add(tokens[index + 2].value);
+      if (tokens[index].value === 'table_name') tables.add(tokens[index + 2].value);
+    }
+    // One executable source reference must declare one exact pair. OR/IN,
+    // reversed comparisons, and mixed pairs stay unverified rather than being
+    // guessed into a Cartesian product.
+    if (connectors.size !== 1 || tables.size !== 1) return null;
+    bindings.push({ connectorID: [...connectors][0], table: [...tables][0] });
+  }
+  return bindings.filter((binding, index, all) => all.findIndex((candidate) => candidate.connectorID === binding.connectorID && candidate.table === binding.table) === index);
+}
+
+function oldestTimestamp(values: Array<string | null>): string | null {
+  return values
+    .filter((value): value is string => !!value && Number.isFinite(Date.parse(value)))
+    .sort((left, right) => Date.parse(left) - Date.parse(right))
+    .at(0) ?? null;
+}
+
+export function sourceEvidence(sql: string | undefined, meta: QueryMeta | undefined): SourceEvidence {
+  if (!sql) return { coverage: COVERAGE_FALLBACK, bindings: BINDINGS_FALLBACK };
+  const declared = declaredSourceBindings(sql);
+  if (declared === null) return { coverage: COVERAGE_FALLBACK, bindings: BINDINGS_FALLBACK };
+  if (declared.length === 0) return { coverage: COVERAGE_FALLBACK, bindings: 'No external source bindings declared' };
+  const watermark = meta?.serving_data_watermark;
+  if (!watermark) return { coverage: COVERAGE_FALLBACK, bindings: BINDINGS_FALLBACK };
+
+  const matched = declared.map((binding) => watermark.sources.find((source) => (
+    source.connector_id === binding.connectorID && source.table === binding.table
+  ))).filter((source): source is NonNullable<typeof source> => !!source);
+  if (matched.length !== declared.length) {
+    const detail = `${matched.length}/${declared.length} declared bindings matched`;
+    return { coverage: `${COVERAGE_FALLBACK} (${detail})`, bindings: `${BINDINGS_FALLBACK} (${detail})` };
+  }
+
+  const tableNames = [...new Set(declared.map((binding) => binding.table))];
+  const bindingNoun = declared.length === 1 ? 'binding' : 'bindings';
+  const bindings = `Verified ${declared.length} of ${declared.length} declared source ${bindingNoun} · ${tableNames.join(', ')}`;
+  const starts = matched.map((source) => source.capture_started_at);
+  const finishes = matched.map((source) => source.capture_finished_at);
+  if (starts.some((value) => !value) || finishes.some((value) => !value)) {
+    return { coverage: `${COVERAGE_FALLBACK} (capture interval missing)`, bindings };
+  }
+  const sharedStart = starts.filter((value): value is string => !!value).sort((left, right) => Date.parse(left) - Date.parse(right)).at(-1) ?? null;
+  const sharedFinish = finishes.filter((value): value is string => !!value).sort((left, right) => Date.parse(left) - Date.parse(right)).at(0) ?? null;
+  const sharedStartAt = sharedStart ? Date.parse(sharedStart) : Number.NaN;
+  const sharedFinishAt = sharedFinish ? Date.parse(sharedFinish) : Number.NaN;
+  if (!Number.isFinite(sharedStartAt) || !Number.isFinite(sharedFinishAt) || sharedStartAt > sharedFinishAt) {
+    return { coverage: `${COVERAGE_FALLBACK} (capture interval invalid or non-overlapping)`, bindings };
+  }
+  const landedAt = oldestTimestamp(matched.map((source) => source.landed_at));
+  const total = watermark.total_sources;
+  const sourceNoun = declared.length === 1 ? 'source' : 'sources';
+  const parts = [
+    `${evidenceTime(sharedStart)} – ${evidenceTime(sharedFinish)}`,
+    `${declared.length}/${declared.length} required ${sourceNoun}`,
+    total > declared.length ? `${total} source watermarks available` : null,
+    landedAt ? `watermark ${evidenceTime(landedAt)}` : null,
+  ].filter((part): part is string => !!part);
+  return { coverage: parts.join(' · '), bindings };
+}
 
 export function parseSavedLimitation(description: string): string {
   const trimmed = description.trim();
@@ -137,10 +268,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
     : selectedEvidence?.range
       ? 'Timezone not verified for fixed query'
       : browserTimezone;
-  // Collection timestamps and a project watermark are neither query lineage
-  // nor the business-date coverage of this result. Until the API supplies
-  // those facts, an honest evidence panel keeps both claims unverified.
-  const coverage = 'Coverage not verified';
+  const source = sourceEvidence(selectedEvidence?.sql, selectedEvidence?.meta);
   const cohortEligibility = selectedEvidence?.cohortEligibility || 'Eligibility not verified for this query';
 
   return (
@@ -170,7 +298,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
           ) : null}
           <dl className="lohi-evidence-grid">
             <div className="lohi-evidence-fact"><dt>Timezone</dt><dd>{timezone}</dd></div>
-            <div className="lohi-evidence-fact"><dt>Source coverage</dt><dd>{coverage}</dd></div>
+            <div className="lohi-evidence-fact"><dt>Source coverage</dt><dd>{source.coverage}</dd></div>
             <div className="lohi-evidence-fact"><dt>Partial day</dt><dd>{partialDay(selectedEvidence?.range)}</dd></div>
             <div className="lohi-evidence-fact"><dt>Cohort eligibility</dt><dd>{cohortEligibility}</dd></div>
           </dl>
@@ -184,7 +312,7 @@ export function EvidencePanel({ dashboard, charts, syncs, readinessLoading, read
                   <div><dt>Unit</dt><dd>{unit}</dd></div>
                   <div><dt>Range</dt><dd>{range}</dd></div>
                   <div><dt>Query reference</dt><dd><code>{queryRef}</code></dd></div>
-                  <div><dt>Source bindings</dt><dd>Bindings not verified</dd></div>
+                  <div><dt>Source bindings</dt><dd>{source.bindings}</dd></div>
                   <div><dt>Freshness</dt><dd>{freshness}</dd></div>
                   <div><dt>Limitation</dt><dd>{limitation}</dd></div>
                 </dl>
