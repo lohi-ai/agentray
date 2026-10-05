@@ -276,21 +276,20 @@ func TestAgentDelegationE2E(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	waitForPostgres(t, ctx, fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort))
+	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, pgPort))
 	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, redisPort))
-	waitForNATS(t, ctx, fmt.Sprintf("nats://%s:%d", infraHost, natsPort))
+	waitForTCP(t, ctx, fmt.Sprintf("%s:%d", infraHost, natsPort))
 
 	cfg := config.Config{
-		PostgresURL:            fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort),
-		DuckDBPath:             filepath.Join(t.TempDir(), "delegation-e2e.duckdb"),
-		RedisURL:               fmt.Sprintf("redis://%s:%d/0", infraHost, redisPort),
-		NATSURL:                fmt.Sprintf("nats://%s:%d", infraHost, natsPort),
-		IngestSubject:          "agentray.delegation-e2e.events.ingest",
-		IngestConnectorSubject: "agentray.delegation-e2e.events.ingest.connectors",
-		RateLimitPerMinute:     100,
-		DefaultProjectName:     "AgentRay delegation e2e",
-		DefaultProjectAPIKey:   "agentray_delegation_e2e_token",
-		AllowedOrigins:         "http://localhost:3100,http://127.0.0.1:3100",
+		PostgresURL:          fmt.Sprintf("postgres://lohi:lohi@%s:%d/lohi_analytics?sslmode=disable", infraHost, pgPort),
+		DuckDBPath:           filepath.Join(t.TempDir(), "delegation-e2e.duckdb"),
+		RedisURL:             fmt.Sprintf("redis://%s:%d/0", infraHost, redisPort),
+		NATSURL:              fmt.Sprintf("nats://%s:%d", infraHost, natsPort),
+		IngestSubject:        "agentray.delegation-e2e.events.ingest",
+		RateLimitPerMinute:   100,
+		DefaultProjectName:   "AgentRay delegation e2e",
+		DefaultProjectAPIKey: "agentray_delegation_e2e_token",
+		AllowedOrigins:       "http://localhost:3100,http://127.0.0.1:3100",
 	}
 
 	srv, err := New(context.Background(), cfg)

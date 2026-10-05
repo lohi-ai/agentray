@@ -980,17 +980,16 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// detached, bounded contexts so a user stop or scheduler timeout still settles
 	// the run row.
 	res, runErr := r.runModelLoop(runCtx, params, opts, runTier, sink)
-	// Native setup/provider cancellation may return context.Canceled even when
-	// the caller's deadline caused it. Preserve that cause in the terminal
-	// summary, including a graceful aborted result between turns. A completed
-	// answer that won the cancellation race remains complete.
-	if runCtx.Err() != nil && (runErr != nil || res.StopReason == "aborted") {
-		cause := context.Cause(runCtx)
-		if cause == nil {
-			cause = runCtx.Err()
-		}
-		if !errors.Is(runErr, cause) {
-			runErr = errors.Join(cause, runErr)
+	// AgentCore treats cancellation observed between turns as a graceful loop
+	// stop and reports it in StopReason. At the product boundary that distinction
+	// matters: an unattended deadline is an availability failure, not a successful
+	// empty observation. Promote only the explicit aborted result, so a complete
+	// answer that won a cancellation race remains complete (see the status switch
+	// below).
+	if runErr == nil && res.StopReason == "aborted" && runCtx.Err() != nil {
+		runErr = context.Cause(runCtx)
+		if runErr == nil {
+			runErr = runCtx.Err()
 		}
 	}
 
