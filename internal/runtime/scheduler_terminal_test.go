@@ -19,11 +19,18 @@ import (
 )
 
 func TestScheduledProviderTimeoutPersistsTerminalRun(t *testing.T) {
-	t.Run("model call timeout", func(t *testing.T) { testScheduledProviderTimeout(t, false) })
-	t.Run("deadline before first model turn", func(t *testing.T) { testScheduledProviderTimeout(t, true) })
+	t.Run("model call timeout", func(t *testing.T) { testScheduledProviderFailure(t, false, false, true) })
+	t.Run("deadline before first model turn", func(t *testing.T) { testScheduledProviderFailure(t, true, false, true) })
 }
 
-func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
+// No observer skill or marketplace identity participates in these cases: the
+// generic scheduler must settle any agent's failed provider attempt.
+func TestScheduledGenericProviderFailurePersistsTerminalRun(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) { testScheduledProviderFailure(t, false, false, false) })
+	t.Run("provider error", func(t *testing.T) { testScheduledProviderFailure(t, false, true, false) })
+}
+
+func testScheduledProviderFailure(t *testing.T, timeoutBeforeModel, providerError, observer bool) {
 	databaseURL := os.Getenv("AGENTRAY_TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Fatal("AGENTRAY_TEST_DATABASE_URL is required")
@@ -62,6 +69,12 @@ func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
 		case requestStarted <- struct{}{}:
 		default:
 		}
+		if providerError {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"provider credentials rejected"}}`))
+			return
+		}
 		select {
 		case <-r.Context().Done():
 		case <-releaseProvider:
@@ -80,14 +93,17 @@ func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
 	}); err != nil {
 		t.Fatalf("configure agent: %v", err)
 	}
-	body, err := os.ReadFile(filepath.Join("..", "workloads", "config", lohiObserverVersion, "SKILL.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.UpsertAgentSkill(ctx, boot.User.ID, boot.Project.ID, "", storage.AgentSkill{
-		Name: lohiObserverVersion, Body: string(body), Enabled: true,
-	}); err != nil {
-		t.Fatal(err)
+	if observer {
+		body, err := os.ReadFile(filepath.Join("..", "workloads", "config", lohiObserverVersion, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.UpsertAgentSkill(ctx, boot.User.ID, boot.Project.ID, "", storage.AgentSkill{
+			Name: lohiObserverVersion, Body: string(body), Enabled: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+
 	}
 
 	ns, err := natsserver.NewServer(&natsserver.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true})
@@ -150,10 +166,14 @@ func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
 	if run.Status != "error" || run.FinishedAt == nil {
 		t.Fatalf("provider timeout left run non-terminal: %+v", run)
 	}
-	if !strings.Contains(run.Summary, "context deadline exceeded") {
+	if providerError {
+		if !strings.Contains(run.Summary, "provider credentials rejected") {
+			t.Fatalf("provider error summary = %q, want the auditable provider failure", run.Summary)
+		}
+	} else if !strings.Contains(run.Summary, "context deadline exceeded") {
 		t.Fatalf("provider timeout summary = %q, want an auditable deadline reason", run.Summary)
 	}
-	if !strings.Contains(run.Summary, "data_quality:availability") || !strings.Contains(run.Summary, "remain unverified") {
+	if observer && (!strings.Contains(run.Summary, "data_quality:availability") || !strings.Contains(run.Summary, "remain unverified")) {
 		t.Fatalf("observer provider failure misrepresented readiness: %q", run.Summary)
 	}
 	_, tools, err := st.GetAgentRun(ctx, boot.User.ID, boot.Project.ID, run.ID)
@@ -170,6 +190,10 @@ func testScheduledProviderTimeout(t *testing.T, timeoutBeforeModel bool) {
 	if timeoutBeforeModel {
 		if len(calls) != 0 {
 			t.Fatalf("deadline before model turn fabricated a model trace: %+v", calls)
+		}
+	} else if providerError {
+		if len(calls) != 1 || calls[0].StopReason != "error" || !strings.Contains(calls[0].Error, "provider credentials rejected") {
+			t.Fatalf("provider failure trace = %+v, want one auditable failed model call", calls)
 		}
 	} else if len(calls) != 1 || calls[0].StopReason != "aborted" || calls[0].Error != "Request aborted" {
 		// The scheduler records the deadline cause in the run summary; the native

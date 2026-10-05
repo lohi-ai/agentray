@@ -8,7 +8,6 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { Selector } from '@astryxdesign/core/Selector';
 import { type Agent, type AgentAdvisor, AGENT_TASK_KINDS, type AgentTaskKind, type AgentTaskTiers, type AgentTrigger, type AgentTriggerInput, apiBase, type BudgetStatus, MODEL_TIERS, type ModelTier } from '@/lib/api';
 import { useAgent, useAgentAdvisor, useAgentAuthoring, useAgentBudget, useAgentBuild, useAgentCapabilities, useAgents, useAgentTaskTiers } from '@/modules/agent/hooks';
-import { useAgentMonitorDetail } from '@/modules/agent-monitor/hooks';
 import { useUIStore } from '@/lib/app-state';
 import { AppShell } from '@/modules/shared/components/app-shell';
 import { PageTabs } from '@/modules/shared/components/page-shell';
@@ -734,11 +733,17 @@ export function AgentSetupPage() {
   const params = useParams<{ agentId: string }>();
   const router = useRouter();
   const agentID = params.agentId;
-  const { agent, isLoading } = useAgentMonitorDetail(agentID);
+  // Identity is independent of run aggregates: a monitoring outage must not
+  // hide an installed teammate's configuration.
+  const { agents, agentsReady, agentsError, reloadAgents } = useAgents();
+  const agent = agents.find((candidate) => candidate.id === agentID);
   const [tab, setTab] = useState<string>('persona');
 
-  if (isLoading && !agent) {
+  if (!agent && !agentsError && !agentsReady) {
     return <AppShell title="Agent setup" sub="Configure your teammate."><Loading label="Loading agent…" /></AppShell>;
+  }
+  if (!agent && agentsError) {
+    return <AppShell title="Agent setup" sub="Configure your teammate."><EmptyState title="Unable to load agent" detail={agentsError.message} action={<Button variant="outline" size="sm" onClick={() => void reloadAgents()}>Try again</Button>} /></AppShell>;
   }
   if (!agent) {
     return <AppShell title="Agent setup" sub="Configure your teammate."><EmptyState title="Agent not found" detail="This agent may have been removed." action={<Button variant="outline" size="sm" onClick={() => router.push('/agents')}>Back to agents</Button>} /></AppShell>;
