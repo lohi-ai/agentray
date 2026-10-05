@@ -76,6 +76,9 @@ describe('SqlGraph', () => {
       { value: 1, unit: 'VND' },
       { value: 2, unit: 'people' },
     ]).unit).toBeUndefined();
+    expect(chartModule.queryEvidenceFacts([
+      { value: 1, UNIT: 'VND', Metric_Definition: 'Gross topups' },
+    ])).toMatchObject({ unit: 'VND', definition: 'Gross topups' });
 
     let chart = { sql: '', kind: 'line' };
     function flatten(node) {

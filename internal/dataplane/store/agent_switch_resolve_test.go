@@ -91,6 +91,44 @@ func TestAgentSwitchResolvesDistinctConfig(t *testing.T) {
 	}
 }
 
+// An installed agent's project grant starts as a snapshot of its configured
+// scopes. Re-saving capabilities is an explicit scope decision, so the run
+// must receive newly enabled tools instead of intersecting them with that old
+// snapshot forever.
+func TestConfiguredWriteScopesReachAgentSession(t *testing.T) {
+	s := openConvTestStore(t)
+	userID, projectID := seedConvProject(t, s)
+	ctx := context.Background()
+	agent, err := s.CreateAgent(ctx, userID, projectID, "Scoped Analyst", "scoped-analyst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := map[string]bool{"data_quality": true, "analyze_build": true}
+	if _, err := s.UpsertAgentCapabilities(ctx, userID, projectID, agent.ID, configured); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GrantAgentToProject(ctx, userID, agent.ID, projectID, map[string]bool{"monitor": true}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.AgentCapabilitiesForRun(ctx, projectID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before["analyze_build"] {
+		t.Fatal("the explicit read-only project grant should cap authoring before the settings are saved")
+	}
+	if _, err := s.UpsertAgentCapabilities(ctx, userID, projectID, agent.ID, configured); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.AgentCapabilitiesForRun(ctx, projectID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after["analyze_build"] || !after["data_quality"] {
+		t.Fatalf("configured write scopes did not reach the agent session: %+v", after)
+	}
+}
+
 func hasTool(sels []AgentToolSelection, name string) bool {
 	for _, s := range sels {
 		if s.Name == name && s.Enabled {

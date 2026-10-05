@@ -817,14 +817,30 @@ func (s *Store) UpsertAgentCapabilities(ctx context.Context, userID, projectID, 
 	if err != nil {
 		return AgentCapabilityConfig{}, err
 	}
-	_, err = s.pg.Exec(ctx, `
+	tx, err := s.pg.Begin(ctx)
+	if err != nil {
+		return AgentCapabilityConfig{}, err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `
 	INSERT INTO agent_capabilities (scope_id, scopes) VALUES ($1, $2)
 	ON CONFLICT (scope_id) DO UPDATE SET scopes = EXCLUDED.scopes, updated_at = now()`, scopeID, payload)
 	if err != nil {
 		return AgentCapabilityConfig{}, err
 	}
+	// Marketplace installs create a home-project grant initialized from the
+	// preset's capabilities. Keep that grant in step with an explicit capability
+	// edit, otherwise AgentCapabilitiesForRun intersects the new settings with
+	// the stale preset snapshot and silently hides newly enabled tools. This only
+	// updates a grant that already exists for this project; it does not create a
+	// grant or widen any default scope.
+	if _, err = tx.Exec(ctx, `
+	UPDATE agent_project_grants SET scopes = $3
+	WHERE agent_id = $1 AND project_id = $2`, scopeID, project.ID, payload); err != nil {
+		return AgentCapabilityConfig{}, err
+	}
 	if isDefaultAgent(project.ID, scopeID) {
-		_, err = s.pg.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 		INSERT INTO agent_configs (
 			project_id, enabled, redact_pii,
 			scope_monitor, scope_data_quality, scope_analyze_build, scope_growth_suggest,
@@ -840,6 +856,9 @@ func (s *Store) UpsertAgentCapabilities(ctx context.Context, userID, projectID, 
 		if err != nil {
 			return AgentCapabilityConfig{}, err
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return AgentCapabilityConfig{}, err
 	}
 	_ = s.recordWorkspaceAudit(ctx, project.WorkspaceID, userID, "agent.capabilities.update", "agent", scopeID, "", string(payload))
 	return AgentCapabilityConfig{ScopeID: scopeID, Scopes: clean}, nil
