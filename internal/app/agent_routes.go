@@ -967,14 +967,18 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		// same exception on the conversation /messages route.
 		if liveReg != nil && payload.SessionID != "" && !agentruntime.IsHandledCommand(payload.Message) {
 			mode := "steer"
-			var delivered bool
+			var control agentruntime.LiveControlResult
+			authority := agentruntime.LiveAuthority{CanWrite: !agentRunReadOnly(c, auth)}
 			if payload.Mode == "followup" {
 				mode = "followup"
-				delivered = liveReg.FollowUp(project.ID, payload.SessionID, payload.Message)
+				control = liveReg.FollowUp(project.ID, payload.SessionID, payload.Message, authority)
 			} else {
-				delivered = liveReg.Steer(project.ID, payload.SessionID, payload.Message)
+				control = liveReg.Steer(project.ID, payload.SessionID, payload.Message, authority)
 			}
-			if delivered {
+			if control == agentruntime.LiveControlDenied {
+				return echo.NewHTTPError(http.StatusForbidden, "caller cannot control a write-authorized live run")
+			}
+			if control == agentruntime.LiveControlDelivered {
 				if wantsEventStream(c) {
 					return steerAck(c, mode)
 				}
@@ -1272,11 +1276,6 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 		if actingAgent == "" {
 			actingAgent = conv.AgentID
 		}
-		if payload.AgentID != "" && payload.AgentID != conv.AgentID {
-			if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
-				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-			}
-		}
 
 		// A second message while a run is live on this conversation is an amendment,
 		// not a new run: steer/follow-up it (same auto-route as /chat), keyed on the
@@ -1290,7 +1289,12 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			if payload.Mode == "followup" {
 				mode = "followup"
 			}
-			delivered, err := liveReg.QueueInput(project.ID, convID, mode == "followup", func() (agentcore.Message, error) {
+			control, err := liveReg.QueueInput(project.ID, convID, mode == "followup", agentruntime.LiveAuthority{CanWrite: !agentRunReadOnly(c, ctx)}, func() (agentcore.Message, error) {
+				if payload.AgentID != "" && payload.AgentID != conv.AgentID {
+					if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
+						return agentcore.Message{}, echo.NewHTTPError(http.StatusBadRequest, err.Error())
+					}
+				}
 				entry, err := agentruntime.AppendMessageEntry(c.Request().Context(), store, convID,
 					string(agentcore.RoleUser), payload.Message, actingAgent, ctx.User.ID, "", 0)
 				return agentcore.Message{Role: agentcore.RoleUser, Content: payload.Message, InputID: entry.ID}, err
@@ -1298,11 +1302,19 @@ func registerAgentRoutes(e *echo.Echo, store *storage.Store, scheduler *agentrun
 			if err != nil {
 				return err
 			}
-			if delivered {
+			if control == agentruntime.LiveControlDenied {
+				return echo.NewHTTPError(http.StatusForbidden, "caller cannot control a write-authorized live run")
+			}
+			if control == agentruntime.LiveControlDelivered {
 				if wantsEventStream(c) {
 					return steerAck(c, mode)
 				}
 				return c.JSON(http.StatusOK, map[string]any{"steered": true, "delivered": true, "mode": mode})
+			}
+		}
+		if payload.AgentID != "" && payload.AgentID != conv.AgentID {
+			if err := store.SetConversationAgent(c.Request().Context(), ctx.User.ID, project.ID, convID, payload.AgentID); err != nil {
+				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
 		}
 

@@ -153,28 +153,28 @@ func TestPiChatUsesNativeHandlerWithoutGoClassifier(t *testing.T) {
 
 func TestPiLiveInputPersistsBeforeQueueAndKeepsIdentity(t *testing.T) {
 	registry := NewLiveRegistry()
-	live := registry.register("conversation", "project", nil)
+	live := registry.register("conversation", "project", LiveAuthority{CanWrite: true}, nil)
 	persisted := false
-	ok, err := registry.QueueInput("project", "conversation", false, func() (agentcore.Message, error) {
+	ok, err := registry.QueueInput("project", "conversation", false, LiveAuthority{CanWrite: true}, func() (agentcore.Message, error) {
 		if got := drainMessages(live.steer); len(got) > 0 {
 			t.Fatal("queued before persistence")
 		}
 		persisted = true
 		return agentcore.Message{Role: agentcore.RoleUser, Content: "correction", InputID: "entry"}, nil
 	})
-	if err != nil || !ok || !persisted {
+	if err != nil || ok != LiveControlDelivered || !persisted {
 		t.Fatalf("queue failed: %v %v", ok, err)
 	}
 	native, err := piHostMessages(drainMessages(live.steer))
 	if err != nil || len(native) != 1 || !strings.Contains(string(native[0]), `"agentrayInputId":"entry"`) {
 		t.Fatalf("lost correlation: %s %v", native, err)
 	}
-	_, err = registry.QueueInput("project", "conversation", false, func() (agentcore.Message, error) { return agentcore.Message{}, context.Canceled })
+	_, err = registry.QueueInput("project", "conversation", false, LiveAuthority{CanWrite: true}, func() (agentcore.Message, error) { return agentcore.Message{}, context.Canceled })
 	if err == nil || len(drainMessages(live.steer)) != 0 {
 		t.Fatal("failed durable input reached queue")
 	}
-	ok, err = registry.QueueInput("foreign", "conversation", false, func() (agentcore.Message, error) { t.Fatal("persisted foreign input"); return agentcore.Message{}, nil })
-	if err != nil || ok {
+	ok, err = registry.QueueInput("foreign", "conversation", false, LiveAuthority{CanWrite: true}, func() (agentcore.Message, error) { t.Fatal("persisted foreign input"); return agentcore.Message{}, nil })
+	if err != nil || ok != LiveControlNotFound {
 		t.Fatal("foreign session accepted")
 	}
 }

@@ -312,6 +312,13 @@ func TestEveryAgentTurnUsesCredentialAwareReadOnly(t *testing.T) {
 	if regexp.MustCompile(`ReadOnly:\s+!sessionAllowsWrite\(project\)`).Match(src) {
 		t.Fatal("an agent turn still derives authority only from ambient session membership")
 	}
+	controlAuthority := regexp.MustCompile(`LiveAuthority\{CanWrite:\s*!agentRunReadOnly\(c, (auth|ctx)\)\}`)
+	if got := len(controlAuthority.FindAll(src, -1)); got != 2 {
+		t.Fatalf("live chat and conversation control authority count=%d, want 2", got)
+	}
+	if got := strings.Count(string(src), `control == agentruntime.LiveControlDenied`); got != 2 {
+		t.Fatalf("live chat and conversation denial checks=%d, want 2", got)
+	}
 }
 
 func TestAgentRunHonorsReadOnlyGuardWithAuthorGrant(t *testing.T) {

@@ -547,7 +547,7 @@ func (r *Runner) execute(ctx context.Context, opts RunOptions, sink agentcore.St
 	// working" by the client's resume poll.
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
-	live := r.Live.register(opts.SessionID, opts.ProjectID, cancelRun)
+	live := r.Live.register(opts.SessionID, opts.ProjectID, LiveAuthority{CanWrite: !opts.ReadOnly}, cancelRun)
 	defer r.Live.unregister(opts.SessionID)
 	// A caller-supplied source (the Lab) takes precedence; both are nil for a plain
 	// run, leaving the loop's defaults.
