@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { Chart, QueryMeta } from '@/lib/api';
-import { chartEvidenceStatus, parseSavedLimitation, queryLimitation, resolveEvidenceState, sourceEvidence, type ChartEvidenceStatus } from './evidence-panel';
+import { chartEvidenceStatus, evidenceFilterKey, EvidencePanel, parseSavedLimitation, queryLimitation, resolveEvidenceState, sourceEvidence, type ChartEvidenceStatus } from './evidence-panel';
 
 const chart = { id: 'chart-1' } as Chart;
 const sync = (state: 'ready' | 'syncing' | 'stale' | 'error' | 'incomplete' | 'not_configured') => ({ readiness: { state } }) as never;
@@ -106,6 +108,56 @@ describe('dashboard evidence', () => {
 
   });
 
+  it('verifies governed source bindings declared inside a saved query CTE', () => {
+    const meta: QueryMeta = {
+      query_ref: 'query/lohi-r01', query_digest: 'digest', executed_at: '2026-10-05T00:00:00Z',
+      result_completeness: 'complete', truncated: false, availability_reason: null,
+      serving_data_watermark: {
+        event_landed_at: null, total_sources: 6, sources_truncated: false,
+        sources: [{ connector_id: '51515151-5151-4515-8515-515151515151', table: 'ar_lohi.topups_v1', generation: 'v1', capture_started_at: '2026-09-13T00:00:00Z', capture_finished_at: '2026-10-04T00:00:00Z', landed_at: '2026-10-05T00:00:00Z' }],
+      },
+    };
+    const sql = `WITH bound AS (
+      SELECT data FROM external_rows
+      WHERE connector_id = '51515151-5151-4515-8515-515151515151'
+        AND table_name = 'ar_lohi.topups_v1'
+    ), daily AS (SELECT count(*) AS gross_vnd FROM bound)
+    SELECT gross_vnd FROM daily`;
+    const result = sourceEvidence(sql, meta);
+    expect(result.bindings).toBe('Verified 1 of 1 declared source binding · ar_lohi.topups_v1');
+    expect(result.coverage).toMatch(/1\/1 required source.*6 source watermarks available.*watermark/i);
+    expect(result.coverage).not.toContain('Coverage not verified');
+  });
+
+  it('renders query watermark coverage from existing chart evidence', () => {
+    const filters = { hours: 24 } as never;
+    const filterKey = evidenceFilterKey(filters);
+    const sql = `WITH bound AS (SELECT data FROM external_rows WHERE connector_id = 'source-1' AND table_name = 'billing') SELECT gross_vnd FROM bound`;
+    const markup = renderToStaticMarkup(createElement(EvidencePanel, {
+      dashboard: null,
+      charts: [{ id: 'chart-1', sql, name: 'Gross VND', y_field: 'gross_vnd' } as Chart],
+      syncs: [sync('ready')],
+      readinessLoading: false,
+      readinessDenied: false,
+      readinessError: false,
+      chartEvidence: { 'chart-1': {
+        status: 'ready', filterKey, sql, unit: 'VND',
+        meta: {
+          query_ref: 'query/lohi-r01', query_digest: 'digest', executed_at: '2026-10-05T00:00:00Z',
+          result_completeness: 'complete', truncated: false, availability_reason: null,
+          serving_data_watermark: {
+            event_landed_at: null, total_sources: 6, sources_truncated: false,
+            sources: [{ connector_id: 'source-1', table: 'billing', generation: 'v1', capture_started_at: '2026-09-13T00:00:00Z', capture_finished_at: '2026-10-04T00:00:00Z', landed_at: '2026-10-05T00:00:00Z' }],
+          },
+        },
+      } },
+      appliedFilters: filters,
+    }));
+    expect(markup).toContain('6 source watermarks available');
+    expect(markup).toContain('1/1 required source');
+    expect(markup).not.toContain('Coverage not verified');
+  });
+
   it.each([
     ["CASE unused branch", "SELECT data FROM external_rows WHERE CASE WHEN false THEN true AND connector_id = 'source-1' AND table_name = 'billing' AND true ELSE true END"],
     ["nested CASE branch", "SELECT data FROM external_rows WHERE CASE WHEN false THEN CASE WHEN false THEN true AND connector_id = 'source-1' AND table_name = 'billing' AND true ELSE true END ELSE true END"],
@@ -122,7 +174,6 @@ describe('dashboard evidence', () => {
     ["line comment with keywords", "SELECT data FROM external_rows WHERE true -- AND connector_id = 'source-1' AND table_name = 'billing'"],
     ["nested block comment with keywords", "SELECT data FROM external_rows WHERE true /* AND connector_id = 'source-1' /* nested */ AND table_name = 'billing' */"],
     ["unsupported extra atom", "SELECT data FROM external_rows WHERE connector_id = 'source-1' AND table_name = 'billing' AND true"],
-    ["CTE is outside the flat SELECT whitelist", "WITH bound AS (SELECT data FROM external_rows WHERE connector_id = 'source-1' AND table_name = 'billing') SELECT * FROM bound"],
     ["JOIN scope is not verified", "SELECT e.data FROM external_rows e JOIN events v ON true WHERE e.connector_id = 'source-1' AND e.table_name = 'billing'"],
     ["trailing opaque expression", "SELECT data FROM external_rows WHERE connector_id = 'source-1' AND table_name = 'billing' || ''"],
     ['nested conjunction is not a top-level atom', "SELECT data FROM external_rows WHERE (connector_id = 'source-1' AND table_name = 'billing')"],

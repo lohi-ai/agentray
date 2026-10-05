@@ -28,6 +28,22 @@ func TestDataAnalystPresetGrantsSQLTools(t *testing.T) {
 	}
 }
 
+func TestConfiguredWriteScopesExposeBoardToolsInAgentSession(t *testing.T) {
+	scopes := ScopesFromMap(map[string]bool{"data_quality": true, "analyze_build": true})
+	policy := PolicyForScopes(scopes)
+	for _, name := range []string{ToolCreateDashboard, ToolCreateChart, ToolSaveBoard} {
+		if decision := policy.Allow(context.Background(), agentcore.ToolCall{Name: name}); !decision.Allow {
+			t.Errorf("configured analyze_build scope did not expose %q to the session: %s", name, decision.Reason)
+		}
+	}
+	readOnly := PolicyForScopes(Scopes{DataQuality: true})
+	for _, name := range []string{ToolCreateDashboard, ToolCreateChart, ToolSaveBoard} {
+		if decision := readOnly.Allow(context.Background(), agentcore.ToolCall{Name: name}); decision.Allow {
+			t.Errorf("write tool %q leaked without analyze_build", name)
+		}
+	}
+}
+
 // TestScopesFromMapRoundTrip verifies the stored agent_configs scope map (the
 // business/usecase tool groups configured in the UI) maps onto the four Scopes
 // and on into the granted tool allow-list. This is the seam between the web

@@ -187,6 +187,43 @@ function simpleAtom(tokens: readonly SQLToken[], alias: string): { column: strin
 function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
   const tokens = executableTokens(sql);
   if (!tokens) return null;
+  if (isWord(tokens[0], 'with')) {
+    // A saved query commonly puts the governed relation in a small CTE, then
+    // shapes it in later CTEs. Inspect each CTE body with the same strict flat
+    // SELECT verifier used below. Only the body that directly reads
+    // external_rows can establish a binding; later CTEs cannot manufacture one.
+    const depths = tokenDepths(tokens);
+    if (!depths) return null;
+    const bindings: DeclaredSourceBinding[] = [];
+    let cursor = 1;
+    if (isWord(tokens[cursor], 'recursive')) return null;
+    while (cursor < tokens.length && tokens[cursor]?.kind === 'word') {
+      cursor += 1; // CTE name
+      if (!isWord(tokens[cursor], 'as') || !isPunctuation(tokens[cursor + 1], '(')) return null;
+      const open = cursor + 1;
+      let close = open + 1;
+      while (close < tokens.length && !(isPunctuation(tokens[close], ')') && depths[close] === 0)) close += 1;
+      if (close >= tokens.length) return null;
+      const body = tokens.slice(open + 1, close).map((token) => (
+        token.kind === 'string' ? `'${token.value.replace(/'/g, "''")}'` : token.value
+      )).join(' ');
+      const sourceBindings = declaredSourceBindings(body);
+      if (sourceBindings === null) return null;
+      bindings.push(...sourceBindings);
+      cursor = close + 1;
+      if (isPunctuation(tokens[cursor], ',')) {
+        cursor += 1;
+        continue;
+      }
+      break;
+    }
+    if (!isWord(tokens[cursor], 'select')) return null;
+    const sourceCount = tokens.filter((token, index) => (
+      (isWord(token, 'from') || isWord(token, 'join')) && isWord(tokens[index + 1], 'external_rows')
+    )).length;
+    if (sourceCount !== bindings.length) return null;
+    return bindings.length ? bindings : [];
+  }
   const depths = tokenDepths(tokens);
   if (!depths) return null;
   const sources = tokens.flatMap((token, index) => (
