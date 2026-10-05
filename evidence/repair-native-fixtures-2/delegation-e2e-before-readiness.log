@@ -1,0 +1,6 @@
+=== RUN   TestAgentDelegationE2E
+    agent_delegation_e2e_test.go:297: app.New: failed to connect to `user=lohi database=lohi_analytics`: 127.0.0.1:56402 (127.0.0.1): failed to receive message: read tcp 127.0.0.1:56426->127.0.0.1:56402: read: connection reset by peer
+--- FAIL: TestAgentDelegationE2E (4.36s)
+FAIL
+FAIL	github.com/lohi-ai/agentray/internal/app	5.505s
+FAIL

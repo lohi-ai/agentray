@@ -1,0 +1,6 @@
+=== RUN   TestAgentDelegationE2E
+    agent_delegation_e2e_test.go:297: app.New: nats: invalid subject
+--- FAIL: TestAgentDelegationE2E (3.62s)
+FAIL
+FAIL	github.com/lohi-ai/agentray/internal/app	5.879s
+FAIL

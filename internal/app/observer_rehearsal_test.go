@@ -76,36 +76,62 @@ func TestConfiguredObserverOperationsRehearsal(t *testing.T) {
 			return
 		}
 		var request struct {
-			Messages []struct{ Role, Name, Content string }
-			Tools    []json.RawMessage
+			Messages []struct {
+				Role       string `json:"role"`
+				Content    string `json:"content"`
+				ToolCallID string `json:"tool_call_id"`
+				ToolCalls  []struct {
+					ID       string
+					Function struct{ Name string }
+				} `json:"tool_calls"`
+			}
+			Tools  []json.RawMessage
+			Stream bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Errorf("decode provider: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		writeText := func(content string) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]string{"role": "assistant", "content": content}, "finish_reason": "stop",
+		if !request.Stream {
+			t.Error("native rehearsal request did not enable streaming")
+		}
+		writeChunk := func(delta map[string]any, finish string) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			chunk, err := json.Marshal(map[string]any{"id": "rehearsal", "choices": []any{map[string]any{
+				"index": 0, "delta": delta, "finish_reason": finish,
 			}}, "usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2}})
+			if err != nil {
+				t.Errorf("encode provider chunk: %v", err)
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", chunk)
+		}
+		writeText := func(content string) {
+			writeChunk(map[string]any{"role": "assistant", "content": content}, "stop")
 		}
 		// The scheduler's optional reflection uses the same adapter after the run.
 		if len(request.Tools) == 0 {
 			writeText(`{"memories":[]}`)
 			return
 		}
+		// Native tool results correlate by call ID; result names are optional.
+		callNames := map[string]string{}
+		for _, message := range request.Messages {
+			for _, call := range message.ToolCalls {
+				callNames[call.ID] = call.Function.Name
+			}
+		}
 		results := map[string]string{}
 		for _, message := range request.Messages {
 			if message.Role == "tool" {
-				results[message.Name] = message.Content
+				results[callNames[message.ToolCallID]] = message.Content
 			}
 		}
 		writeTool := func(name, args string) {
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{
-				"message": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
-					"id": "call-" + name, "type": "function", "function": map[string]string{"name": name, "arguments": args},
-				}}}, "finish_reason": "tool_calls",
-			}}, "usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2}})
+			writeChunk(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
+				"index": 0, "id": "call-" + name, "type": "function", "function": map[string]string{"name": name, "arguments": args},
+			}}}, "tool_calls")
 		}
 		switch {
 		case results["read_skill"] == "":

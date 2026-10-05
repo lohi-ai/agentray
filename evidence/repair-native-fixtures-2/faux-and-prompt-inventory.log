@@ -1,0 +1,49 @@
+internal/runtime/native_attempt_usage_test.go:161:		if err = session.Prompt(ctx, json.RawMessage(`"repeat"`)); err != nil {
+internal/runtime/native_plugins_test.go:48:		Provider: agentcore.NewFauxProvider(), Model: "native-fixture", Definition: agentcore.AgentDefinition{ScopeID: "agent"},
+internal/runtime/native_plugins_test.go:121:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "fixture", Extensions: []agentcore.ExtensionFactory{probe}})
+internal/runtime/native_prompt_unicode_test.go:40:			if err := agent.Prompt(ctx, json.RawMessage(raw)); err != nil {
+internal/runtime/native_ladder_resume_test.go:76:	if err = resumed.Prompt(ctx, json.RawMessage(`"continue"`)); err != nil {
+internal/runtime/pi_model_integration_test.go:52:	composed, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "bound-model", Tools: agentcore.NewToolSet(piComposedTool{&effects}), Policy: agentcore.NewAllowList("write")})
+internal/runtime/native_request_test.go:66:			if err = session.Prompt(ctx, json.RawMessage(`"original"`)); err != nil {
+internal/runtime/pi_children_integration_test.go:391:	parent, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("legacy must not run")), Model: "test",
+internal/runtime/pi_children_integration_test.go:492:	parent, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "parent",
+internal/runtime/pi_goal_integration_test.go:46:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Goal: condition,
+internal/runtime/pi_lifecycle_test.go:15:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Tools: agentcore.NewToolSet(fakeTool{name: "write"}), Policy: agentcore.NewAllowList("write")})
+internal/runtime/pi_lifecycle_test.go:50:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", GetSteeringMessages: func(context.Context) []agentcore.Message {
+internal/runtime/pi_lifecycle_test.go:70:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test"})
+internal/runtime/native_trace_test.go:89:	if err := agent.Prompt(ctx, json.RawMessage(`"overlap"`)); err == nil {
+internal/runtime/native_trace_test.go:180:	go func() { result <- agent.Prompt(ctx, json.RawMessage(`"test"`)) }()
+internal/runtime/native_trace_test.go:235:			err = agent.Prompt(ctx, json.RawMessage(`"test"`))
+internal/runtime/native_trace_test.go:345:	if err := session.Prompt(ctx, json.RawMessage(`"test"`)); err != nil {
+internal/runtime/pi_questions_integration_test.go:31:			a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Tools: agentcore.NewToolSet(ask.Tool{}), Policy: agentcore.NewAllowList("ask")})
+internal/runtime/pi_lifecycle_integration_test.go:83:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Session: store, SessionID: "live",
+internal/runtime/pi_lifecycle_integration_test.go:179:		Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test",
+internal/runtime/pi_lifecycle_integration_test.go:284:			cfg := agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Limits: &limits, Policy: agentcore.NewAllowList("write"), Tools: agentcore.NewToolSet(piEndingTool{&effects, kind == "parked"})}
+internal/runtime/pi_lifecycle_integration_test.go:340:	a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(agentcore.AssistantText("unused")), Model: "test", Policy: agentcore.NewAllowList("write"), Tools: agentcore.NewToolSet(piEndingTool{effects: &effects}), StepGate: func(ctx context.Context, turn int) error {
+internal/runtime/native_provider_test.go:72:	if err := agent.Prompt(ctx, json.RawMessage(`"hello"`)); err != nil {
+internal/runtime/native_codex_test.go:80:		if err = agent.Prompt(ctx, json.RawMessage(`"hello"`)); err != nil {
+internal/runtime/native_stream_test.go:240:			if err := agent.Prompt(ctx, "test"); err != nil {
+internal/runtime/native_request_admission_test.go:206:	go func() { done <- session.Prompt(ctx, json.RawMessage(`"stream"`)) }()
+internal/runtime/pi_session_integration_test.go:85:			if err := s.Prompt(ctx, piSessionJSON("write")); err != nil {
+internal/runtime/pi_session_integration_test.go:172:	if err := s.Prompt(ctx, piSessionJSON("write")); err == nil {
+internal/runtime/pi_session_integration_test.go:178:	if err := s.Prompt(ctx, piSessionJSON("retry")); err == nil {
+internal/runtime/pi_session_integration_test.go:207:	go func() { done <- s.Prompt(ctx, piSessionJSON("write")) }()
+internal/runtime/pi_session_integration_test.go:273:	if err := s.Prompt(ctx, piSessionJSON("write")); err != nil {
+internal/runtime/pi_session_integration_test.go:373:	if err := s.Prompt(ctx, piSessionJSON("write")); err != nil {
+internal/runtime/pi_session_integration_test.go:437:	if err := s.Prompt(ctx, piSessionJSON("execute composed tool")); err != nil {
+internal/runtime/native_azure_test.go:80:	if err := agent.Prompt(ctx, json.RawMessage(`"write"`)); err != nil {
+internal/runtime/native_children_test.go:200:	parent, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "parent", Tools: agentcore.NewToolSet(ask.Tool{}), Policy: agentcore.NewAllowList("ask")})
+internal/runtime/native_children_test.go:837:			a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "parent",
+internal/runtime/native_ladder_context_test.go:127:	if err = agent.Prompt(context.Background(), json.RawMessage(`"hello"`)); err != nil {
+internal/runtime/lohi_observer_test.go:123:			result, err := agent.Prompt(context.Background(), "Read the contract, submit, then follow up")
+internal/runtime/lohi_observer_test.go:154:			if _, err := agent.Prompt(context.Background(), "File the recommendation"); err != nil {
+internal/runtime/native_agent_test.go:259:	go func() { completed <- agent.Prompt(ctx, json.RawMessage(`"test"`)) }()
+internal/runtime/native_agent_test.go:269:		{"prompt", func() error { return agent.Prompt(ctx, json.RawMessage(`"busy"`)) }},
+internal/runtime/native_agent_test.go:325:	go func() { completed <- agent.Prompt(ctx, json.RawMessage(`"test"`)) }()
+internal/runtime/native_ladder_fork_test.go:50:	parent, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "fork-parent"})
+internal/runtime/native_session_test.go:62:			if err := session.Prompt(ctx, json.RawMessage(`"write"`)); err != nil {
+internal/runtime/native_session_test.go:150:	go func() { completed <- session.Prompt(run, json.RawMessage(`"write"`)) }()
+internal/runtime/native_session_test.go:193:	if err := session.Prompt(ctx, prompt); err != nil {
+internal/runtime/native_session_test.go:222:		composed, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Tools: agentcore.NewToolSet(ask.Tool{}), Policy: agentcore.NewAllowList("ask"), Session: store, SessionID: "go-ask", ResumeSession: resume})
+internal/runtime/native_ladder_prepare_test.go:69:	if err = session.Prompt(ctx, json.RawMessage(`"continue twice"`)); err != nil {
+internal/runtime/pi_delegation_batch_test.go:153:			a, err := agentcore.New(agentcore.Config{Provider: agentcore.NewFauxProvider(), Model: "test", Session: store, SessionID: "parent", Tools: agentcore.NewToolSet(ask.Tool{}, nativeChildWrite{&writes}), Policy: policy, Extensions: []agentcore.ExtensionFactory{plugin, ext}})

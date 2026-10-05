@@ -1,0 +1,6 @@
+=== RUN   TestAgentDelegationE2E
+2026/10/06 00:05:11 agentray: agent workspaces under "/Users/long/.agentray/workspaces"; NO SANDBOX — run_shell/computer_use/browser_use execute on this host as this process, confined to the run's workspace. Set AGENTRAY_SANDBOX_ENABLED=true to isolate them, or AGENTRAY_SANDBOX_REQUIRED=true to withhold them instead.
+2026/10/06 00:05:11 agentray: event retention disabled (EVENT_RETENTION_DAYS=0) — the event log keeps every event
+--- PASS: TestAgentDelegationE2E (3.43s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	4.684s
