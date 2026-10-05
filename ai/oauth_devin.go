@@ -34,6 +34,11 @@ type DevinOAuthOptions struct {
 	CallbackHost  func() string
 	StartCallback func(*OAuthCallbackServerOptions) (*OAuthCallbackServer, error)
 	Now           func() float64
+
+	// authorizeURL/tokenURL override the shipped endpoints. Tests point them at
+	// httptest servers; empty uses the Devin CLI endpoints.
+	authorizeURL string
+	tokenURL     string
 }
 
 // DevinOAuth builds the interactive login for the Devin vendor. The credential
@@ -63,6 +68,12 @@ func DevinOAuth(settings ...DevinOAuthOptions) *OAuthAuth {
 	}
 	if options.Now == nil {
 		options.Now = func() float64 { return float64(time.Now().UnixMilli()) }
+	}
+	if options.authorizeURL == "" {
+		options.authorizeURL = devinOAuthAuthorizeURL
+	}
+	if options.tokenURL == "" {
+		options.tokenURL = devinOAuthTokenURL
 	}
 	subscription := true
 	return &OAuthAuth{Name: "Devin", IsSubscription: &subscription,
@@ -95,7 +106,7 @@ func loginDevinOAuth(interaction ProviderAuthInteraction, options DevinOAuthOpti
 	}
 	// Devin's CLI authorize endpoint carries only the account-prompt hint: the
 	// client id/redirect are implied by the Devin CLI client.
-	authURL := devinOAuthAuthorizeURL + "?prompt=select_account"
+	authURL := options.authorizeURL + "?prompt=select_account"
 	ctx := interaction.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -154,7 +165,7 @@ func devinOAuthExchange(ctx context.Context, code, verifier any, options DevinOA
 	if err != nil {
 		return nil, err
 	}
-	response, err := oauthFetch(ctx, options.Client, devinOAuthTokenURL, http.MethodPost,
+	response, err := oauthFetch(ctx, options.Client, options.tokenURL, http.MethodPost,
 		http.Header{"Content-Type": {"application/json"}, "Accept": {"application/json"}}, body)
 	if err != nil {
 		if ctx.Err() != nil {

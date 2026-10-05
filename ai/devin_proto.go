@@ -267,7 +267,7 @@ func (m devinCompletionConfiguration) encode() []byte {
 	w.varint(3, 200) // maxNewlines
 	w.double(5, m.temperature)
 	w.double(6, m.temperature) // firstTemperature
-	w.varint(7, 50)          // topK
+	w.varint(7, 50)            // topK
 	w.double(8, m.topP)
 	for _, p := range m.stopPatterns {
 		w.str(9, p)
@@ -286,19 +286,19 @@ func devinChatToolChoice(optionName string) []byte {
 
 // devinChatRequest is exa.api_server_pb.GetChatMessageRequest.
 type devinChatRequest struct {
-	metadata                  devinMetadata
-	prompt                    string
-	prompts                   []devinChatMessagePrompt
-	chatModelUID              string
-	requestType               int
-	configuration             devinCompletionConfiguration
-	tools                     []devinChatToolDefinition
-	disableParallelToolCalls  bool
-	systemPromptCacheOptions  []byte
-	cascadeID                 string
-	plannerMode               int
-	executionID               string
-	modelAssignmentJWT        string
+	metadata                 devinMetadata
+	prompt                   string
+	prompts                  []devinChatMessagePrompt
+	chatModelUID             string
+	requestType              int
+	configuration            devinCompletionConfiguration
+	tools                    []devinChatToolDefinition
+	disableParallelToolCalls bool
+	systemPromptCacheOptions []byte
+	cascadeID                string
+	plannerMode              int
+	executionID              string
+	modelAssignmentJWT       string
 }
 
 func (m devinChatRequest) encode() []byte {
@@ -353,7 +353,7 @@ func devinEncodeGetCliModelConfigsRequest(metadata devinMetadata) []byte {
 // --- response decoders ---
 
 type devinUserJwt struct {
-	userJWT           string
+	userJWT            string
 	customAPIServerURL string
 }
 

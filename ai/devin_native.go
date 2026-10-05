@@ -512,12 +512,42 @@ func devinTrailerError(payload []byte) error {
 	if trailer.Error.Code == "" && trailer.Error.Message == "" {
 		return nil
 	}
-	status := providerStatusForCode(trailer.Error.Code)
+	status := devinConnectStatus(trailer.Error.Code)
 	if status == 0 {
 		status = http.StatusInternalServerError
 	}
 	return &protocol.ProviderError{Provider: VendorDevin, Status: status,
 		Message: fmt.Sprintf("Devin stream error %s: %s", trailer.Error.Code, trailer.Error.Message)}
+}
+
+// devinConnectStatus maps a Connect/gRPC status code onto an HTTP status. The
+// distinction matters: an invalid_argument must classify as a client error so
+// the retry/rotation budget is not spent replaying a request the server will
+// always reject. Unknown codes fall through to the shared vendor table.
+func devinConnectStatus(code string) int {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "invalid_argument", "failed_precondition", "out_of_range":
+		return http.StatusBadRequest
+	case "unauthenticated":
+		return http.StatusUnauthorized
+	case "permission_denied":
+		return http.StatusForbidden
+	case "not_found":
+		return http.StatusNotFound
+	case "already_exists", "aborted":
+		return http.StatusConflict
+	case "resource_exhausted":
+		return http.StatusTooManyRequests
+	case "unimplemented":
+		return http.StatusNotImplemented
+	case "unavailable":
+		return http.StatusServiceUnavailable
+	case "deadline_exceeded":
+		return http.StatusGatewayTimeout
+	case "internal", "unknown", "data_loss":
+		return http.StatusInternalServerError
+	}
+	return providerStatusForCode(code)
 }
 
 // devinFetchUserJWT exchanges the session token for a per-turn JWT.
