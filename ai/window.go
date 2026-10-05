@@ -29,6 +29,9 @@ import "strings"
 // Entries are matched longest-prefix, so a family default can sit alongside the
 // specific members that differ from it.
 var contextWindows = map[string]int{
+	// Devin GetCliModelConfigs reports 262000 for swe-2-{medium,high,max}
+	// (verified 2026-10-06). The CLI alias swe-2 resolves to that same family.
+	"swe-2": 262_000,
 	// Anthropic reports no window. Every currently-served Claude is at least
 	// 200k; the 1M-token variants are beta and opt-in, so the family default
 	// stays at the floor.

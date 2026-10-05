@@ -93,6 +93,11 @@ type spillRun struct {
 // Name identifies the extension in composition diagnostics.
 func (*spillRun) Name() string { return "spill" }
 
+func (r *spillRun) ArchiveToolResult(ctx context.Context, call agentcore.ToolCall, text string) (string, error) {
+	record, err := r.store.SaveText(ctx, SpillRequest{SessionID: r.sessionID, ToolName: call.Name, CallID: call.ID, Label: "context", Content: text})
+	return record.Locator, err
+}
+
 // Tools contributes the retrieval tool. It exists only for a run that can
 // actually spill, so an agent without a store never sees a tool it cannot use.
 func (r *spillRun) Tools() []agentcore.Tool { return []agentcore.Tool{&readSpillTool{policy: r}} }

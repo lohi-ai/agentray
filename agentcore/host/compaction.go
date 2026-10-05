@@ -20,6 +20,17 @@ type CompactionPolicy struct {
 	// ForWindow can derive or cap it from a model window. KeepRecent is bounded
 	// to at least one token and at most half the effective budget.
 	Budget, KeepRecent int
+	// MaxInputTokens is the model's reserve-aware input ceiling. Budget remains
+	// a compaction trigger/target; immutable host tools can exceed a very low
+	// target while still fitting the model. Without a known ceiling, Budget is
+	// also the fit bound.
+	MaxInputTokens int
+	// Force permits summarizing a completed latest turn after a confirmed
+	// pre-output context rejection. It never replays tools or changes history.
+	Force bool
+	// Archive saves a full tool result before a request-only preview replaces
+	// it. The returned locator must be readable by this run's retrieval tool.
+	Archive func(context.Context, string, string, string) (string, error)
 	// Task is the consumer's current user request, retained verbatim alongside
 	// summaries. It is data, never a system instruction or extra permission.
 	Task      string
@@ -95,10 +106,12 @@ func (c *Compactor) TransformWithPolicy(ctx context.Context, raw json.RawMessage
 	}
 	view := original
 	baseCount, headCount := 0, 0
-	if saved := c.saved; saved != nil && saved.Revision == c.revision && saved.PrefixCount < len(original) && PrefixDigest(original[:saved.PrefixCount]) == saved.PrefixDigest {
+	if saved := c.saved; saved != nil && saved.Revision == c.revision && saved.PrefixCount <= len(original) && PrefixDigest(original[:saved.PrefixCount]) == saved.PrefixDigest {
 		var boundary struct{ Role string }
-		_ = json.Unmarshal(original[saved.PrefixCount], &boundary)
-		if boundary.Role == "assistant" || boundary.Role == "user" {
+		if saved.PrefixCount < len(original) {
+			_ = json.Unmarshal(original[saved.PrefixCount], &boundary)
+		}
+		if saved.PrefixCount == len(original) || boundary.Role == "assistant" || boundary.Role == "user" {
 			view = summaryViewWithTask(original, saved.PrefixCount, saved.Message, policy.Task)
 			baseCount = saved.PrefixCount
 			headCount = len(view) - (len(original) - baseCount)
@@ -106,6 +119,32 @@ func (c *Compactor) TransformWithPolicy(ctx context.Context, raw json.RawMessage
 	}
 	out, _ = json.Marshal(view)
 	cut := compactionCut(view, policy.Budget, policy.KeepRecent)
+	if policy.Force && len(view) > headCount {
+		lastIndex := len(view) - 1
+		var last struct{ Role string }
+		_ = json.Unmarshal(view[lastIndex], &last)
+		// Host reminders may follow the current user/assistant turn. Preserve
+		// those systems while choosing the same completed-turn boundary.
+		for last.Role == "system" && lastIndex > headCount {
+			lastIndex--
+			_ = json.Unmarshal(view[lastIndex], &last)
+		}
+		if last.Role == "assistant" || last.Role == "toolResult" {
+			cut = lastIndex + 1
+		} else if last.Role == "user" {
+			// When an oversized historical fact dominates the retained tail,
+			// fold it as well while retaining the latest user message verbatim.
+			// A lone initial request is never summarized away.
+			for _, raw := range view[headCount:lastIndex] {
+				var earlier struct{ Role string }
+				_ = json.Unmarshal(raw, &earlier)
+				if earlier.Role == "user" || earlier.Role == "assistant" {
+					cut = lastIndex
+					break
+				}
+			}
+		}
+	}
 	if cut <= headCount || policy.Summarize == nil {
 		return
 	}
@@ -162,6 +201,23 @@ func summaryViewWithTask(messages []json.RawMessage, cut int, summary json.RawMe
 	return view
 }
 
+// SummaryAllowance reserves the immutable host systems/tools and exact task
+// before assigning output to the summary. Small budgets cannot spend a fixed
+// fraction on summary text when tool declarations already fill most of them.
+func SummaryAllowance(prefix json.RawMessage, task string, budget int) (int, error) {
+	var messages []json.RawMessage
+	if err := json.Unmarshal(prefix, &messages); err != nil {
+		return 0, err
+	}
+	message := json.RawMessage(`{"role":"user","content":"[Earlier work summary]","agentrayContextSummary":"summary","timestamp":1}`)
+	base, _ := json.Marshal(summaryViewWithTask(messages, len(messages), message, task))
+	available := budget - ContextTokens(base) - 64
+	if available < 128 {
+		return 0, &ContextBudgetError{Estimated: ContextTokens(base) + 128, Budget: budget}
+	}
+	return min(4096, budget/4, available), nil
+}
+
 func validSummaryText(text string) bool {
 	if strings.TrimSpace(strings.TrimPrefix(text, "[Earlier work summary]")) == "" {
 		return false
@@ -183,7 +239,7 @@ func compactionCut(messages []json.RawMessage, budget, keep int) int {
 		return 0
 	}
 	raw, _ := json.Marshal(messages)
-	if estimateTokens(string(raw)) <= budget || ValidateMessages(raw) != nil {
+	if ContextTokens(raw) <= budget || ValidateMessages(raw) != nil {
 		return 0
 	}
 	keep = min(max(1, keep), max(1, budget/2))
@@ -261,6 +317,9 @@ const ReserveTokens = 16384
 func (p CompactionPolicy) ForWindow(window int) CompactionPolicy {
 	if window > 0 {
 		limit := window - min(ReserveTokens, max(1, window/4))
+		if p.MaxInputTokens <= 0 || p.MaxInputTokens > limit {
+			p.MaxInputTokens = limit
+		}
 		if p.Budget <= 0 || p.Budget > limit {
 			p.Budget = limit
 		}

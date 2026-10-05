@@ -25,6 +25,7 @@ type nativeRungAttempts struct {
 	// It must not infer HTTP status/Retry-After from a formatted error message.
 	failure func(int) error
 	observe func(context.Context, FallbackAttempt) error
+	recover func(context.Context, FallbackAttempt) (bool, error)
 	wait    func(context.Context, time.Duration) error
 }
 
@@ -39,6 +40,7 @@ func (r nativeRungAttempts) run(ctx context.Context, out *AssistantMessageEventS
 	if wait == nil {
 		wait = waitNativeRetry
 	}
+	recovered := false
 	for number := 1; ; number++ {
 		if err = ctx.Err(); err != nil {
 			return last, err
@@ -84,6 +86,16 @@ func (r nativeRungAttempts) run(ctx context.Context, out *AssistantMessageEventS
 		}
 		if last.Committed || last.Terminal.Type == "done" {
 			return last, nil
+		}
+		if r.recover != nil && !recovered && failure != nil {
+			ok, recoverErr := r.recover(ctx, FallbackAttempt{Number: number, Outcome: last, Failure: failure})
+			if recoverErr != nil {
+				return last, recoverErr
+			}
+			if ok {
+				recovered = true
+				continue
+			}
 		}
 		delay, retry := r.policy.NextDelay(number, failure)
 		if !retry {

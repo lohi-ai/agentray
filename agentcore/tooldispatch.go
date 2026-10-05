@@ -310,8 +310,27 @@ type nestedToolInvoker struct {
 	nestedMu   sync.RWMutex
 }
 
-func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (ToolOutput, error) {
+func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (result ToolOutput, runErr error) {
 	name = strings.TrimSpace(name)
+	parentID, _ := ToolCallID(ctx)
+	callID := fmt.Sprintf("%s/bridge-%d", parentID, i.sequence.Add(1))
+	if parentID == "" {
+		callID = fmt.Sprintf("bridge-%d", i.sequence.Load())
+	}
+	if events, ok := ctx.Value(nestedToolEventsKey{}).(func(StreamEvent)); ok {
+		trace := ToolTrace{CallID: callID, Tool: name, Args: args}
+		events(StreamEvent{Type: StreamToolExecStart, Tool: &trace})
+		defer func() {
+			if len(result.Invocations) > 0 {
+				if result.Invocations[0].Trace.CallID == "" {
+					result.Invocations[0].Trace.CallID = callID
+				}
+				trace = result.Invocations[0].Trace
+			}
+			events(StreamEvent{Type: StreamToolExecEnd, Tool: &trace})
+			events(StreamEvent{Type: StreamTool, Tool: &trace})
+		}()
+	}
 	if err := validateNestedToolTarget(ctx, name); err != nil {
 		trace := ToolTrace{Tool: name, Args: args, Allowed: false, Reason: err.Error()}
 		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
@@ -324,11 +343,6 @@ func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (
 		err := errors.New("tool-call budget exhausted")
 		trace := ToolTrace{Tool: name, Args: args, Allowed: false, Reason: err.Error()}
 		return ToolOutput{Invocations: []ToolInvocation{{Trace: trace}}}, err
-	}
-	parentID, _ := ToolCallID(ctx)
-	callID := fmt.Sprintf("%s/bridge-%d", parentID, i.sequence.Add(1))
-	if parentID == "" {
-		callID = fmt.Sprintf("bridge-%d", i.sequence.Load())
 	}
 	call := ToolCall{ID: callID, Name: name, Arguments: args}
 	parallel := isParallelTool(i.tools, call)
@@ -351,7 +365,7 @@ func (i *nestedToolInvoker) InvokeTool(ctx context.Context, name, args string) (
 	invocations := make([]ToolInvocation, 0, 1+len(outcome.invocations))
 	invocations = append(invocations, ToolInvocation{Trace: outcome.trace, Executed: outcome.executed})
 	invocations = append(invocations, outcome.invocations...)
-	result := ToolOutput{
+	result = ToolOutput{
 		Content:            outcome.message.Content,
 		Parts:              append([]ContentPart(nil), outcome.message.ContentParts...),
 		Invocations:        invocations,

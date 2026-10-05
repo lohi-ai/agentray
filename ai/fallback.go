@@ -51,6 +51,9 @@ type FallbackRequest struct {
 	Observe       func(context.Context, int, FallbackAttempt) error
 	Validate      func() error
 	BeforePublish func(AttemptOutcome) error
+	// Recover may repair one confirmed pre-output provider rejection per rung.
+	// AI still owns replay safety and the hard one-recovery bound.
+	Recover func(context.Context, int, FallbackAttempt) (bool, error)
 }
 
 // Run publishes to a caller-owned stream without ending it. Hosts with durable
@@ -80,6 +83,11 @@ func (p FallbackProvider) Run(ctx context.Context, out *AssistantMessageEventStr
 		}
 		if request.Observe != nil {
 			attempts.observe = func(ctx context.Context, attempt FallbackAttempt) error { return request.Observe(ctx, index, attempt) }
+		}
+		if request.Recover != nil {
+			attempts.recover = func(ctx context.Context, attempt FallbackAttempt) (bool, error) {
+				return request.Recover(ctx, index, attempt)
+			}
 		}
 		result, err := attempts.run(ctx, out)
 		if err != nil {

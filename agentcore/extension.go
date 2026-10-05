@@ -468,6 +468,13 @@ type extensionSet struct {
 	stopAttempts map[string]int
 }
 
+// ToolResultArchiver is an optional durable-output seam for request-only
+// context rescue. It must save the complete text before returning a locator
+// served by the run's existing retrieval tool. It grants no new effects.
+type ToolResultArchiver interface {
+	ArchiveToolResult(context.Context, ToolCall, string) (string, error)
+}
+
 // beginExtensions instantiates every registered factory for one run.
 func beginExtensions(ctx context.Context, factories []ExtensionFactory, info RunInfo) (*extensionSet, error) {
 	set := &extensionSet{stopAttempts: map[string]int{}}

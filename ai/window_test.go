@@ -40,6 +40,10 @@ func TestContextWindowForPicksTheLongestMatchingPrefix(t *testing.T) {
 		{"gemini-1.0-pro", 32_768},
 		{"grok-4-latest", 256_000},
 		{"grok-3", 131_072},
+		{"swe-2", 262_000},
+		{"swe-2-high", 262_000},
+		{"swe-2-medium", 262_000},
+		{"swe-2-max", 262_000},
 	}
 	for _, c := range cases {
 		if got := ContextWindowFor("", c.model); got != c.want {

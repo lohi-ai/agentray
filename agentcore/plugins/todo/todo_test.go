@@ -91,6 +91,9 @@ func TestTodoSurvivesCompaction(t *testing.T) {
 			t.Errorf("live plan lost or duplicated after compaction: %s", prompt)
 		}
 		raw, _ := json.Marshal(view)
+		if host.ContextTokens(raw) > (host.CompactionPolicy{Budget: 1200}).ForWindow(128000).MaxInputTokens {
+			t.Error("compacted request still exceeds the model input ceiling")
+		}
 		if !strings.Contains(string(raw), "[Earlier work summary]") {
 			t.Error("native request was not compacted")
 		}

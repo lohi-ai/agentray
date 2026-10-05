@@ -29,6 +29,7 @@ type toolInvokerContextKey struct{}
 type toolStackContextKey struct{}
 type toolBudgetContextKey struct{}
 type toolBridgeGuardContextKey struct{}
+type nestedToolEventsKey struct{}
 
 // ToolInvokerFrom returns the run-owned nested invocation capability, when the
 // current call is executing inside an Agent loop.
