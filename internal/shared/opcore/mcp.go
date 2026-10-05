@@ -1,6 +1,7 @@
 package opcore
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -231,7 +232,9 @@ func callTool(c echo.Context, r *Registry, deps any, resolve PrincipalResolver, 
 	// client can render it natively; leave it off for scalars/arrays the spec says
 	// structuredContent must be an object.
 	var obj map[string]any
-	if json.Unmarshal([]byte(out), &obj) == nil {
+	decoder := json.NewDecoder(bytes.NewBufferString(out))
+	decoder.UseNumber()
+	if decoder.Decode(&obj) == nil {
 		result.StructuredContent = obj
 	}
 	return ok(req.ID, result)

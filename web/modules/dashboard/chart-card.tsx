@@ -8,29 +8,11 @@ import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Text } from '@astryxdesign/core/Text';
-import { AgentRayAPI, type ActivitySummary, type Chart, type Filters } from '@/lib/api';
+import { AgentRayAPI, APIError, type ActivitySummary, type Chart } from '@/lib/api';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
-
-// withTimeWindow injects the dashboard's applied range into a chart's SQL so
-// SQL-backed charts honour the global filter, the same way metric charts do.
-// Substitution is opt-in and backward compatible: SQL without any {{…}} token
-// runs verbatim. The agent's create_chart can write windowed SQL like
-//   WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'
-// and {{hours}} expands to the window length for INTERVAL-style queries.
-function withTimeWindow(sql: string, filters: Filters): string {
-  if (!/\{\{\s*(from|to|hours)\s*\}\}/.test(sql)) return sql;
-  const to = filters.to ? new Date(filters.to) : new Date();
-  const from = filters.from ? new Date(filters.from) : new Date(to.getTime() - filters.hours * 3600_000);
-  const hours = filters.from && filters.to
-    ? Math.max(1, Math.round((to.getTime() - from.getTime()) / 3600_000))
-    : filters.hours;
-  return sql
-    .replace(/\{\{\s*from\s*\}\}/g, from.toISOString())
-    .replace(/\{\{\s*to\s*\}\}/g, to.toISOString())
-    .replace(/\{\{\s*hours\s*\}\}/g, String(hours));
-}
+import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -78,28 +60,68 @@ function SeriesChart({ values, labels, type, annotations }: { values: number[]; 
 function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[] }) {
   const api = useMemo(() => new AgentRayAPI(projectID), [projectID]);
   const applied = useFiltersStore((s) => s.appliedFilters);
-  const sql = useMemo(() => withTimeWindow(chart.sql, applied), [chart.sql, applied]);
-  const [data, setData] = useState<{ values: number[]; labels: (string | number)[] } | null>(null);
+  const query = useMemo(() => resolveChartQuery(chart.sql, applied), [chart.sql, applied]);
+  const requestKey = useMemo(
+    () => Symbol(query.ok
+      ? `${projectID}\u0000${query.sql}\u0000${chart.y_field ?? ''}\u0000${chart.x_field ?? ''}`
+      : `${projectID}\u0000unsupported:${query.message}`),
+    [projectID, query, chart.y_field, chart.x_field],
+  );
+  type State =
+    | { key: symbol | null; status: 'loading' }
+    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[] }
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable'; message: string };
+  const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
+    if (!query.ok) return;
     let active = true;
-    api.runSQL(sql)
+    api.runSQL(query.sql)
       .then((res) => {
         if (!active) return;
-        const first = res.rows[0] ?? {};
-        const yField = chart.y_field || Object.keys(first).find((k) => typeof first[k] === 'number') || '';
-        const xField = chart.x_field || Object.keys(first).find((k) => k !== yField && typeof first[k] !== 'number') || '';
-        setData({
-          values: res.rows.map((r) => Number(r[yField]) || 0),
-          labels: res.rows.map((r, i) => (xField ? String(r[xField]) : i + 1)),
+        const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
+        if (projected.status === 'ready') setData({ key: requestKey, ...projected });
+        else if (projected.status === 'empty') setData({
+          key: requestKey,
+          status: 'empty',
+          message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
         });
+        else setData({ key: requestKey, ...projected });
       })
-      .catch(() => { if (active) setData({ values: [], labels: [] }); });
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (error instanceof APIError && (error.kind === 'retryable' || error.status === 503)) {
+          setData({ key: requestKey, status: 'capacity', message: 'Query capacity is busy. Retry shortly.' });
+          return;
+        }
+        setData({ key: requestKey, status: 'error', message: 'Query failed. Review the saved SQL and try again.' });
+      });
     return () => { active = false; };
-  }, [api, sql, chart.y_field, chart.x_field]);
+  }, [api, query, requestKey, chart.y_field, chart.x_field]);
 
-  if (data === null) return <div className="grid w-full place-items-center" style={{ height: 140 }}><Text type="supporting">Running query…</Text></div>;
-  return <SeriesChart values={data.values} labels={data.labels} type={specType(chart.kind)} annotations={annotations} />;
+  const current: State = data.key === requestKey
+    ? data
+    : query.ok
+      ? { key: requestKey, status: 'loading' }
+      : { key: requestKey, status: 'unsupported', message: query.message };
+  const body = current.status === 'ready'
+    ? <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} />
+    : (
+      <div
+        className="grid w-full place-items-center px-3 text-center"
+        style={{ height: 168 }}
+        role={current.status === 'error' || current.status === 'capacity' || current.status === 'unsupported' || current.status === 'non_plottable' ? 'alert' : undefined}
+      >
+        <Text type="supporting">{current.status === 'loading' ? 'Running query…' : current.message}</Text>
+      </div>
+    );
+  const rangeCaption = chartRangeCaption(query);
+  return (
+    <div>
+      {body}
+      {rangeCaption ? <div className="mt-2"><Text type="supporting">{rangeCaption}</Text></div> : null}
+    </div>
+  );
 }
 
 // ChartCard renders one saved chart. In `preview` mode (used by the editor) the

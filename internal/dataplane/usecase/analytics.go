@@ -284,10 +284,12 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"not `referrer_channel`: group by `utm_source` (or coalesce(nullif(utm_source,''), " +
 			"referrer_channel)) to answer 'which campaign/source drove this', and never read the " +
 			"tags back out of `properties` — the columns are the canonical copy. " +
-			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
+			"Synced external data (data connectors) lives in `external_rows`: filter by BOTH connector_id and " +
+			"table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"json_extract_string(data, '$.column') (json_extract for numbers); row_key is the source row's " +
-			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key) and " +
+			"key and synced_at the landing time. Rows are already deduplicated per " +
+			"(project_id, connector_id, table_name, row_key) and " +
 			"each row is CURRENT state, not history — a re-sync replaces the row, it does not append. " +
 			"Rows the source marked deleted (the sync's soft-delete column) are already excluded; rows the " +
 			"source hard-deleted without a mark are NOT — a count here can overstate the source. " +
