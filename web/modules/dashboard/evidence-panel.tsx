@@ -7,7 +7,6 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger, Button, C
 import { StatusPill } from '@/modules/shared/components/lohi-evidence-primitives';
 import type { ReadinessSync } from '@/modules/app/hooks/connectors';
 import { evidenceTime } from '@/modules/settings/source-readiness';
-import { scanExecutableSQL } from './chart-query';
 
 export type ChartEvidenceStatus = 'loading' | 'ready' | 'bounded' | 'unknown' | 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied';
 export type ChartEvidence = {
@@ -23,37 +22,55 @@ export type ChartEvidence = {
 export type EvidenceState = 'ready' | 'syncing' | 'empty' | 'stale' | 'error' | 'immature' | 'read-only-denied' | 'query-denied' | 'readiness-error';
 
 type DeclaredSourceBinding = { connectorID: string; table: string };
-type SQLToken = { kind: 'word' | 'string' | 'punctuation'; value: string };
+type SQLToken = { kind: 'word' | 'string' | 'number' | 'punctuation'; value: string };
 export type SourceEvidence = { coverage: string; bindings: string };
 
 const SAVED_LIMITATION_FALLBACK = 'No limitation was supplied with this saved board.';
 const COVERAGE_FALLBACK = 'Coverage not verified';
 const BINDINGS_FALLBACK = 'Bindings not verified';
 
+// Keep lexical regions as tokens, never erase a quoted expression into proof.
+// The range scanner masks quoted identifiers/extended literals for its own
+// purpose; this verifier instead rejects those unsupported lexical forms.
 function executableTokens(sql: string): SQLToken[] | null {
-  const scanned = scanExecutableSQL(sql);
-  if (!scanned.fullyClassified) return null;
   const tokens: SQLToken[] = [];
-  for (let index = 0; index < scanned.executable.length;) {
-    const character = scanned.executable[index];
-    if (/\s/u.test(character)) {
+  for (let index = 0; index < sql.length;) {
+    const rest = sql.slice(index);
+    const character = sql[index];
+    if (/[\t\n\f\r ]/.test(character)) {
       index += 1;
+      continue;
+    }
+    if (rest.startsWith('--')) {
+      index += 2;
+      while (index < sql.length && !/[\r\n]/.test(sql[index])) index += 1;
+      continue;
+    }
+    if (rest.startsWith('/*')) {
+      let depth = 1;
+      index += 2;
+      while (index < sql.length && depth > 0) {
+        if (sql.slice(index, index + 2) === '/*') { depth += 1; index += 2; }
+        else if (sql.slice(index, index + 2) === '*/') { depth -= 1; index += 2; }
+        else index += 1;
+      }
+      if (depth !== 0) return null;
       continue;
     }
     if (character === "'") {
       let value = '';
       let closed = false;
       index += 1;
-      while (index < scanned.executable.length) {
-        if (scanned.executable[index] === "'" && scanned.executable[index + 1] === "'") {
+      while (index < sql.length) {
+        if (sql[index] === "'" && sql[index + 1] === "'") {
           value += "'";
           index += 2;
-        } else if (scanned.executable[index] === "'") {
+        } else if (sql[index] === "'") {
           index += 1;
           closed = true;
           break;
         } else {
-          value += scanned.executable[index];
+          value += sql[index];
           index += 1;
         }
       }
@@ -61,110 +78,110 @@ function executableTokens(sql: string): SQLToken[] | null {
       tokens.push({ kind: 'string', value });
       continue;
     }
-    const word = scanned.executable.slice(index).match(/^[A-Za-z_][A-Za-z0-9_$]*/)?.[0];
+    const word = rest.match(/^[A-Za-z_][A-Za-z0-9_$]*/)?.[0];
     if (word) {
       tokens.push({ kind: 'word', value: word.toLowerCase() });
       index += word.length;
       continue;
     }
-    tokens.push({ kind: 'punctuation', value: character });
-    index += 1;
+    const number = rest.match(/^[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/)?.[0];
+    if (number) {
+      tokens.push({ kind: 'number', value: number });
+      index += number.length;
+      continue;
+    }
+    const punctuation = rest.match(/^(?:>=|<=|<>|!=|[().,;=<>*+-])/)?.[0];
+    if (!punctuation) return null;
+    tokens.push({ kind: 'punctuation', value: punctuation });
+    index += punctuation.length;
   }
+  // Accept one terminator, never a second statement.
+  if (tokens.at(-1)?.kind === 'punctuation' && tokens.at(-1)?.value === ';') tokens.pop();
+  if (tokens.some((token) => token.kind === 'punctuation' && token.value === ';')) return null;
   return tokens;
 }
 
-const QUERY_BOUNDARIES = new Set(['union', 'intersect', 'except']);
-const WHERE_BOUNDARIES = new Set(['group', 'having', 'order', 'limit', 'offset', 'window', 'qualify', 'returning', ...QUERY_BOUNDARIES]);
-const ALIAS_BOUNDARIES = new Set(['where', 'join', 'inner', 'left', 'right', 'full', 'cross', 'on', ...WHERE_BOUNDARIES]);
+function isWord(token: SQLToken | undefined, value: string): boolean {
+  return token?.kind === 'word' && token.value === value;
+}
+
+function isPunctuation(token: SQLToken | undefined, value: string): boolean {
+  return token?.kind === 'punctuation' && token.value === value;
+}
 
 function tokenDepths(tokens: readonly SQLToken[]): number[] | null {
   const depths: number[] = [];
   let depth = 0;
   for (const token of tokens) {
-    if (token.value === ')') depth -= 1;
+    if (isPunctuation(token, ')')) depth -= 1;
     if (depth < 0) return null;
     depths.push(depth);
-    if (token.value === '(') depth += 1;
+    if (isPunctuation(token, '(')) depth += 1;
   }
   return depth === 0 ? depths : null;
 }
 
-function splitBoolean(tokens: readonly SQLToken[], operator: 'and' | 'or'): SQLToken[][] {
-  const parts: SQLToken[][] = [];
-  let depth = 0;
-  let start = 0;
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (token.value === '(') depth += 1;
-    else if (token.value === ')') depth -= 1;
-    else if (depth === 0 && token.kind === 'word' && token.value === operator) {
-      parts.push(tokens.slice(start, index));
-      start = index + 1;
-    }
-  }
-  parts.push(tokens.slice(start));
-  return parts;
-}
-
 function stripWrappingParentheses(tokens: readonly SQLToken[]): SQLToken[] {
   let stripped = [...tokens];
-  while (stripped[0]?.value === '(' && stripped.at(-1)?.value === ')') {
-    let depth = 0;
-    let closesAtEnd = false;
-    for (let index = 0; index < stripped.length; index += 1) {
-      if (stripped[index].value === '(') depth += 1;
-      if (stripped[index].value === ')') depth -= 1;
-      if (depth === 0) {
-        closesAtEnd = index === stripped.length - 1;
-        break;
-      }
-    }
-    if (!closesAtEnd) break;
+  while (isPunctuation(stripped[0], '(') && isPunctuation(stripped.at(-1), ')')) {
+    const depths = tokenDepths(stripped);
+    if (!depths || depths.slice(1, -1).includes(0)) break;
     stripped = stripped.slice(1, -1);
   }
   return stripped;
 }
 
-function intersectConstraints(groups: readonly Set<string>[]): Set<string> {
-  if (groups.length === 0) return new Set();
-  return new Set([...groups[0]].filter((constraint) => groups.every((group) => group.has(constraint))));
+// Track CASE as well as parentheses: AND inside an inactive branch, function
+// argument or subselect can never be mistaken for a top-level conjunct.
+function topLevelConjuncts(tokens: readonly SQLToken[]): SQLToken[][] | null {
+  const parts: SQLToken[][] = [];
+  let depth = 0;
+  let caseDepth = 0;
+  let start = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (isPunctuation(token, '(')) depth += 1;
+    else if (isPunctuation(token, ')')) depth -= 1;
+    else if (isWord(token, 'case')) caseDepth += 1;
+    else if (isWord(token, 'end')) caseDepth -= 1;
+    else if (depth === 0 && caseDepth === 0 && isWord(token, 'and')) {
+      parts.push(tokens.slice(start, index));
+      start = index + 1;
+    }
+    if (depth < 0 || caseDepth < 0) return null;
+  }
+  if (depth !== 0 || caseDepth !== 0) return null;
+  parts.push(tokens.slice(start));
+  return parts;
 }
 
-function bindingAtom(tokens: readonly SQLToken[], alias: string | null, allowUnqualified: boolean): Set<string> {
+const COMPARISONS = new Set(['=', '<', '>', '<=', '>=', '<>', '!=']);
+const WHERE_BOUNDARIES = new Set(['group', 'having', 'order', 'limit', 'offset', 'window', 'qualify']);
+const UNSUPPORTED_WORDS = new Set(['or', 'case', 'end', 'not', 'exists', 'union', 'intersect', 'except', 'with', 'join']);
+
+// Positive grammar: [alias.]column comparison literal. No functions, casts,
+// BETWEEN/IN, nested booleans, or discarded opaque terms are accepted.
+function simpleAtom(tokens: readonly SQLToken[], alias: string): { column: string; operator: string; literal: SQLToken } | null {
   const atom = stripWrappingParentheses(tokens);
-  let column: SQLToken | undefined;
-  let equals: SQLToken | undefined;
-  let value: SQLToken | undefined;
-  if (atom.length === 3) {
-    [column, equals, value] = atom;
-    if (!allowUnqualified) return new Set();
-  } else if (atom.length === 5 && atom[1].value === '.') {
-    const qualifier = atom[0];
-    if (qualifier.kind !== 'word' || qualifier.value !== (alias ?? 'external_rows')) return new Set();
-    [, , column, equals, value] = atom;
-  } else {
-    return new Set();
+  let cursor = 0;
+  if (atom[0]?.kind !== 'word') return null;
+  if (isPunctuation(atom[1], '.')) {
+    if (atom[0].value !== alias) return null;
+    cursor = 2;
   }
-  if (column?.kind !== 'word' || equals?.value !== '=' || value?.kind !== 'string') return new Set();
-  if (column.value !== 'connector_id' && column.value !== 'table_name') return new Set();
-  return new Set([`${column.value}:${value.value}`]);
-}
-
-// Return only constraints guaranteed by the boolean expression. AND combines
-// guarantees; OR keeps only guarantees present in every branch. Everything
-// else is opaque, so CASE/NOT/functions/subqueries cannot manufacture proof.
-function guaranteedBindings(tokens: readonly SQLToken[], alias: string | null, allowUnqualified: boolean): Set<string> {
-  const expression = stripWrappingParentheses(tokens);
-  if (expression.length === 0 || expression.some((token) => token.kind === 'word' && token.value === 'select')) return new Set();
-  const disjunction = splitBoolean(expression, 'or');
-  if (disjunction.length > 1) {
-    return intersectConstraints(disjunction.map((part) => guaranteedBindings(part, alias, allowUnqualified)));
+  const column = atom[cursor];
+  const operator = atom[cursor + 1];
+  let literal = atom[cursor + 2];
+  let length = cursor + 3;
+  if (isPunctuation(literal, '-') || isPunctuation(literal, '+')) {
+    literal = atom[cursor + 3];
+    if (literal?.kind !== 'number') return null;
+    length += 1;
   }
-  const conjunction = splitBoolean(expression, 'and');
-  if (conjunction.length > 1) {
-    return new Set(conjunction.flatMap((part) => [...guaranteedBindings(part, alias, allowUnqualified)]));
-  }
-  return bindingAtom(expression, alias, allowUnqualified);
+  if (atom.length !== length || column?.kind !== 'word' || operator?.kind !== 'punctuation'
+    || !COMPARISONS.has(operator.value) || !literal
+    || !(literal.kind === 'string' || literal.kind === 'number' || isWord(literal, 'true') || isWord(literal, 'false'))) return null;
+  return { column: column.value, operator: operator.value, literal };
 }
 
 function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
@@ -172,78 +189,49 @@ function declaredSourceBindings(sql: string): DeclaredSourceBinding[] | null {
   if (!tokens) return null;
   const depths = tokenDepths(tokens);
   if (!depths) return null;
-  const sourceIndexes = tokens.flatMap((token, index) => (
-    token.kind === 'word' && (token.value === 'from' || token.value === 'join')
-      && tokens[index + 1]?.kind === 'word' && tokens[index + 1]?.value === 'external_rows'
-      ? [index]
-      : []
+  const sources = tokens.flatMap((token, index) => (
+    (isWord(token, 'from') || isWord(token, 'join')) && isWord(tokens[index + 1], 'external_rows') ? [index] : []
   ));
-  if (sourceIndexes.length === 0) return [];
-
-  const bindings: DeclaredSourceBinding[] = [];
-  for (const sourceIndex of sourceIndexes) {
-    // JOIN scope depends on join type and ON/WHERE placement. Until that is
-    // parsed deliberately, fail closed rather than attributing a nearby pair.
-    if (tokens[sourceIndex].value !== 'from') return null;
-    const sourceDepth = depths[sourceIndex];
-    let scopeStart = -1;
-    for (let index = sourceIndex - 1; index >= 0; index -= 1) {
-      if (depths[index] < sourceDepth || (depths[index] === sourceDepth && QUERY_BOUNDARIES.has(tokens[index].value))) break;
-      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && tokens[index].value === 'select') {
-        scopeStart = index;
-        break;
-      }
-    }
-    if (scopeStart < 0) return null;
-
-    let scopeEnd = tokens.length;
-    for (let index = sourceIndex + 2; index < tokens.length; index += 1) {
-      if (depths[index] < sourceDepth || (depths[index] === sourceDepth && QUERY_BOUNDARIES.has(tokens[index].value))) {
-        scopeEnd = index;
-        break;
-      }
-    }
-    const sameScopeSources = sourceIndexes.filter((index) => index >= scopeStart && index < scopeEnd && depths[index] === sourceDepth);
-    if (sameScopeSources.length !== 1) return null;
-
-    let cursor = sourceIndex + 2;
-    let alias: string | null = null;
-    if (tokens[cursor]?.kind === 'word' && tokens[cursor].value === 'as' && tokens[cursor + 1]?.kind === 'word') {
-      alias = tokens[cursor + 1].value;
-      cursor += 2;
-    } else if (tokens[cursor]?.kind === 'word' && !ALIAS_BOUNDARIES.has(tokens[cursor].value)) {
-      alias = tokens[cursor].value;
-      cursor += 1;
-    }
-
-    let whereIndex = -1;
-    for (let index = cursor; index < scopeEnd; index += 1) {
-      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && tokens[index].value === 'where') {
-        whereIndex = index;
-        break;
-      }
-    }
-    if (whereIndex < 0) return null;
-    let whereEnd = scopeEnd;
-    for (let index = whereIndex + 1; index < scopeEnd; index += 1) {
-      if (depths[index] === sourceDepth && tokens[index].kind === 'word' && WHERE_BOUNDARIES.has(tokens[index].value)) {
-        whereEnd = index;
-        break;
-      }
-    }
-    const hasOtherRelations = tokens.slice(cursor, whereIndex).some((token, offset) => (
-      depths[cursor + offset] === sourceDepth
-      && ((token.kind === 'word' && token.value === 'join') || token.value === ',')
-    ));
-    const constraints = guaranteedBindings(tokens.slice(whereIndex + 1, whereEnd), alias, !hasOtherRelations);
-    const connectors = new Set([...constraints].filter((item) => item.startsWith('connector_id:')).map((item) => item.slice('connector_id:'.length)));
-    const tables = new Set([...constraints].filter((item) => item.startsWith('table_name:')).map((item) => item.slice('table_name:'.length)));
-    // One query scope must guarantee one exact pair. IN, reversed comparisons,
-    // mixed values and ambiguous expressions stay unverified.
-    if (connectors.size !== 1 || tables.size !== 1) return null;
-    bindings.push({ connectorID: [...connectors][0], table: [...tables][0] });
+  if (sources.length === 0) return [];
+  // Only a single flat SELECT/FROM is in the whitelist. CTEs, subqueries,
+  // joins and set operations require semantic scope analysis we do not claim.
+  if (!isWord(tokens[0], 'select') || sources.length !== 1
+    || tokens.filter((token) => isWord(token, 'select')).length !== 1
+    || tokens.filter((token) => isWord(token, 'from')).length !== 1
+    || tokens.some((token) => token.kind === 'word' && UNSUPPORTED_WORDS.has(token.value))) return null;
+  const sourceIndex = sources[0];
+  if (depths[sourceIndex] !== 0) return null;
+  let cursor = sourceIndex + 2;
+  let alias = 'external_rows';
+  if (isWord(tokens[cursor], 'as')) {
+    cursor += 1;
+    if (tokens[cursor]?.kind !== 'word') return null;
+    alias = tokens[cursor++].value;
+  } else if (tokens[cursor]?.kind === 'word' && !isWord(tokens[cursor], 'where')) {
+    alias = tokens[cursor++].value;
   }
-  return bindings.filter((binding, index, all) => all.findIndex((candidate) => candidate.connectorID === binding.connectorID && candidate.table === binding.table) === index);
+  if (!isWord(tokens[cursor], 'where') || depths[cursor] !== 0) return null;
+  let whereEnd = tokens.length;
+  for (let index = cursor + 1; index < tokens.length; index += 1) {
+    if (depths[index] === 0 && tokens[index].kind === 'word' && WHERE_BOUNDARIES.has(tokens[index].value)) {
+      whereEnd = index;
+      break;
+    }
+  }
+  const conjuncts = topLevelConjuncts(tokens.slice(cursor + 1, whereEnd));
+  if (!conjuncts) return null;
+  const connectors = new Set<string>();
+  const tables = new Set<string>();
+  for (const conjunct of conjuncts) {
+    const atom = simpleAtom(conjunct, alias);
+    if (!atom) return null;
+    if (atom.column === 'connector_id' || atom.column === 'table_name') {
+      if (atom.operator !== '=' || atom.literal.kind !== 'string') return null;
+      (atom.column === 'connector_id' ? connectors : tables).add(atom.literal.value);
+    }
+  }
+  if (connectors.size !== 1 || tables.size !== 1) return null;
+  return [{ connectorID: [...connectors][0], table: [...tables][0] }];
 }
 
 function oldestTimestamp(values: Array<string | null>): string | null {
