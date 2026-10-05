@@ -111,11 +111,17 @@ func WithHTTPWorkspace(ws *Workspace) HTTPOption {
 	}
 }
 
-// WithHTTPTimeout overrides the per-request timeout.
+// WithHTTPTimeout overrides the per-request timeout. Zero disables it while
+// preserving caller cancellation; negative values leave the default intact.
 func WithHTTPTimeout(d time.Duration) HTTPOption {
 	return func(t *HTTPTool) {
-		if d > 0 {
+		if d >= 0 {
 			t.client.Timeout = d
+			if transport, ok := t.client.Transport.(*http.Transport); ok {
+				transport.DialContext = t.guardedDial(&net.Dialer{Timeout: d})
+				transport.TLSHandshakeTimeout = d
+				transport.ResponseHeaderTimeout = d
+			}
 		}
 	}
 }

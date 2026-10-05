@@ -198,7 +198,7 @@ func (r *queryRun) Tools() []agentcore.Tool { return []agentcore.Tool{&sessionQu
 // grants no capability the agent has not already exercised. The loop pins
 // SessionID to the run's own before every call, so a model-supplied value
 // cannot widen the scope.
-func (*queryRun) SelfGated() bool { return true }
+func (*sessionQueryTool) SelfGated() bool { return true }
 
 // logSessionQuery is the built-in provider: a bounded scan of one session's own
 // append-only log. Bounded is the operative word — this is a single session's

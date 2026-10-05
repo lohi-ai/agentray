@@ -29,9 +29,9 @@ func TestPhasedPatchAtomicAndCheckpointed(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("failed batch partially mutated")
 	}
-	r := &runPlan{s}
+	r := &runPlan{store: s}
 	raw, _ := r.NativeState()
-	restored := &runPlan{NewStore()}
+	restored := &runPlan{store: NewStore()}
 	if err := restored.RestoreNativeState(raw); err != nil {
 		t.Fatal(err)
 	}

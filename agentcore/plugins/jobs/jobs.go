@@ -99,6 +99,8 @@ type JobSpec struct {
 
 // Plugin installs background jobs.
 type Plugin struct {
+	// MaxConcurrent bounds running jobs per owner in the default store. Zero uses 15; -1 disables the ceiling.
+	MaxConcurrent int
 	// Store owns the work. nil uses a fresh LocalJobStore for the run.
 	Store JobStore
 	// MaxResultBytes bounds a job result held in the store, so a completed job's
@@ -135,9 +137,14 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 // token otherwise, so a job started here is invisible to every other run and a
 // tool cannot forge another run's owner — it never sees one.
 func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.Extension, error) {
+	if p.MaxConcurrent < -1 {
+		return nil, fmt.Errorf("jobs: MaxConcurrent must be nonnegative or -1")
+	}
 	store := p.Store
 	if store == nil {
-		store = NewLocalJobStore()
+		local := NewLocalJobStore()
+		local.maxConcurrent = p.MaxConcurrent
+		store = local
 	}
 	maxBytes := p.MaxResultBytes
 	if maxBytes <= 0 {
@@ -175,7 +182,7 @@ func (p *jobsRun) Tools() []agentcore.Tool {
 // SelfGated exempts the job_* tools from the permission gate. They observe and
 // cancel work THIS run launched — the owner fence makes that literal — so they
 // grant no capability the agent did not already exercise by starting the job.
-func (*jobsRun) SelfGated() bool { return true }
+func (jobTool) SelfGated() bool { return true }
 
 // RunContext binds the launcher to the run's context, which is how a tool finds
 // it. The context is the run's, not the calling tool's, so work survives the
@@ -338,10 +345,11 @@ const jobNoticeInlineLimit = 2 * 1024
 
 // LocalJobStore runs jobs as goroutines in this process, fenced by owner.
 type LocalJobStore struct {
-	mu      sync.Mutex
-	jobs    map[string]*localJob // keyed by owner + "/" + id
-	pending map[string][]string  // owner -> ids finished but not yet drained
-	seq     int
+	maxConcurrent int
+	mu            sync.Mutex
+	jobs          map[string]*localJob // keyed by owner + "/" + id
+	pending       map[string][]string  // owner -> ids finished but not yet drained
+	seq           int
 }
 
 type localJob struct {
@@ -373,9 +381,13 @@ func (s *LocalJobStore) Start(ctx context.Context, owner string, spec JobSpec) (
 			active++
 		}
 	}
-	if active >= 15 {
+	limit := s.maxConcurrent
+	if limit == 0 {
+		limit = 15
+	}
+	if limit > 0 && active >= limit {
 		s.mu.Unlock()
-		return Job{}, errors.New("agentcore: concurrent job capacity reached (15)")
+		return Job{}, fmt.Errorf("agentcore: concurrent job capacity reached (%d)", limit)
 	}
 	s.seq++
 	id := fmt.Sprintf("job_%d", s.seq)

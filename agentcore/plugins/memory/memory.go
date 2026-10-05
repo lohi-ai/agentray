@@ -23,6 +23,9 @@ type Plugin struct {
 	// NativeProvider binds consolidation to the owning agent with accounted usage.
 	NativeProvider       *ai.FallbackProvider
 	OnConsolidationError func(context.Context, error)
+	// Worker defers model consolidation to a host-owned, bounded worker.
+	// Evidence is still staged durably before the primary run returns.
+	Worker *ConsolidationWorker
 }
 
 // Name identifies the plugin.
@@ -52,8 +55,15 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 	if info.Depth == 0 {
 		ext.consolidator = p.Consolidator
 		if ext.consolidator == nil && p.NativeProvider != nil {
-			ext.consolidator = nativeConsolidator(p.NativeProvider, info)
+			accounting := info
+			if p.Worker != nil {
+				// Background usage belongs to its own telemetry span, never a
+				// completed agent's mutable usage/goal accounting.
+				accounting = agentcore.RunInfo{ScopeID: info.ScopeID}
+			}
+			ext.consolidator = nativeConsolidator(p.NativeProvider, accounting)
 		}
+		ext.worker = p.Worker
 	}
 	ext.onConsolidationError = p.OnConsolidationError
 	return ext, nil
@@ -61,6 +71,7 @@ func (p Plugin) BeginRun(_ context.Context, info agentcore.RunInfo) (agentcore.E
 
 // curation is one run's memory-curation capability.
 type curation struct {
+	worker               *ConsolidationWorker
 	consolidation        ConsolidationStore
 	consolidator         Consolidator
 	onConsolidationError func(context.Context, error)

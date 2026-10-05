@@ -79,18 +79,34 @@ func (c *curation) FinalizeRun(ctx context.Context, result agentcore.RunResult, 
 		c.report(ctx, err)
 		return nil
 	}
+	if c.worker != nil {
+		if !c.worker.submit(c) {
+			c.report(ctx, fmt.Errorf("memory consolidation worker unavailable; evidence remains pending"))
+		}
+		return nil
+	}
+	c.consolidate(ctx)
+	return nil
+}
+
+func (c *curation) consolidate(ctx context.Context) {
+	defer func() {
+		if p := recover(); p != nil {
+			c.report(ctx, fmt.Errorf("memory consolidation panic: %v", p))
+		}
+	}()
 	pending, err := c.consolidation.PendingRollouts(ctx, c.scopeID, 4)
 	if err != nil {
 		c.report(ctx, err)
-		return nil
+		return
 	}
 	if len(pending) == 0 {
-		return nil
+		return
 	}
 	memories, err := c.store.Recall(ctx, c.scopeID, "", 32)
 	if err != nil {
 		c.report(ctx, err)
-		return nil
+		return
 	}
 	in := Consolidation{Rollouts: pending, Memories: memories}
 	changes, err := c.consolidator(ctx, in)
@@ -105,7 +121,6 @@ func (c *curation) FinalizeRun(ctx context.Context, result agentcore.RunResult, 
 	if err != nil {
 		c.report(ctx, err)
 	}
-	return nil
 }
 func (c *curation) report(ctx context.Context, err error) {
 	defer func() { _ = recover() }()

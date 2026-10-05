@@ -31,6 +31,38 @@ func testJobsPolicy(t *testing.T, owner string) *jobsRun {
 	return p
 }
 
+func TestConfiguredConcurrencyAndUnlimited(t *testing.T) {
+	for _, limit := range []int{2, -1} {
+		p := beginJobs(t, Plugin{MaxConcurrent: limit}, "configured")
+		ctx, cancel := context.WithCancel(context.Background())
+		l := launcherFor(p, ctx)
+		count := 20
+		if limit > 0 {
+			count = limit
+		}
+		for range count {
+			if _, err := l.Start("work", "wait", func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }); err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+		}
+		if limit > 0 {
+			if _, err := l.Start("extra", "wait", func(context.Context) (string, error) { return "", nil }); err == nil {
+				t.Error("concurrency ceiling ignored")
+			}
+		}
+		cancel()
+		waitFor(t, func() bool {
+			for _, j := range p.store.List(p.owner) {
+				if !j.State.Done() {
+					return false
+				}
+			}
+			return true
+		})
+	}
+}
+
 func launcherFor(p *jobsRun, ctx context.Context) Launcher {
 	return Launcher{store: p.store, owner: p.owner, base: ctx, maxBytes: p.maxBytes}
 }

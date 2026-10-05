@@ -158,3 +158,17 @@ bounded; old completed items can be folded out, after which their IDs are no
 longer patch targets. Successful native receipt replay applies deltas in order;
 denied or failed deltas cannot change restored state. Both tools are bookkeeping
 and need explicit policy grants. Child stores stay isolated.
+
+## Completion checks
+
+Hosts can opt into `todo.Plugin{Store: store, CheckCompletion: true}`. Its
+run-scoped `StopInterceptor` reopens normal finishes while pending/in-progress
+steps remain. Completed, blocked and explicitly abandoned steps are resolved;
+the reminder asks for verification or an explanation, never fabricated completion.
+Forks use their own plans, and checkpoint restores use the restored checklist.
+Forced limits, cancellation and parked questions retain the engine's stop rules.
+
+`MaxCompletionNudges > 0` optionally bounds reminders per native run. Exhaustion
+returns `todo_incomplete`, so consumers must not treat it as a successful finish.
+Nonpositive values have no reminder ceiling. `CheckCompletion` defaults to false
+for existing AgentCore consumers; Soot enables it in its shared composition.

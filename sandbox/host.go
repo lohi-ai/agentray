@@ -69,11 +69,7 @@ func (h *HostSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (agen
 		return agentcore.SandboxResult{}, fmt.Errorf("sandbox: empty argv")
 	}
 
-	timeoutS := req.Constraints.TimeoutSeconds
-	if timeoutS <= 0 {
-		timeoutS = hostDefaultTimeoutS
-	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutS*float64(time.Second)))
+	runCtx, cancel := hostRunContext(ctx, req.Constraints.TimeoutSeconds)
 	defer cancel()
 
 	dir, cleanup, err := hostWorkdir(req)
@@ -105,7 +101,7 @@ func (h *HostSandbox) Exec(ctx context.Context, req agentcore.SandboxExec) (agen
 
 	if runCtx.Err() == context.DeadlineExceeded {
 		res.Killed = true
-		res.KillReason = fmt.Sprintf("exceeded %.0fs timeout", timeoutS)
+		res.KillReason = "execution deadline exceeded"
 		return res, nil
 	}
 	if runErr != nil {
@@ -129,11 +125,7 @@ func (h *HostSandbox) Start(ctx context.Context, req agentcore.SandboxExec) (age
 	if req.Stdin != "" {
 		return nil, fmt.Errorf("sandbox: interactive process cannot use preloaded stdin")
 	}
-	timeoutS := req.Constraints.TimeoutSeconds
-	if timeoutS <= 0 {
-		timeoutS = hostDefaultTimeoutS
-	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutS*float64(time.Second)))
+	runCtx, cancel := hostRunContext(ctx, req.Constraints.TimeoutSeconds)
 	dir, cleanup, err := hostWorkdir(req)
 	if err != nil {
 		cancel()
@@ -171,7 +163,7 @@ func (h *HostSandbox) Start(ctx context.Context, req agentcore.SandboxExec) (age
 	return &commandProcess{
 		cmd: cmd, stdin: stdin, stdout: stdout, stderr: stderr,
 		runCtx: runCtx, cancel: cancel, killFn: func() error { return killProcessGroup(cmd) },
-		cleanup: cleanup, errLabel: "host wait", timeout: fmt.Sprintf("exceeded %.0fs timeout", timeoutS),
+		cleanup: cleanup, errLabel: "host wait", timeout: "execution deadline exceeded",
 	}, nil
 }
 
@@ -206,4 +198,16 @@ func hostWorkdir(req agentcore.SandboxExec) (string, func(), error) {
 		return "", func() {}, fmt.Errorf("sandbox: host scratch dir: %w", err)
 	}
 	return dir, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// A negative timeout explicitly delegates the deadline to the host run context.
+// Zero retains the historical per-command default.
+func hostRunContext(ctx context.Context, seconds float64) (context.Context, context.CancelFunc) {
+	if seconds < 0 {
+		return context.WithCancel(ctx)
+	}
+	if seconds == 0 {
+		seconds = hostDefaultTimeoutS
+	}
+	return context.WithTimeout(ctx, time.Duration(seconds*float64(time.Second)))
 }

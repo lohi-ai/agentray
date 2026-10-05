@@ -102,7 +102,7 @@ func (r *spillRun) Tools() []agentcore.Tool { return []agentcore.Tool{&readSpill
 // below is what makes that true — so it grants no capability the agent has not
 // already exercised, and requiring every preset to enumerate it would be
 // friction with no security value.
-func (*spillRun) SelfGated() bool { return true }
+func (*readSpillTool) SelfGated() bool { return true }
 
 // InterceptToolResult is where the plugin takes the bounding job from the loop.
 //

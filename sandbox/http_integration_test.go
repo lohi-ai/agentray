@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/lohi-ai/agentray/ai"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
 	"github.com/lohi-ai/agentray/sandbox"
 )
@@ -31,7 +32,7 @@ func TestEndToEndCredentialReachesServerNotTrace(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	tool := sandbox.NewHTTPRequestTool(nil, 
+	tool := sandbox.NewHTTPRequestTool(nil,
 		sandbox.WithHTTPAllowHosts([]string{"127.0.0.1"}),
 		sandbox.WithHTTPAllowPlain(true), // httptest serves plain http
 	)
@@ -45,16 +46,12 @@ func TestEndToEndCredentialReachesServerNotTrace(t *testing.T) {
 
 	env := agentcore.DefaultEnv()
 	env.Credentials = vault
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantToolCall("c1", sandbox.ToolHTTPRequest, string(args)),
-		agentcore.AssistantText("done"),
-	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    agentcore.NewToolSet(tool),
-		Policy:   agentcore.NewAllowList(sandbox.ToolHTTPRequest),
-		Env:      &env,
+		NativeProvider: httpCallProvider(args),
+		Model:          "test",
+		Tools:          agentcore.NewToolSet(tool),
+		Policy:         agentcore.NewAllowList(sandbox.ToolHTTPRequest),
+		Env:            &env,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -86,15 +83,11 @@ func TestEndToEndCredentialReachesServerNotTrace(t *testing.T) {
 func TestEndToEndBlocksNonAllowlistedHost(t *testing.T) {
 	tool := sandbox.NewHTTPRequestTool(nil, sandbox.WithHTTPAllowHosts([]string{"api.allowed.com"}))
 	args, _ := json.Marshal(map[string]any{"url": "https://evil.example.com/steal"})
-	faux := agentcore.NewFauxProvider(
-		agentcore.AssistantToolCall("c1", sandbox.ToolHTTPRequest, string(args)),
-		agentcore.AssistantText("understood"),
-	)
 	agent, err := agentcore.New(agentcore.Config{
-		Provider: faux,
-		Model:    "test",
-		Tools:    agentcore.NewToolSet(tool),
-		Policy:   agentcore.NewAllowList(sandbox.ToolHTTPRequest),
+		NativeProvider: httpCallProvider(args),
+		Model:          "test",
+		Tools:          agentcore.NewToolSet(tool),
+		Policy:         agentcore.NewAllowList(sandbox.ToolHTTPRequest),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -112,4 +105,16 @@ func TestEndToEndBlocksNonAllowlistedHost(t *testing.T) {
 	if !sawErr {
 		t.Fatal("expected the allowlist refusal to be returned to the model")
 	}
+}
+
+func httpCallProvider(args json.RawMessage) *ai.FallbackProvider {
+	return &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{
+		Model: json.RawMessage(`{"id":"test","contextWindow":128000}`),
+		Stream: ai.ScriptedStream(
+			ai.Message{Role: "assistant", StopReason: "toolUse", Content: ai.BlockContent(ai.ContentBlock{
+				Type: "toolCall", ID: "c1", Name: sandbox.ToolHTTPRequest, Arguments: args,
+			})},
+			ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "done"})},
+		),
+	}}}
 }

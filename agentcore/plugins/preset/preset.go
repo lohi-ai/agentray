@@ -119,6 +119,8 @@ type Options struct {
 	GoalLifecycle *goal.Plugin
 	// ConsolidateMemory enables native distillation when Memory supports ConsolidationStore.
 	ConsolidateMemory bool
+	// MemoryWorker moves consolidation off the primary run when supplied.
+	MemoryWorker *memory.ConsolidationWorker
 	// Interactive exposes ask; the host must publish questions and resume answers.
 	Interactive bool
 	// NativeHistory enables retrieval from opaque native checkpoints.
@@ -174,7 +176,7 @@ func Full(cfg agentcore.Config, o Options) []agentcore.Plugin {
 		}
 		for i, p := range list {
 			if p.Name() == "memory" {
-				list[i] = memory.Plugin{Store: cfg.Memory, NativeProvider: provider}
+				list[i] = memory.Plugin{Store: cfg.Memory, NativeProvider: provider, Worker: o.MemoryWorker}
 				break
 			}
 		}

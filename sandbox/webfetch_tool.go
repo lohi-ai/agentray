@@ -61,7 +61,7 @@ type WebFetchTool struct {
 // ws is optional and enables save_as: with a workspace the fetched document can
 // be written where read_file, grep, and run_shell can reach it, which is what a
 // page too long to read in one context needs.
-func NewWebFetchTool(sb agentcore.Sandbox, ws *Workspace) *WebFetchTool {
+func NewWebFetchTool(sb agentcore.Sandbox, ws *Workspace, options ...WebFetchOption) *WebFetchTool {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	t := &WebFetchTool{
 		sb:           sb,
@@ -85,7 +85,26 @@ func NewWebFetchTool(sb agentcore.Sandbox, ws *Workspace) *WebFetchTool {
 	if ws != nil {
 		t.sink = responseSink{fs: newWorkspaceFS(sb, ws)}
 	}
+	for _, option := range options {
+		option(t)
+	}
 	return t
+}
+
+type WebFetchOption func(*WebFetchTool)
+
+// WithWebFetchTimeout sets the host fetch deadline; zero leaves cancellation to the caller.
+func WithWebFetchTimeout(timeout time.Duration) WebFetchOption {
+	return func(t *WebFetchTool) {
+		if timeout < 0 {
+			return
+		}
+		t.client.Timeout = timeout
+		transport := t.client.Transport.(*http.Transport)
+		transport.DialContext = guardedDialFunc(&net.Dialer{Timeout: timeout}, blockedIP)
+		transport.TLSHandshakeTimeout = timeout
+		transport.ResponseHeaderTimeout = timeout
+	}
 }
 
 func (t *WebFetchTool) Name() string   { return ToolWebFetch }

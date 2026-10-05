@@ -603,9 +603,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 //
 // This is the product's own contribution, and it reaches the composition through
 // the tools and hooks plugins (preset routes cfg.Tools / cfg.Hooks to them).
-// Capabilities that own BOTH a tool and a hook — the run plan, the sandbox
-// guard — are plugins of their own instead, so neither half can be wired without
-// the other.
+// Run-scoped capabilities such as the plan remain extensions. Sandbox bindings
+// and argument guards belong to the host's tool execution configuration.
 //
 // scopeID is the RESOLVED agent scope (already defaulted to the project), passed
 // separately from p because a handler that writes agent-private state — the

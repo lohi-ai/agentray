@@ -54,18 +54,22 @@ The capabilities below are real, ejectable plugins:
 | Folder | Kind | What it does | Ejecting it means |
 |---|---|---|---|
 | [`memory`](memory/) | Seam + tools | Cross-run recall + curation (`memory_recall`, `learn`, `memory_edit`) | Forgets between runs |
-| [`sandbox`](sandbox/) | Seam + guard | Isolation substrate + command injection guard | No untrusted code execution |
 | [`goal`](goal/) | Hybrid | Completion contract (`STATUS: DONE`) + `update_goal` tool | Runs stop when they like |
-The hybrids (`goal` and `sandbox`) install a recorded decision and its enforcement
-together so the composition cannot express the half-wired failure mode:
+
+The goal hybrid installs a recorded decision and its enforcement together:
 
 - [`goal`](goal/) claims the goal seam (the loop persists the condition to the durable
   log and recovers it on resume) **and** adds the gate as an extension. The state
   is core's because only the loop may write the log; the policy — contract,
   sentinel, nudge, stall breaker — is entirely in the plugin.
-- [`sandbox`](sandbox/) claims the substrate seam **and** installs the guard that
-  reads what is sent into it, at `PriorityGate`. A backend wired with nothing
-  inspecting its arguments is a shell with no one watching.
+
+Sandbox and credentials are tool execution infrastructure, not agent plugins.
+The host binds a sandbox backend to the tools that use it and installs any
+argument guard through `Hooks.Before`. `Config.Env.Credentials` supplies the
+executor's secret resolver; `runToolCall` invokes it after permission checks and
+before execution, retaining placeholders in the argument trace. `Env.Sandbox`
+only records the backend for diagnostics; setting it does not isolate a tool.
+There are no separate sandbox/credentials registry seams.
 
 Tracing uses the shared `telemetry` context supplied to `RunNative` (or carried
 with `telemetry.WithContext`). It is not an ejectable agent capability.

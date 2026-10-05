@@ -192,7 +192,7 @@ type SandboxLimits struct {
 	MemoryMB       int     // 0 = backend default
 	CPUs           float64 // 0 = backend default
 	PidsLimit      int     // 0 = backend default
-	TimeoutSeconds float64 // 0 = backend default; hard-kill after this elapses
+	TimeoutSeconds float64 // 0 = backend default; negative disables the HostSandbox deadline; positive hard-kills after this elapses
 }
 
 // SandboxResult is the captured outcome of a sandboxed execution.

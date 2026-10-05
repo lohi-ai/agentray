@@ -419,6 +419,12 @@ type Plugin struct {
 	// all. One Store per run; sharing one across concurrent runs would let two
 	// agents overwrite each other's checklist.
 	Store *Store
+	// CheckCompletion asks the model to resolve pending/in_progress steps before
+	// accepting a normal finish. Explicitly blocked or abandoned steps may remain.
+	CheckCompletion bool
+	// MaxCompletionNudges optionally bounds repair attempts. Nonpositive means
+	// unlimited. Exhaustion stops as todo_incomplete, never successful completion.
+	MaxCompletionNudges int
 }
 
 // With builds the plugin around a store.
@@ -437,7 +443,35 @@ func (p Plugin) Register(r *agentcore.Registry) error {
 	return nil
 }
 
-type runPlan struct{ store *Store }
+type runPlan struct {
+	store               *Store
+	checkCompletion     bool
+	maxCompletionNudges int
+}
+
+func (r *runPlan) TurnStopping(_ context.Context, info agentcore.StopInfo) agentcore.StopDecision {
+	if !r.checkCompletion {
+		return agentcore.StopDecision{}
+	}
+	unfinished := false
+	for _, item := range r.store.List() {
+		if item.Status == StatusPending || item.Status == StatusInProgress {
+			unfinished = true
+			break
+		}
+	}
+	if !unfinished {
+		return agentcore.StopDecision{}
+	}
+	if r.maxCompletionNudges > 0 && info.Attempt >= r.maxCompletionNudges {
+		return agentcore.StopDecision{StopReason: "todo_incomplete"}
+	}
+	return agentcore.StopDecision{
+		Continue: true,
+		Inject:   []agentcore.Message{{Role: agentcore.RoleUser, Content: "Your plan still has pending or in_progress steps. Continue the remaining work and verify results before marking them completed. If you cannot proceed, mark the affected steps blocked and explain the dependency; use abandoned only for explicitly dropped work. Do not mark steps completed just to finish.\n" + r.store.Render()}},
+		Note:     "Resolving unfinished plan steps before finishing.",
+	}
+}
 
 func (*runPlan) Name() string { return "todo" }
 func (r *runPlan) Tools() []agentcore.Tool {
@@ -494,7 +528,7 @@ func (p Plugin) BeginRun(ctx context.Context, info agentcore.RunInfo) (agentcore
 			store.Set(items)
 		}
 	}
-	return &runPlan{store: store}, nil
+	return &runPlan{store: store, checkCompletion: p.CheckCompletion, maxCompletionNudges: p.MaxCompletionNudges}, nil
 }
 
 // planFromLog folds the log down to the plan in force: the last update_plan call

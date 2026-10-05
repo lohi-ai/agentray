@@ -39,7 +39,7 @@ func nativeConsolidator(provider *ai.FallbackProvider, info agentcore.RunInfo) C
 					if err != nil {
 						return err
 					}
-					if projected.Usage != nil {
+					if projected.Usage != nil && info.Agent != nil {
 						info.Agent.AddChildUsage(*projected.Usage)
 					}
 				}

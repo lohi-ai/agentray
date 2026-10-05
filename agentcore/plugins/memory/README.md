@@ -117,3 +117,19 @@ Children, parked, failed and aborted runs do not consolidate. This is independen
 of `learn`/`memory_edit`; omitting consolidation leaves existing behavior intact.
 Soot's Bolt adapter supplies scoped durable pending evidence, snapshot checks,
 idempotent commits and retained revision history.
+
+### Deferred host worker
+
+Supply `Plugin.Worker` (or `preset.Options.MemoryWorker` together with
+`ConsolidateMemory`) to stage evidence during finalization and defer the model
+pass. Construct one `NewConsolidationWorker(capacity)` per host, call `Run(ctx)`
+once, and cancel/join it before closing stores. Scope IDs must identify the same
+memory store throughout this worker's lifetime. The queue coalesces waiting
+scopes, runs one pass at a time and bounds each pass to 30 seconds. In-flight
+work may have one additional queued pass when new evidence arrives.
+
+Queue overflow, shutdown and model failures retain durable pending evidence for
+the next successful run. The worker does not discover stored scopes on startup.
+Native background usage is recorded through the worker context's telemetry;
+it never mutates the completed agent's usage or goal budget. With no worker,
+AgentCore retains its synchronous consolidation contract for existing consumers.
