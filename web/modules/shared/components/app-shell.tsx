@@ -120,6 +120,8 @@ export type AppShellProps = {
   hideRelated?: boolean;
   /** Hand the content row to the child untouched — it owns its own scrolling. */
   bleed?: boolean;
+  /** Opt into the scoped lohi evidence token bridge without changing callers. */
+  appearance?: 'lohi-evidence';
   children: ReactNode;
 };
 
@@ -139,6 +141,7 @@ export function AppShell({
   tabs,
   aside,
   hideRelated = false,
+  appearance,
 }: AppShellProps) {
   const pathname = usePathname() ?? '';
   // Self-host never renders Plans: a `docker compose up` operator has no plan
@@ -216,7 +219,7 @@ export function AppShell({
     : null;
 
   return (
-    <>
+    <div className={appearance === 'lohi-evidence' ? 'lohi-evidence' : undefined}>
       {/* First tab stop on every page. Without it a keyboard user walks all
           eleven nav items before reaching the content, on every navigation. */}
       <a href="#main-content" className="skip-to-content">Skip to content</a>
@@ -291,6 +294,6 @@ export function AppShell({
           </div>
         </div>
       ) : null}
-    </>
+    </div>
   );
 }

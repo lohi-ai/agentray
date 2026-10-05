@@ -1,0 +1,75 @@
+ok  	github.com/lohi-ai/agentray/agentcore	1.353s
+ok  	github.com/lohi-ai/agentray/agentcore/engine	2.601s
+--- SKIP: TestReal_CreativeLandingPage (0.00s)
+--- SKIP: TestReal_ToolCall_And_WebFetch (0.00s)
+--- SKIP: TestReal_SteeringMidRun (0.00s)
+--- SKIP: TestReal_TodoPlanSurvivesLongSession (0.00s)
+--- SKIP: TestReal_SkillUse (0.00s)
+ok  	github.com/lohi-ai/agentray/agentcore/integration	0.936s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/advisor	0.487s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/ask	0.487s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/finishguard	0.496s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/goal	0.476s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/jobs	1.492s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/memory	0.465s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/observe	0.491s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/preset	0.463s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/repeatguard	0.496s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/sandbox	0.495s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/sessionquery	0.444s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/spill	0.465s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/subagent	0.518s
+ok  	github.com/lohi-ai/agentray/agentcore/plugins/todo	0.499s
+ok  	github.com/lohi-ai/agentray/ai	8.909s
+--- SKIP: TestBench_AgentcoreSolvesProblem (0.00s)
+--- SKIP: TestBench_AgentcoreCollisionSimCompaction (0.00s)
+--- SKIP: TestBench_AgentcoreTuTienWeb (0.00s)
+--- SKIP: TestBench_AgentcoreIdleGame (0.00s)
+--- SKIP: TestBench_AgentcoreLiteTTS (0.00s)
+ok  	github.com/lohi-ai/agentray/bench	0.534s
+?   	github.com/lohi-ai/agentray/bench/cmd/benchjudge	[no test files]
+ok  	github.com/lohi-ai/agentray/bench/judge	0.473s
+ok  	github.com/lohi-ai/agentray/cmd/cli	0.971s
+ok  	github.com/lohi-ai/agentray/cmd/server	5.057s
+?   	github.com/lohi-ai/agentray/internal/agentcoretest	[no test files]
+--- SKIP: TestQueryCapacityHTTPRefusalEnvelope (0.00s)
+ok  	github.com/lohi-ai/agentray/internal/app	9.999s
+ok  	github.com/lohi-ai/agentray/internal/channels	0.411s
+ok  	github.com/lohi-ai/agentray/internal/dataplane	0.523s
+ok  	github.com/lohi-ai/agentray/internal/dataplane/alerting	0.963s
+--- SKIP: TestExportViewRestrictedDiscoveryAndKeyValidation (0.00s)
+ok  	github.com/lohi-ai/agentray/internal/dataplane/connector	8.360s
+ok  	github.com/lohi-ai/agentray/internal/dataplane/experiments	1.227s
+ok  	github.com/lohi-ai/agentray/internal/dataplane/findings	0.925s
+--- SKIP: TestDataEnvelopePostgresWatchdogActiveQueryNegativeControl (0.00s)
+--- SKIP: TestDataEnvelope (0.00s)
+ok  	github.com/lohi-ai/agentray/internal/dataplane/ingest	21.949s
+?   	github.com/lohi-ai/agentray/internal/dataplane/querytest	[no test files]
+--- SKIP: TestQueryCapacityApprovedCorpus (0.00s)
+ok  	github.com/lohi-ai/agentray/internal/dataplane/store	45.477s
+ok  	github.com/lohi-ai/agentray/internal/dataplane/usecase	2.420s
+ok  	github.com/lohi-ai/agentray/internal/jsonjs	0.828s
+ok  	github.com/lohi-ai/agentray/internal/oauth	1.957s
+--- SKIP: TestReal_Advisor_CatchesAnAnswerTheTranscriptContradicts (0.00s)
+--- SKIP: TestReal_Advisor_StaysSilentOnACleanRun (0.00s)
+--- SKIP: TestReal_Advisor_HonorsTheOperatorsReviewPriorities (0.00s)
+--- SKIP: TestReal_Reflection_ProposesImprovementFromRun (0.00s)
+ok  	github.com/lohi-ai/agentray/internal/runtime	10.263s
+?   	github.com/lohi-ai/agentray/internal/runtime/authoring	[no test files]
+?   	github.com/lohi-ai/agentray/internal/shared	[no test files]
+ok  	github.com/lohi-ai/agentray/internal/shared/config	0.476s
+ok  	github.com/lohi-ai/agentray/internal/shared/credential	0.404s
+ok  	github.com/lohi-ai/agentray/internal/shared/cronx	0.434s
+ok  	github.com/lohi-ai/agentray/internal/shared/mcpclient	0.498s
+ok  	github.com/lohi-ai/agentray/internal/shared/opcore	0.472s
+ok  	github.com/lohi-ai/agentray/internal/workloads	0.220s
+?   	github.com/lohi-ai/agentray/internal/workloads/operator	[no test files]
+--- SKIP: TestBrowserUseAgent_ControlsBrowser_Faux (0.76s)
+--- SKIP: TestBrowserUseAgent_RealProvider_DrivesBrowser (0.00s)
+--- SKIP: TestComputerUseAgent_InstallAndGenerateDocument_Faux (0.15s)
+--- SKIP: TestComputerUseAgent_RealProvider_GeneratesDocument (0.00s)
+--- SKIP: TestEvalDockerImageRunsPythonAndJavaScriptKernels (0.16s)
+--- SKIP: TestReal_CredentialedToolCall (0.00s)
+ok  	github.com/lohi-ai/agentray/sandbox	18.097s
+ok  	github.com/lohi-ai/agentray/telemetry	0.564s
+ok  	github.com/lohi-ai/agentray/telemetry/testing	0.434s

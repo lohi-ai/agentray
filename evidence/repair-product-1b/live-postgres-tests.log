@@ -1,0 +1,28 @@
+=== RUN   TestAgentMemoryFoldInLive
+--- PASS: TestAgentMemoryFoldInLive (0.02s)
+=== RUN   TestAgentMemoryUpdateLive
+--- PASS: TestAgentMemoryUpdateLive (0.01s)
+=== RUN   TestRecommendationDedupeLive
+--- PASS: TestRecommendationDedupeLive (0.02s)
+=== RUN   TestDemoSignupCreatesOnlyTheCallersOwnProject
+--- PASS: TestDemoSignupCreatesOnlyTheCallersOwnProject (0.10s)
+=== RUN   TestDemoAbsentSignupGrantsNoExtraMembership
+--- PASS: TestDemoAbsentSignupGrantsNoExtraMembership (0.09s)
+=== RUN   TestDemoSignupJoinsTheSharedDemoAsViewer
+--- PASS: TestDemoSignupJoinsTheSharedDemoAsViewer (0.18s)
+=== RUN   TestDemoBackfillIsIdempotentAndNeverDowngrades
+--- PASS: TestDemoBackfillIsIdempotentAndNeverDowngrades (0.18s)
+=== RUN   TestDemoMisconfiguredIDDisablesTheDemoInsteadOfFailingBoot
+warn: demo project "not-a-uuid" not found, demo disabled: ERROR: invalid input syntax for type uuid: "not-a-uuid" (SQLSTATE 22P02)
+warn: demo project "00000000-0000-0000-0000-000000000000" not found, demo disabled: no rows in result set
+--- PASS: TestDemoMisconfiguredIDDisablesTheDemoInsteadOfFailingBoot (0.00s)
+=== RUN   TestDemoQuotaCountsPerUser
+--- PASS: TestDemoQuotaCountsPerUser (0.01s)
+=== RUN   TestDemoQuotaIsPerDay
+--- PASS: TestDemoQuotaIsPerDay (0.01s)
+=== RUN   TestDemoQuotaHoldsUnderConcurrency
+--- PASS: TestDemoQuotaHoldsUnderConcurrency (0.01s)
+=== RUN   TestRepairSeededChartsRewritesOnlyTheSeededQuery
+--- PASS: TestRepairSeededChartsRewritesOnlyTheSeededQuery (0.12s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/dataplane/store	1.706s

@@ -1,0 +1,6 @@
+{
+  "Replace": {
+    "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config/internal/runtime/live.go": "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config/evidence/repair-product-1c/after-live.go.txt",
+    "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config/internal/app/repair_live_probe_test.go": "/Users/long/workspace/lohi/kiem-lai/agentray/.babysit/worktrees/bs-ieppk70m_seed-lohi-evidence-pack-config/evidence/repair-product-1c/after-live-probe_test.go.txt"
+  }
+}

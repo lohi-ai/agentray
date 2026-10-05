@@ -2,9 +2,11 @@ package agentruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
@@ -55,10 +57,15 @@ type BuildParams struct {
 	// unavailable.
 	SourceRunner usecase.SourceRunner
 	RunID        string // links submitted recommendations to this run
-	// Trigger is the run trigger (chat | scheduled | manual). On a chat trigger
-	// submit_recommendation no longer ends the run, so the model still produces a
+	// Trigger is the run trigger (chat | scheduled | manual). Terminal operations
+	// stop unattended runs, while chat continues so the model can still produce a
 	// textual reply for the user instead of terminating silently.
 	Trigger string
+	// TerminalFollowupSkills opts a terminal operation into continued model
+	// execution, but only after the run successfully loads the configured skill.
+	// The map is operation name -> canonical advertised skill ID. Empty preserves
+	// the terminal boundary for every ordinary agent.
+	TerminalFollowupSkills map[string]string
 	// CompactionProvider + CompactionModel pin the in-loop compaction summary call
 	// to the agent's "compaction" task tier instead of borrowing the active rung.
 	// Both unset keeps agentcore's default (the active rung summarizes).
@@ -597,9 +604,8 @@ func Build(p BuildParams) (*agentcore.Agent, error) {
 // buildToolsAndHooks assembles the agent's ToolSet from the shared opcore/usecase
 // registry, bound to one project/run, plus the terminate hook. Every operation is
 // registered as a tool; the Policy (not the ToolSet) decides which the model is
-// shown. The terminate hook ends the run after a terminal op (submit_recommendation)
-// — except on a chat trigger, where the model must still reply to the user, so
-// the run continues past the recommendation instead of stopping silently.
+// shown. The terminate hook ends an unattended run after an operation explicitly
+// marked terminal. Chat continues so the model can still reply to the user.
 //
 // This is the product's own contribution, and it reaches the composition through
 // the tools and hooks plugins (preset routes cfg.Tools / cfg.Hooks to them).
@@ -621,9 +627,34 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 	tools := opcore.Tools(reg, cc)
 	terminal := opcore.TerminalNames(reg)
 	isChat := p.Trigger == "chat"
+	loadedFollowupSkills := map[string]bool{}
+	var loadedFollowupSkillsMu sync.Mutex
 
-	terminate := func(_ context.Context, call agentcore.ToolCall, result string, _ error) (string, bool) {
-		return result, !isChat && terminal[call.Name]
+	terminate := func(_ context.Context, call agentcore.ToolCall, result string, runErr error) (string, bool) {
+		if call.Name == "read_skill" && runErr == nil {
+			var in struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal([]byte(call.Arguments), &in) == nil {
+				if canonicalID, ok := canonicalSkillReadIdentity(p.Skills, in.ID); ok {
+					loadedFollowupSkillsMu.Lock()
+					loadedFollowupSkills[canonicalID] = true
+					loadedFollowupSkillsMu.Unlock()
+				}
+			}
+		}
+		if isChat || !terminal[call.Name] {
+			return result, false
+		}
+		if skillID := p.TerminalFollowupSkills[call.Name]; skillID != "" {
+			loadedFollowupSkillsMu.Lock()
+			loaded := loadedFollowupSkills[skillID]
+			loadedFollowupSkillsMu.Unlock()
+			if loaded {
+				return result, false
+			}
+		}
+		return result, true
 	}
 
 	ts := agentcore.NewToolSet(tools...)
@@ -643,4 +674,32 @@ func buildToolsAndHooks(p BuildParams, scopeID string) (*agentcore.ToolSet, agen
 		}
 	}
 	return ts, hooks
+}
+
+// canonicalSkillReadIdentity mirrors read_skill's accepted identifier rules:
+// trim the supplied token, match the advertised ID exactly, or match the skill
+// name case-insensitively. The returned token is always the installed skill's
+// canonical advertised identity, never the model-supplied alias.
+func canonicalSkillReadIdentity(skills []agentcore.Skill, supplied string) (string, bool) {
+	want := strings.TrimSpace(supplied)
+	if want == "" {
+		return "", false
+	}
+	for _, skill := range skills {
+		if !skill.Enabled {
+			continue
+		}
+		canonicalID := canonicalSkillIdentity(skill)
+		if canonicalID == want || strings.EqualFold(skill.Name, want) {
+			return canonicalID, true
+		}
+	}
+	return "", false
+}
+
+func canonicalSkillIdentity(skill agentcore.Skill) string {
+	if id := strings.TrimSpace(skill.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(skill.Name)
 }

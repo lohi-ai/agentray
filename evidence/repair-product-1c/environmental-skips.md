@@ -1,0 +1,3 @@
+# Full-suite environmental skips
+
+The serial `go test ./... -p 1 -count=1 -timeout=30m -v` run passed. Twenty-five tests skipped because this environment lacks external prerequisites: real provider credentials, restricted source database setup, approved capacity resources, or sandbox images. The eleven live PostgreSQL tests gated by `AGENTRAY_LIVE_PG` passed against the supplied disposable test database. The exact skip names and reasons are retained in `full-suite.log.gz`; the earlier ticket inventory at `evidence/repair-product-1b/environmental-skips.md` records the known prerequisite categories and details.

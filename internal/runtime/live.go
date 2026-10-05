@@ -33,6 +33,23 @@ type LiveRegistry struct {
 	sessions map[string]*liveRun
 }
 
+// LiveAuthority is the effective authority admitted for one run or control
+// request. Write access is derived by the HTTP boundary from the selected
+// credential policy and any request guards.
+type LiveAuthority struct {
+	CanWrite bool
+}
+
+// LiveControlResult distinguishes a missing run (callers may start a turn), a
+// live run the caller cannot control, and a successfully delivered control.
+type LiveControlResult uint8
+
+const (
+	LiveControlNotFound LiveControlResult = iota
+	LiveControlDenied
+	LiveControlDelivered
+)
+
 // liveRun is the live control surface of one in-flight run. projectID scopes
 // steering to the run's own project so a member of another project can't drive
 // it (mirroring explainSession). The channels are buffered so a push never blocks
@@ -41,6 +58,7 @@ type LiveRegistry struct {
 // the model loop while the terminal write still lands on the parent context.
 type liveRun struct {
 	projectID string
+	authority LiveAuthority
 	steer     chan agentcore.Message
 	followup  chan agentcore.Message
 	cancel    context.CancelCauseFunc
@@ -63,12 +81,13 @@ func NewLiveRegistry() *LiveRegistry {
 // the run's own stop handle, invoked by Cancel with ErrRunStopped; nil leaves the
 // session steerable but not stoppable. Returns nil only when sessionID is empty,
 // so callers can treat a nil registry/handle as "no live control" uniformly.
-func (r *LiveRegistry) register(sessionID, projectID string, cancel context.CancelCauseFunc) *liveRun {
+func (r *LiveRegistry) register(sessionID, projectID string, authority LiveAuthority, cancel context.CancelCauseFunc) *liveRun {
 	if r == nil || sessionID == "" {
 		return nil
 	}
 	lr := &liveRun{
 		projectID: projectID,
+		authority: authority,
 		steer:     make(chan agentcore.Message, liveQueueDepth),
 		followup:  make(chan agentcore.Message, liveQueueDepth),
 		cancel:    cancel,
@@ -108,46 +127,55 @@ func (r *LiveRegistry) lookup(projectID, sessionID string) (*liveRun, bool) {
 // the model reasons on its next turn (agentcore's steering queue). Returns false
 // when no run is live for the session (the caller then starts a normal turn) or
 // the project doesn't match. A full queue drops the message rather than blocking.
-func (r *LiveRegistry) Steer(projectID, sessionID, message string) bool {
+func (r *LiveRegistry) Steer(projectID, sessionID, message string, authority LiveAuthority) LiveControlResult {
 	lr, ok := r.lookup(projectID, sessionID)
 	if !ok {
-		return false
+		return LiveControlNotFound
+	}
+	if lr.authority.CanWrite && !authority.CanWrite {
+		return LiveControlDenied
 	}
 	select {
 	case lr.steer <- agentcore.Message{Role: agentcore.RoleUser, Content: message}:
-		return true
+		return LiveControlDelivered
 	default:
-		return true // queue full: next-turn delivery isn't guaranteed, treat as accepted
+		return LiveControlDelivered // queue full: next-turn delivery isn't guaranteed, treat as accepted
 	}
 }
 
 // FollowUp queues a message that continues the run after it produces its next
 // final answer, instead of ending it (agentcore's follow-up queue). Returns false
 // when no run is live for the session or the project doesn't match.
-func (r *LiveRegistry) FollowUp(projectID, sessionID, message string) bool {
+func (r *LiveRegistry) FollowUp(projectID, sessionID, message string, authority LiveAuthority) LiveControlResult {
 	lr, ok := r.lookup(projectID, sessionID)
 	if !ok {
-		return false
+		return LiveControlNotFound
+	}
+	if lr.authority.CanWrite && !authority.CanWrite {
+		return LiveControlDenied
 	}
 	select {
 	case lr.followup <- agentcore.Message{Role: agentcore.RoleUser, Content: message}:
-		return true
+		return LiveControlDelivered
 	default:
-		return true
+		return LiveControlDelivered
 	}
 }
 
 // QueueInput persists a conversation input before exposing it to a live run.
 // If the final drain already passed, the durable input remains pending for the
 // next turn. persist is called only when this session belongs to a live run.
-func (r *LiveRegistry) QueueInput(projectID, sessionID string, followup bool, persist func() (agentcore.Message, error)) (bool, error) {
+func (r *LiveRegistry) QueueInput(projectID, sessionID string, followup bool, authority LiveAuthority, persist func() (agentcore.Message, error)) (LiveControlResult, error) {
 	lr, ok := r.lookup(projectID, sessionID)
 	if !ok {
-		return false, nil
+		return LiveControlNotFound, nil
+	}
+	if lr.authority.CanWrite && !authority.CanWrite {
+		return LiveControlDenied, nil
 	}
 	input, err := persist()
 	if err != nil {
-		return false, err
+		return LiveControlNotFound, err
 	}
 	queue := lr.steer
 	if followup {
@@ -157,7 +185,7 @@ func (r *LiveRegistry) QueueInput(projectID, sessionID string, followup bool, pe
 	case queue <- input:
 	default:
 	}
-	return true, nil
+	return LiveControlDelivered, nil
 }
 
 // Cancel stops an in-flight run outright, so Stop is a server-side fact rather

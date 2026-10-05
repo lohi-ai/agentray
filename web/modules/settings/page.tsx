@@ -31,6 +31,7 @@ export function SettingsPage() {
 
   return (
     <AppShell
+      appearance={tab === 'Data connectors' ? 'lohi-evidence' : undefined}
       title="Settings"
       sub="Workspace, people, AI key, and how events get in."
       tabs={<PageTabs tabs={TABS.map((t) => ({ id: t, label: t }))} value={tab} onChange={setTab} />}

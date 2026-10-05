@@ -110,6 +110,7 @@ in the stream, then write the query against reality.`,
    with ` + "`json_extract_string(properties, '$.key')`" + ` (never JSON_EXTRACT),
    query the ` + "`events`" + ` table, and keep every query SELECT-only.` + analystGuardrails,
 		Skills: []Skill{
+			LohiEvidenceSkill(),
 			{
 				Name:        "write-sql",
 				Description: "Turn a plain-language question into a correct, runnable DuckDB query over the events table.",
@@ -1457,6 +1458,8 @@ Each scheduled run produces one digest:
 - Never bury the lede in a table; lead with what changed and why it matters.
 - Never write to the event store — all SQL is SELECT-only.` + analystGuardrails,
 		Skills: []Skill{
+			LohiEvidenceSkill(),
+			LohiRevenueObserverSkill(),
 			{
 				Name:        "period-digest",
 				Description: "Compile a period's trend, funnel, and retention into a short, deliverable readout with deltas vs the prior period.",

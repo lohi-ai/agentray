@@ -421,19 +421,10 @@ func TestNoRouteResolvesThroughTheReadResolver(t *testing.T) {
 	// 1. The census, over the package source rather than over registrations —
 	// because a route-shaped scan cannot see a call a helper hides.
 	//
-	// projectFromRequest has exactly two legitimate owners and they are named
-	// here. The first is the GET /api/projects handler, asserted by route
-	// identity below. The second is authProject, the resolver of the modern
-	// surface — agent, team, alert, connector, validation, operations — whose
-	// routes authorize at the operation or store layer rather than at the
-	// route; those routes are not the legacy store-direct surface this ticket
-	// closes, and the classes their writes still owe are the residual recorded
-	// in the ticket evidence.
-	//
-	// What the census guarantees is that no THIRD owner appears: a new helper
-	// that wraps the admission-only resolver, or a legacy route that inlines
-	// it, changes this set and fails here however it is registered — which is
-	// exactly how the modern surface's own resolver was found.
+	// GET /api/projects is the only admission-only caller. authProject retains
+	// the selected principal through principalAndProject so the chat runtime
+	// can enforce its grants independently of ambient membership. No helper
+	// may discard the principal through projectFromRequest.
 	var helperOwners []string
 	routeOwners := map[string]bool{}
 	for _, file := range packageSources(t) {
@@ -456,8 +447,8 @@ func TestNoRouteResolvesThroughTheReadResolver(t *testing.T) {
 	if len(routeOwners) != 1 || !routeOwners[http.MethodGet+" /api/projects"] {
 		t.Errorf("projectFromRequest is called from the routes %v; the only route allowed to skip the class decision is GET /api/projects", keys(routeOwners))
 	}
-	if len(helperOwners) != 1 || helperOwners[0] != "authProject" {
-		t.Errorf("projectFromRequest is called from the helpers %v; the only helper allowed to is authProject, the modern surface's resolver. Every legacy route declares its class through authorizedProject",
+	if len(helperOwners) != 0 {
+		t.Errorf("projectFromRequest is called from the helpers %v; helpers must retain the principal or declare their access class",
 			helperOwners)
 	}
 

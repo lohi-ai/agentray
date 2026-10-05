@@ -411,6 +411,36 @@ export type Chart = {
   updated_at: string;
 };
 
+export type ServingSourceWatermark = {
+  connector_id: string;
+  table: string;
+  generation: string | null;
+  capture_started_at: string | null;
+  capture_finished_at: string | null;
+  landed_at: string | null;
+};
+
+export type QueryMeta = {
+  query_ref: string;
+  query_digest: string;
+  executed_at: string;
+  serving_data_watermark: {
+    event_landed_at: string | null;
+    sources: ServingSourceWatermark[];
+    total_sources: number;
+    sources_truncated: boolean;
+  } | null;
+  result_completeness: 'complete' | 'bounded' | 'unknown';
+  truncated: boolean | null;
+  availability_reason: string | null;
+};
+
+export type SQLResult = {
+  rows: Array<Record<string, unknown>>;
+  generated_at: string;
+  meta?: QueryMeta;
+};
+
 export type BoardTile = {
   key: string;
   title?: string;
@@ -1091,6 +1121,18 @@ export type ConnectorRun = {
   started_at?: string | null;
   finished_at?: string | null;
 };
+export type SourceReadinessState = 'not_configured' | 'syncing' | 'ready' | 'stale' | 'incomplete' | 'error';
+export type SourceReadiness = {
+  state: SourceReadinessState;
+  published_at: string | null;
+  landed_at: string | null;
+  queryable_at: string | null;
+  generation: string | null;
+  capture_started_at: string | null;
+  capture_finished_at: string | null;
+  reason: string | null;
+  last_complete_at: string | null;
+};
 export type DataConnector = {
   id: string;
   project_id: string;
@@ -1110,6 +1152,7 @@ export type ConnectorSync = {
   source_table: string;
   key_column: string;
   cursor_column: string;
+  sync_mode: '' | 'incremental' | 'snapshot';
   schedule_cron: string;
   enabled: boolean;
   cursor: string;
@@ -1140,6 +1183,9 @@ export type ConnectorSync = {
   // source_status operation — queued/running rows are what the UI polls and
   // offers to cancel.
   latest_run?: ConnectorRun | null;
+  // C2 evidence for the store serving this read. Unknown fields are null, not
+  // zero, and a successful source run is not itself proof of queryability.
+  readiness?: SourceReadiness | null;
 };
 
 // ConnectorSyncInput is the operator-editable subset of a sync config — the
@@ -1149,6 +1195,7 @@ export type ConnectorSyncInput = {
   source_table: string;
   key_column: string;
   cursor_column: string;
+  sync_mode?: 'incremental' | 'snapshot';
   schedule_cron: string;
   enabled: boolean;
   join_key: string;
@@ -2284,7 +2331,7 @@ export class AgentRayAPI {
   }
 
   runSQL(sql: string) {
-    return this.post<{ rows: Array<Record<string, unknown>>; generated_at: string }>('/api/sql/run', { sql });
+    return this.post<SQLResult>('/api/sql/run', { sql });
   }
 
   dashboards() {
@@ -2481,11 +2528,11 @@ export class AgentRayAPI {
   // list carries each sync's latest durable run receipt — the same rows the
   // agent and CLI see, including live queued/running state.
   async connectorSyncs(connectorID: string) {
-    const res = await this.callOp<{ syncs?: { sync: ConnectorSync; latest_run?: ConnectorRun }[] }>(
+    const res = await this.callOp<{ syncs?: { sync: ConnectorSync; latest_run?: ConnectorRun; readiness?: SourceReadiness | null }[] }>(
       'source_status',
       { connector_id: connectorID },
     );
-    return { syncs: (res.syncs ?? []).map((s) => ({ ...s.sync, latest_run: s.latest_run ?? null })) };
+    return { syncs: (res.syncs ?? []).map((s) => ({ ...s.sync, latest_run: s.latest_run ?? null, readiness: s.readiness ?? null })) };
   }
 
   createConnectorSync(connectorID: string, input: ConnectorSyncInput) {

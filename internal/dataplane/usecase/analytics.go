@@ -2,11 +2,14 @@ package usecase
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"
@@ -252,7 +255,12 @@ type runSQLInput struct {
 }
 
 type runSQLOutput struct {
-	Rows []map[string]any `json:"rows"`
+	Rows []map[string]any  `json:"rows"`
+	Meta storage.QueryMeta `json:"meta"`
+}
+
+type runSQLWithMetaRepo interface {
+	RunSQLWithMeta(context.Context, string, string) ([]map[string]any, storage.QueryMeta, error)
 }
 
 func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
@@ -276,10 +284,12 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			"not `referrer_channel`: group by `utm_source` (or coalesce(nullif(utm_source,''), " +
 			"referrer_channel)) to answer 'which campaign/source drove this', and never read the " +
 			"tags back out of `properties` — the columns are the canonical copy. " +
-			"Synced external data (data connectors) lives in `external_rows`: filter by table_name (the source " +
+			"Synced external data (data connectors) lives in `external_rows`: filter by BOTH connector_id and " +
+			"table_name (the source " +
 			"table, e.g. 'public.users' shortened to 'users' when in public), read fields with " +
 			"json_extract_string(data, '$.column') (json_extract for numbers); row_key is the source row's " +
-			"key and synced_at the landing time. Rows are already deduplicated per (table_name, row_key) and " +
+			"key and synced_at the landing time. Rows are already deduplicated per " +
+			"(project_id, connector_id, table_name, row_key) and " +
 			"each row is CURRENT state, not history — a re-sync replaces the row, it does not append. " +
 			"Rows the source marked deleted (the sync's soft-delete column) are already excluded; rows the " +
 			"source hard-deleted without a mark are NOT — a count here can overstate the source. " +
@@ -293,11 +303,24 @@ func runSQL() opcore.Operation[runSQLInput, runSQLOutput] {
 			if err != nil {
 				return runSQLOutput{}, err
 			}
+			if repo, ok := d.Repo.(runSQLWithMetaRepo); ok {
+				rows, meta, err := repo.RunSQLWithMeta(ctx, cc.ProjectID, in.SQL)
+				if err != nil {
+					return runSQLOutput{}, err
+				}
+				return runSQLOutput{Rows: rows, Meta: meta}, nil
+			}
 			rows, err := d.Repo.RunSQL(ctx, cc.ProjectID, in.SQL) // read-only enforced in storage
 			if err != nil {
 				return runSQLOutput{}, err
 			}
-			return runSQLOutput{Rows: rows}, nil
+			sum := sha256.Sum256([]byte(cc.ProjectID + "\x00" + in.SQL))
+			reason := "query_evidence_unavailable"
+			return runSQLOutput{Rows: rows, Meta: storage.QueryMeta{
+				QueryRef: uuid.NewString(), QueryDigest: hex.EncodeToString(sum[:]),
+				ExecutedAt: time.Now().UTC(), ResultCompleteness: storage.ResultUnknown,
+				AvailabilityReason: &reason,
+			}}, nil
 		},
 	}
 }

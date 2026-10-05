@@ -55,6 +55,7 @@ SELECT a.id::text, a.project_id::text, a.name, a.slug, a.is_default, a.enabled,
        coalesce(bool_or(r.cost_unpriced), false) AS cost_unpriced,
        max(r.started_at) AS last_run_at,
        coalesce((array_agg(r.summary ORDER BY r.started_at DESC) FILTER (WHERE r.status = 'error'))[1], '') AS last_error
+FROM agents a
 LEFT JOIN agent_runs r ON coalesce(r.agent_id, r.project_id) = a.id`
 
 const monitorGroupBy = `

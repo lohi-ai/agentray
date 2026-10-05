@@ -1,0 +1,79 @@
+package app
+import (
+ "context"
+ "fmt"
+ "net/http"
+ "net/http/httptest"
+ "strings"
+ "testing"
+ "time"
+ "github.com/labstack/echo/v4"
+ runtime "github.com/lohi-ai/agentray/internal/runtime"
+ "github.com/lohi-ai/agentray/internal/shared/opcore"
+)
+
+func TestReviewCredentialMembershipMatrix(t *testing.T) {
+ s:=openRequiredAppTestStore(t); ctx:=context.Background()
+ boot,err:=s.CreateAccount(ctx,fmt.Sprintf("review-matrix-%d@test.local",time.Now().UnixNano()),"Owner","password123","ws","proj"); if err!=nil {t.Fatal(err)}
+ other,err:=s.CreateAccount(ctx,fmt.Sprintf("review-member-%d@test.local",time.Now().UnixNano()),"Member","password123","ws","proj"); if err!=nil {t.Fatal(err)}
+ _,ownerToken,err:=s.CreateUserSession(ctx,boot.User.ID,time.Hour); if err!=nil {t.Fatal(err)}
+ _,memberToken,err:=s.CreateUserSession(ctx,other.User.ID,time.Hour); if err!=nil {t.Fatal(err)}
+ _,read,err:=s.CreateProjectCredential(ctx,boot.User.ID,boot.Project.ID,"read",[]string{"analytics:read","sources:read"}); if err!=nil {t.Fatal(err)}
+ _,write,err:=s.CreateProjectCredential(ctx,boot.User.ID,boot.Project.ID,"write",[]string{"dashboards:write"}); if err!=nil {t.Fatal(err)}
+ revoked,revSecret,err:=s.CreateProjectCredential(ctx,boot.User.ID,boot.Project.ID,"revoked",[]string{"dashboards:write"}); if err!=nil {t.Fatal(err)}
+ if err=s.RevokeProjectCredential(ctx,boot.User.ID,boot.Project.ID,revoked.ID); err!=nil {t.Fatal(err)}
+ for _,membership:=range []string{"none","member","admin","removed"} {
+  if membership=="member" { _,err=s.AddWorkspaceMemberByEmail(ctx,boot.User.ID,boot.Project.WorkspaceID,other.User.Email,"member") }
+  if membership=="admin" { _,err=s.UpdateWorkspaceMemberRole(ctx,boot.User.ID,boot.Project.WorkspaceID,other.User.ID,"admin") }
+  if membership=="removed" { err=s.RemoveWorkspaceMember(ctx,boot.User.ID,boot.Project.WorkspaceID,other.User.ID) }
+  if err!=nil {t.Fatal(err)}
+  for _,guarded:=range []bool{false,true} { for _,path:=range []string{"/api/agent/chat","/api/agent/chat/answer","/api/agent/conversations/:id/messages"} {
+   for _,tc:=range []struct{name,cookie,bearer,key,query string; status int; readOnly bool; kind opcore.CredentialKind}{
+    {"owner",ownerToken,"","",boot.Project.ID,204,false,opcore.CredSession},
+    {"owner_restricted",ownerToken,read,"",boot.Project.ID,204,true,opcore.CredManagement},
+    {"bearer_over_stale_key_and_foreign_query",ownerToken,read,"invalid",other.Project.ID,204,true,opcore.CredManagement},
+    {"author_over_capture_key",ownerToken,write,boot.Project.APIKey,boot.Project.ID,204,false,opcore.CredManagement},
+    {"capture_cannot_borrow_owner",ownerToken,"",boot.Project.APIKey,boot.Project.ID,403,true,""},
+    {"invalid_bearer_cannot_borrow_owner",ownerToken,"agm_invalid","",boot.Project.ID,401,true,""},
+    {"revoked_bearer_cannot_borrow_owner",ownerToken,revSecret,"",boot.Project.ID,401,true,""},
+    {"missing_cookie", "",write,"",boot.Project.ID,401,true,""},
+    {"invalid_cookie","invalid",write,"",boot.Project.ID,401,true,""},
+    {"other_cookie_read",memberToken,read,"",boot.Project.ID,0,true,opcore.CredManagement},
+    {"other_cookie_write",memberToken,write,"",boot.Project.ID,0,false,opcore.CredManagement},
+   } {
+    t.Run(membership+fmt.Sprint(guarded)+path+tc.name,func(t *testing.T){
+     want:=tc.status; if want==0 {want=204; if membership=="none"||membership=="removed" {want=403}}
+     e:=echo.New(); if guarded {e.Use(demoWriteGuard(s,nil))}
+     e.POST(path,func(c echo.Context) error {a,p,e:=authProject(c,s); if e!=nil{return e}; if p.ID!=boot.Project.ID {t.Errorf("project=%s",p.ID)}; if a.Principal.Kind!=tc.kind {t.Errorf("kind=%s",a.Principal.Kind)}; if a.Principal.Kind!=opcore.CredSession&&p.APIKey!="" {t.Error("capture key leaked")}; if got:=agentRunReadOnly(c,a);got!=tc.readOnly {t.Errorf("readonly=%v want=%v",got,tc.readOnly)}; return c.NoContent(204)})
+     req:=httptest.NewRequest("POST",strings.ReplaceAll(path,":id","conversation")+"?project_id="+tc.query,nil)
+     if tc.cookie!="" {req.AddCookie(&http.Cookie{Name:sessionCookieName,Value:tc.cookie})}; if tc.bearer!="" {req.Header.Set("Authorization","Bearer "+tc.bearer)}; if tc.key!="" {req.Header.Set("X-API-Key",tc.key)}
+     rec:=httptest.NewRecorder();e.ServeHTTP(rec,req);if rec.Code!=want {t.Fatalf("status=%d want=%d body=%s",rec.Code,want,rec.Body.String())}
+    })
+   }
+  }}
+ }
+}
+
+// This registers the same live queues as Runner.execute; the only bridge exposes
+// registration/draining to the app test. Routes and authorization are unmodified.
+func TestReviewRestrictedCredentialCannotSteerAuthorRun(t *testing.T) {
+ s:=openRequiredAppTestStore(t);ctx:=context.Background()
+ boot,err:=s.CreateAccount(ctx,fmt.Sprintf("review-live-%d@test.local",time.Now().UnixNano()),"Owner","password123","ws","proj");if err!=nil{t.Fatal(err)}
+ _,cookie,err:=s.CreateUserSession(ctx,boot.User.ID,time.Hour);if err!=nil{t.Fatal(err)}
+ _,read,err:=s.CreateProjectCredential(ctx,boot.User.ID,boot.Project.ID,"read",[]string{"analytics:read","sources:read"});if err!=nil{t.Fatal(err)}
+ conv,err:=s.CreateConversation(ctx,boot.User.ID,boot.Project.ID,"","review");if err!=nil{t.Fatal(err)}
+ for _,conversation:=range []bool{false,true} {for _,sse:=range []bool{false,true} {for _,mode:=range []string{"steer","followup"} {
+  t.Run(fmt.Sprintf("conversation=%v/sse=%v/%s",conversation,sse,mode),func(t *testing.T){
+   live:=runtime.NewLiveRegistry();steer,follow:=live.ReviewRegister(conv.ID,boot.Project.ID)
+   e:=echo.New();e.Use(demoWriteGuard(s,nil));registerAgentRoutes(e,s,nil,nil,runtime.ToolBuildContext{},live,false,nil)
+   path:="/api/agent/chat";if conversation{path="/api/agent/conversations/"+conv.ID+"/messages"}
+   payload:=fmt.Sprintf(`{"session_id":%q,"mode":%q,"message":"create a dashboard using your available author tools"}`,conv.ID,mode)
+   req:=httptest.NewRequest("POST",path+"?project_id="+boot.Project.ID,strings.NewReader(payload));req.Header.Set("Content-Type","application/json");req.Header.Set("Authorization","Bearer "+read);req.AddCookie(&http.Cookie{Name:sessionCookieName,Value:cookie});if sse{req.Header.Set("Accept","text/event-stream")}
+   rec:=httptest.NewRecorder();e.ServeHTTP(rec,req)
+   messages:=steer(ctx);if mode=="followup"{messages=follow(ctx)}
+   t.Logf("status=%d queued=%d response=%s",rec.Code,len(messages),rec.Body.String())
+   if len(messages)>0 {t.Errorf("restricted management credential injected %d message(s) into existing author's run before ReadOnly decision",len(messages))}
+  })
+ }}}
+}
+

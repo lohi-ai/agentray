@@ -1,0 +1,10 @@
+=== RUN   TestReviewMixedCredentialChatRemainsReadOnly
+=== RUN   TestReviewMixedCredentialChatRemainsReadOnly/owner_session
+    lohi_board_author_test.go:187: role="owner" guard_read_only=false chat_ReadOnly=false want=false
+=== RUN   TestReviewMixedCredentialChatRemainsReadOnly/owner_cookie_plus_investigator_bearer
+    lohi_board_author_test.go:187: role="owner" guard_read_only=true chat_ReadOnly=true want=true
+--- PASS: TestReviewMixedCredentialChatRemainsReadOnly (0.27s)
+    --- PASS: TestReviewMixedCredentialChatRemainsReadOnly/owner_session (0.00s)
+    --- PASS: TestReviewMixedCredentialChatRemainsReadOnly/owner_cookie_plus_investigator_bearer (0.00s)
+PASS
+ok  	github.com/lohi-ai/agentray/internal/app	1.330s

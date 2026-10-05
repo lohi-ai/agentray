@@ -34,11 +34,21 @@ The same operation definition projects to:
 One operation means one schema, one permission name, and one usecase handler. Web,
 CLI, in-house agents, and external MCP clients cannot drift.
 
-The MCP adapter (`opcore.MountMCP`) authenticates per request via the project API
-key (`X-API-Key` / `?api_key=`) and scopes every call to that project, inheriting
-the same `Repo`-only data path — an external agent reaches infra through exactly
-the same wall as the in-house one. A portable skill teaching an external agent to
-use it ships at `.agents/skills/agentray-analytics/SKILL.md`.
+The MCP adapter (`opcore.MountMCP`) authenticates each operation with a scoped,
+revocable management credential (`Authorization: Bearer agm_…`) and scopes every
+call to that credential's project. A capture/project API key is denied on all
+operations; pre-split legacy keys retain only the frozen compatibility
+allowlist. MCP inherits the same `Repo`-only data path — an external agent
+reaches infra through exactly the same wall as the in-house one. A portable
+skill teaching an external agent to use it ships at
+`.agents/skills/agentray-analytics/SKILL.md`.
+
+Query execution has one additional contract shared by REST, MCP, runtime, and
+saved artifacts: server-owned tenant CTEs, connector-aware `external_rows`,
+finite/exact numeric transport, and explicit saved-chart UTC range binding. See
+[QUERY-ACCESS.md](QUERY-ACCESS.md). Network credential Access classes and
+in-process runtime Scopes are distinct gates; granting one never implies the
+other.
 
 ## Layer ownership
 

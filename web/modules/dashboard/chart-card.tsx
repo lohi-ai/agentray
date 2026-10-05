@@ -3,34 +3,19 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pencil, Sparkles, Trash2 } from 'lucide-react';
-import { Card } from '@astryxdesign/core/Card';
+import { Card as AstryxCard } from '@astryxdesign/core/Card';
 import { Heading } from '@astryxdesign/core/Heading';
 import { HStack } from '@astryxdesign/core/HStack';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Text } from '@astryxdesign/core/Text';
-import { AgentRayAPI, type ActivitySummary, type Chart, type Filters } from '@/lib/api';
+import { AgentRayAPI, APIError, type ActivitySummary, type Chart, type QueryMeta } from '@/lib/api';
+import { Card as LohiCard } from '@/lib/lohi-ui';
 import { useFiltersStore } from '@/lib/app-state';
 import { formatCompact, formatCost } from '@/lib/format';
+import { useMediaQuery } from '@/modules/app/hooks/media';
 import { Chart as Graph, type ChartAnnotation, type ChartSpec } from '@/modules/shared/components/charts';
-
-// withTimeWindow injects the dashboard's applied range into a chart's SQL so
-// SQL-backed charts honour the global filter, the same way metric charts do.
-// Substitution is opt-in and backward compatible: SQL without any {{…}} token
-// runs verbatim. The agent's create_chart can write windowed SQL like
-//   WHERE timestamp >= '{{from}}' AND timestamp < '{{to}}'
-// and {{hours}} expands to the window length for INTERVAL-style queries.
-function withTimeWindow(sql: string, filters: Filters): string {
-  if (!/\{\{\s*(from|to|hours)\s*\}\}/.test(sql)) return sql;
-  const to = filters.to ? new Date(filters.to) : new Date();
-  const from = filters.from ? new Date(filters.from) : new Date(to.getTime() - filters.hours * 3600_000);
-  const hours = filters.from && filters.to
-    ? Math.max(1, Math.round((to.getTime() - from.getTime()) / 3600_000))
-    : filters.hours;
-  return sql
-    .replace(/\{\{\s*from\s*\}\}/g, from.toISOString())
-    .replace(/\{\{\s*to\s*\}\}/g, to.toISOString())
-    .replace(/\{\{\s*hours\s*\}\}/g, String(hours));
-}
+import { chartRangeCaption, projectChartRows, resolveChartQuery } from './chart-query';
+import { chartEvidenceStatus, evidenceFilterKey, type ChartEvidence } from './evidence-panel';
 
 // specType maps a saved chart's kind to the shared ECharts ChartSpec type. A
 // plain line reads as a filled area trend; bars stay bars; everything else falls
@@ -53,17 +38,68 @@ function statValue(metric: Chart['metric'], summary: ActivitySummary | null): st
   }
 }
 
+type EvidenceFacts = { definition?: string; unit?: string; cohortEligibility?: string };
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
+const MAX_TABLE_ROWS = 500;
+
+export function queryEvidenceFacts(rows: Array<Record<string, unknown>>): EvidenceFacts {
+  const first = rows[0];
+  if (!first) return {};
+  const text = (...keys: string[]) => {
+    const value = keys.map((key) => first[key]).find((candidate) => typeof candidate === 'string' && candidate.trim());
+    return typeof value === 'string' ? value.trim() : undefined;
+  };
+  const declaredUnit = [...new Set(rows
+    .map((row) => row.unit)
+    .filter((value): value is string => typeof value === 'string' && !!value.trim())
+    .map((value) => value.trim()))];
+  const eligible = first.eligible ?? first.eligible_count;
+  const excluded = first.excluded ?? first.excluded_count;
+  const counts = (typeof eligible === 'number' || typeof eligible === 'string') && (typeof excluded === 'number' || typeof excluded === 'string')
+    ? `Eligible ${String(eligible)} / excluded ${String(excluded)}`
+    : undefined;
+  return {
+    definition: text('metric_definition', 'definition'),
+    // A sparse first row must not hide a unit declared by the result. Multiple
+    // units are intentionally left unverified: a single chart cannot honestly
+    // label unlike scales as one unit.
+    unit: declaredUnit.length === 1 ? declaredUnit[0] : undefined,
+    cohortEligibility: text('cohort_eligibility') || counts,
+  };
+}
+
 // SeriesChart leads with the graph — that's the point of the card. A single
 // compact "latest" figure anchors the trend; peak/avg are left to the ECharts
 // hover tooltip rather than crowding the card with always-on labels.
-function SeriesChart({ values, labels, type, annotations }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[] }) {
+function SeriesChart({ values, labels, type, annotations, appearance, title }: { values: number[]; labels?: (string | number)[]; type: ChartSpec['type']; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; title?: string }) {
+  const reduceMotion = useMediaQuery(REDUCED_MOTION_QUERY)
+    || (typeof window !== 'undefined' && window.matchMedia?.(REDUCED_MOTION_QUERY).matches);
+  const [tableOpen, setTableOpen] = useState(false);
   if (values.length === 0) {
     return <div className="grid w-full place-items-center" style={{ height: 168 }}><Text type="supporting">No data in range</Text></div>;
   }
   const latest = values[values.length - 1];
+  const tableValues = tableOpen ? values.slice(0, MAX_TABLE_ROWS) : [];
   return (
     <div>
-      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations }} />
+      <Graph spec={{ type, x: labels, series: [{ data: values }], height: 168, annotations, motion: appearance === 'lohi-evidence' ? !reduceMotion : undefined }} />
+      {appearance === 'lohi-evidence' ? (
+        <details className="lohi-chart-table" open={tableOpen} onToggle={(event) => setTableOpen(event.currentTarget.open)}>
+          <summary>View data table</summary>
+          {tableOpen ? (
+            <>
+              {values.length > MAX_TABLE_ROWS ? <p>Showing first {MAX_TABLE_ROWS.toLocaleString()} of {values.length.toLocaleString()} rows.</p> : null}
+              <div className="overflow-x-auto">
+                <table>
+                  <caption>Tabular alternative for {title || 'this chart'}. Values reflect the current query result.</caption>
+                  <thead><tr><th scope="col">Label</th><th scope="col">Value</th></tr></thead>
+                  <tbody>{tableValues.map((value, index) => <tr key={`${String(labels?.[index] ?? index)}-${index}`}><th scope="row">{labels?.[index] ?? index + 1}</th><td>{value.toLocaleString()}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </details>
+      ) : null}
       <div className="mt-2">
         <Text type="supporting">
           latest <span className="font-mono tabular-nums font-semibold text-primary">{formatCompact(latest)}</span>
@@ -75,37 +111,105 @@ function SeriesChart({ values, labels, type, annotations }: { values: number[]; 
 
 // SqlGraph runs the chart's saved query and plots its y column against an x label
 // column (the first non-numeric field, or x_field if set).
-function SqlGraph({ chart, projectID, annotations }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[] }) {
+function SqlGraph({ chart, projectID, annotations, appearance, onEvidence }: { chart: Chart; projectID: string; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; onEvidence?: (chartID: string, evidence: ChartEvidence) => void }) {
   const api = useMemo(() => new AgentRayAPI(projectID), [projectID]);
   const applied = useFiltersStore((s) => s.appliedFilters);
-  const sql = useMemo(() => withTimeWindow(chart.sql, applied), [chart.sql, applied]);
-  const [data, setData] = useState<{ values: number[]; labels: (string | number)[] } | null>(null);
+  const query = useMemo(() => resolveChartQuery(chart.sql, applied), [chart.sql, applied]);
+  const requestKey = useMemo(
+    () => Symbol(query.ok
+      ? `${projectID}\u0000${query.sql}\u0000${chart.y_field ?? ''}\u0000${chart.x_field ?? ''}`
+      : `${projectID}\u0000unsupported:${query.message}`),
+    [projectID, query, chart.y_field, chart.x_field],
+  );
+  type State =
+    | { key: symbol | null; status: 'loading' }
+    | { key: symbol; status: 'ready'; values: number[]; labels: (string | number)[]; evidenceFacts: EvidenceFacts; meta?: QueryMeta }
+    | { key: symbol; status: 'empty' | 'unsupported' | 'error' | 'capacity' | 'non_plottable' | 'denied'; message: string; evidenceFacts?: EvidenceFacts; meta?: QueryMeta };
+  const [data, setData] = useState<State>({ key: null, status: 'loading' });
 
   useEffect(() => {
+    if (!query.ok) return;
     let active = true;
-    api.runSQL(sql)
+    api.runSQL(query.sql)
       .then((res) => {
         if (!active) return;
-        const first = res.rows[0] ?? {};
-        const yField = chart.y_field || Object.keys(first).find((k) => typeof first[k] === 'number') || '';
-        const xField = chart.x_field || Object.keys(first).find((k) => k !== yField && typeof first[k] !== 'number') || '';
-        setData({
-          values: res.rows.map((r) => Number(r[yField]) || 0),
-          labels: res.rows.map((r, i) => (xField ? String(r[xField]) : i + 1)),
+        const projected = projectChartRows(res.rows, chart.y_field, chart.x_field);
+        const evidenceFacts = queryEvidenceFacts(res.rows);
+        if (projected.status === 'ready') setData({ key: requestKey, ...projected, evidenceFacts, meta: res.meta });
+        else if (projected.status === 'empty') setData({
+          key: requestKey,
+          status: 'empty',
+          message: query.status === 'fixed' ? 'No data returned' : 'No data in range',
+          evidenceFacts,
+          meta: res.meta,
         });
+        else setData({ key: requestKey, ...projected, evidenceFacts });
       })
-      .catch(() => { if (active) setData({ values: [], labels: [] }); });
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (error instanceof APIError && error.status === 403) {
+          setData({ key: requestKey, status: 'denied', message: 'Query access denied. Ask a workspace owner for SQL query access.' });
+          return;
+        }
+        if (error instanceof APIError && (error.kind === 'retryable' || error.status === 503)) {
+          setData({ key: requestKey, status: 'capacity', message: 'Query capacity is busy. Retry shortly.' });
+          return;
+        }
+        setData({ key: requestKey, status: 'error', message: 'Query failed. Review the saved SQL and try again.' });
+      });
     return () => { active = false; };
-  }, [api, sql, chart.y_field, chart.x_field]);
+  }, [api, query, requestKey, chart.y_field, chart.x_field]);
 
-  if (data === null) return <div className="grid w-full place-items-center" style={{ height: 140 }}><Text type="supporting">Running query…</Text></div>;
-  return <SeriesChart values={data.values} labels={data.labels} type={specType(chart.kind)} annotations={annotations} />;
+  const current = useMemo<State>(() => data.key === requestKey
+    ? data
+    : query.ok
+      ? { key: requestKey, status: 'loading' }
+      : { key: requestKey, status: 'unsupported', message: query.message }, [data, query, requestKey]);
+  const evidenceMeta = 'meta' in current ? current.meta : undefined;
+  const queryEvidence = useMemo(() => query.ok ? {
+    sql: query.sql,
+    range: query.status === 'applied'
+      ? { kind: 'applied' as const, label: query.label, from: query.from.toISOString(), to: query.to.toISOString() }
+      : { kind: 'fixed' as const, label: query.label },
+  } : {}, [query]);
+  useEffect(() => {
+    if (!onEvidence) return;
+    onEvidence(chart.id, {
+      status: chartEvidenceStatus(current.status, evidenceMeta),
+      filterKey: evidenceFilterKey(applied),
+      ...queryEvidence,
+      definition: 'evidenceFacts' in current ? current.evidenceFacts?.definition : undefined,
+      unit: 'evidenceFacts' in current ? current.evidenceFacts?.unit : undefined,
+      cohortEligibility: 'evidenceFacts' in current ? current.evidenceFacts?.cohortEligibility : undefined,
+      meta: evidenceMeta,
+    });
+  }, [applied, chart.id, current, evidenceMeta, onEvidence, queryEvidence]);
+  const body = current.status === 'ready'
+    ? chart.kind === 'stat'
+      ? <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{formatCompact(current.values[current.values.length - 1])}</div>
+      : <SeriesChart values={current.values} labels={current.labels} type={specType(chart.kind)} annotations={annotations} appearance={appearance} title={chart.name} />
+    : (
+      <div
+        className="grid w-full place-items-center px-3 text-center"
+        style={{ height: 168 }}
+        role={current.status === 'error' || current.status === 'capacity' || current.status === 'unsupported' || current.status === 'non_plottable' || current.status === 'denied' ? 'alert' : undefined}
+      >
+        <Text type="supporting">{current.status === 'loading' ? 'Running query…' : current.message}</Text>
+      </div>
+    );
+  const rangeCaption = chartRangeCaption(query);
+  return (
+    <div>
+      {body}
+      {rangeCaption ? <div className="mt-2"><Text type="supporting">{rangeCaption}</Text></div> : null}
+    </div>
+  );
 }
 
 // ChartCard renders one saved chart. In `preview` mode (used by the editor) the
 // action row is hidden so the same render path drives both the live board and
 // the editor preview — one source of truth for how a chart looks.
-export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false, annotations }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean; annotations?: ChartAnnotation[] }) {
+export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle, preview = false, annotations, appearance, onEvidence }: { chart: Chart; summary: ActivitySummary | null; projectID?: string; onDelete?: () => void; onEdit?: () => void; handle?: ReactNode; preview?: boolean; annotations?: ChartAnnotation[]; appearance?: 'lohi-evidence'; onEvidence?: (chartID: string, evidence: ChartEvidence) => void }) {
   const router = useRouter();
 
   // Hand the chart to the agent chat to explain what it shows. Only offered for
@@ -116,14 +220,8 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
     router.push(`/chat?q=${encodeURIComponent(q)}`);
   }
 
-  // Astryx migration: the hand-rolled card div is now an Astryx <Card>, the
-  // title a <Heading level={5}>, and the three action buttons Astryx
-  // <IconButton>s. That last swap is not cosmetic — the raw buttons carried
-  // only `title`, which is not an accessible name, and sat at 26px against a
-  // 44px touch target. IconButton's `label` is the accessible name and its
-  // tooltip keeps the hover affordance.
-  return (
-    <Card padding={4}>
+  const content = (
+    <>
       <HStack align="center" gap={0} className="mb-3">
         {handle}
         <Heading level={5}>{chart.name || 'Untitled chart'}</Heading>
@@ -141,18 +239,26 @@ export function ChartCard({ chart, summary, projectID, onDelete, onEdit, handle,
           </HStack>
         )}
       </HStack>
-      {chart.kind === 'stat' ? (
+      {chart.sql ? (
+        projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} appearance={appearance} onEvidence={onEvidence} /> : <SeriesChart values={[]} type={specType(chart.kind)} appearance={appearance} title={chart.name} />
+      ) : chart.kind === 'stat' ? (
         <div className="font-mono tabular-nums text-[28px] font-semibold text-primary">{statValue(chart.metric, summary)}</div>
-      ) : chart.sql ? (
-        projectID ? <SqlGraph chart={chart} projectID={projectID} annotations={annotations} /> : <SeriesChart values={[]} type={specType(chart.kind)} />
       ) : (
         <SeriesChart
           values={(summary?.timeline ?? []).map((p) => p.count)}
           labels={(summary?.timeline ?? []).map((p) => p.hour)}
           type={specType(chart.kind)}
           annotations={annotations}
+          appearance={appearance}
+          title={chart.name}
         />
       )}
-    </Card>
+    </>
   );
+
+  // Evidence boards opt into the vendored Lohi surface. Editor previews and
+  // every other caller retain the legacy Astryx card contract by default.
+  return appearance === 'lohi-evidence'
+    ? <LohiCard>{content}</LohiCard>
+    : <AstryxCard padding={4}>{content}</AstryxCard>;
 }

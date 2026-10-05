@@ -1,8 +1,59 @@
 'use client';
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AgentRayAPI, APIError, apiErrorMessage, newIdempotencyKey, type ConnectorSync, type ConnectorSyncInput } from '@/lib/api';
 import { useAuthStore, useUIStore } from '@/lib/app-state';
+
+export type ReadinessSync = ConnectorSync & { connector_name: string };
+
+const connectorSyncsKey = (projectID: string | undefined, connectorID: string | null) => ['connector-syncs', projectID, connectorID] as const;
+
+function isConnectorSyncActive(sync: ConnectorSync): boolean {
+  return sync.readiness?.state === 'syncing'
+    || sync.latest_run?.status === 'queued'
+    || sync.latest_run?.status === 'running';
+}
+
+function connectorSyncsQuery(projectID: string | undefined, connectorID: string) {
+  return {
+    queryKey: connectorSyncsKey(projectID, connectorID),
+    queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID),
+    enabled: !!projectID,
+    refetchInterval: (query: { state: { data?: { syncs?: ConnectorSync[] } } }) =>
+      (query.state.data?.syncs ?? []).some(isConnectorSyncActive) ? 2000 : false,
+  };
+}
+
+// One read model for evidence consumers that need readiness across connectors.
+// Each connector owns one cache key and one poller, so the settings summary and
+// selected table consume the same source_status response instead of issuing
+// parallel aggregate/detail requests. A 403 remains distinguishable from empty.
+export function useSourceReadinessOverview(connectorIDs?: Array<{ id: string; name: string }>) {
+  const projectID = useAuthStore((s) => s.project?.id);
+  const connectorList = useQuery({
+    queryKey: ['connectors', projectID],
+    queryFn: () => new AgentRayAPI(projectID!).connectors(),
+    enabled: !!projectID && connectorIDs === undefined,
+  });
+  const connectors = connectorIDs ?? connectorList.data?.connectors.map((connector) => ({ id: connector.id, name: connector.name })) ?? [];
+  const statusQueries = useQueries({
+    queries: connectors.map((connector) => connectorSyncsQuery(projectID, connector.id)),
+  });
+  const errors = [connectorList.error, ...statusQueries.map((query) => query.error)].filter((error): error is Error => error instanceof Error);
+  const denied = errors.some((error) => error instanceof APIError && error.status === 403);
+  const error = errors.find((candidate) => !(candidate instanceof APIError && candidate.status === 403)) ?? null;
+  const loadingByConnector = Object.fromEntries(connectors.map((connector, index) => [connector.id, statusQueries[index]?.isFetching ?? false]));
+  const syncs = connectors.flatMap((connector, index) =>
+    (statusQueries[index]?.data?.syncs ?? []).map((sync) => ({ ...sync, connector_name: connector.name })),
+  );
+  return {
+    syncs,
+    loading: connectorList.isFetching || statusQueries.some((query) => query.isFetching),
+    loadingByConnector,
+    denied,
+    error,
+  };
+}
 
 // useConnectors drives the Data connectors settings tab: the project's
 // configured external sources plus create / delete mutations. The DSN is
@@ -18,7 +69,9 @@ export function useConnectors() {
     enabled: !!projectID,
   });
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['connectors', projectID] });
+  };
 
   const create = useMutation({
     mutationFn: (input: { name: string; kind: string; dsn: string; idempotencyKey: string }) =>
@@ -45,32 +98,22 @@ export function useConnectors() {
   };
 }
 
-// useConnectorSyncs lists one connector's table syncs through the shared
-// source_status operation — each row carries its latest durable run receipt —
-// and exposes create / update / delete / run-now / cancel / pause mutations.
-// While any run is queued or running the query polls so the receipt's
-// terminal state (and the sync's last_* columns) arrive without a refresh.
-export function useConnectorSyncs(connectorID: string | null) {
+// useConnectorSyncs exposes mutations for the selected connector. Its rows are
+// supplied by useSourceReadinessOverview, the sole source_status query owner,
+// so the summary and detail table cannot start duplicate polling loops.
+export function useConnectorSyncs(connectorID: string | null, status: { syncs: ConnectorSync[]; loading: boolean }) {
   const queryClient = useQueryClient();
   const projectID = useAuthStore((s) => s.project?.id);
   const setError = useUIStore((s) => s.setError);
 
-  const query = useQuery({
-    queryKey: ['connector-syncs', projectID, connectorID],
-    queryFn: () => new AgentRayAPI(projectID!).connectorSyncs(connectorID!),
-    enabled: !!projectID && !!connectorID,
-    refetchInterval: (q) =>
-      (q.state.data?.syncs ?? []).some((s) => s.latest_run && (s.latest_run.status === 'queued' || s.latest_run.status === 'running'))
-        ? 2000
-        : false,
-  });
-
   const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ['connector-syncs', projectID, connectorID] });
+    // The shared query follows queued/running receipts as well as readiness, so
+    // a just-enqueued run cannot strand either the summary or detail table.
+    void queryClient.invalidateQueries({ queryKey: connectorSyncsKey(projectID, connectorID) });
     // The preview is a separate query with its own 30s staleTime. A landed run,
     // a re-pointed key/cursor column or a pause all change what it would show,
     // and without this it keeps serving the rows from before the change.
-    queryClient.invalidateQueries({ queryKey: ['dataset-preview', projectID] });
+    void queryClient.invalidateQueries({ queryKey: ['dataset-preview', projectID] });
   };
 
   const create = useMutation({
@@ -118,8 +161,8 @@ export function useConnectorSyncs(connectorID: string | null) {
   });
 
   return {
-    syncs: query.data?.syncs ?? [],
-    loading: query.isFetching,
+    syncs: status.syncs,
+    loading: status.loading,
     create,
     update,
     remove,

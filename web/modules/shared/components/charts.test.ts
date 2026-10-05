@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { annotationMarks, type ChartAnnotation } from './charts';
+import { annotationMarks, buildOption, type ChartAnnotation } from './charts';
 
 // annotationMarks is the renderer's own guarantee that a mark lands on the
 // right bucket: instants resolve to the bucket containing them, ranges to the
@@ -48,5 +48,22 @@ describe('annotationMarks', () => {
     const hours = ['2026-09-10T08:00:00Z', '2026-09-10T09:00:00Z', '2026-09-10T10:00:00Z'];
     const marks = annotationMarks(hours, [anno({ starts_at: '2026-09-10T09:30:00Z' })]);
     expect(marks).toEqual([{ kind: 'point', x: '2026-09-10T09:00:00Z', annotation: expect.anything() }]);
+  });
+});
+
+describe('chart motion', () => {
+  it('disables engine and hover-state animation when motion is false', () => {
+    const option = buildOption({ type: 'area', x: ['one', 'two'], series: [{ data: [1, 2] }], motion: false });
+    expect(option).toMatchObject({
+      animation: false,
+      stateAnimation: { duration: 0 },
+      series: [{ emphasis: { scale: false } }],
+    });
+  });
+
+  it('preserves the engine defaults when a caller supplies no preference', () => {
+    const option = buildOption({ type: 'area', x: ['one'], series: [{ data: [1] }] });
+    expect(option.animation).toBeUndefined();
+    expect(option.stateAnimation).toBeUndefined();
   });
 });

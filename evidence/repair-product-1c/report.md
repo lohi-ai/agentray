@@ -1,0 +1,7 @@
+# Repair 3: live-run steering authority
+
+The failing-before probe in `before-probe.log` reproduced all 8 restricted Bearer + owner-cookie bypasses across `/api/agent/chat` JSON/SSE and conversation-message JSON/SSE with steer and follow-up modes. Live runs now retain their admitted write authority; each live control request is checked against that run authority before persistence or queue delivery, and insufficient authority receives HTTP 403. Both transports share the same authorization decision, and conversation agent changes now occur only after live-control authorization succeeds.
+
+The after HTTP probe passed 24 cases: 8 restricted cases denied without queue delivery and 16 owner-session/write-credential cases remained authorized, spanning both routes, JSON/SSE, and steer/follow-up. Runtime tests cover the authority comparison and ensure denied conversation input is not persisted; existing authoring journey verifies board and chart writes persist. Read-only guard checks and credential precedence tests passed.
+
+Validation passed: `go build ./...`, `go vet ./...`, focused app/runtime/store/workload tests with PostgreSQL, `go test ./... -p 1 -count=1 -timeout=30m -v`, and `git diff --check`. The full suite had 25 environmental skips for missing provider credentials, restricted source database setup, approved capacity resources, or sandbox images; all supplied-PostgreSQL-gated tests passed. See `environmental-skips.md` and `full-suite.log`.
