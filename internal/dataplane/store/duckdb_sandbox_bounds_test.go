@@ -451,8 +451,8 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s memoryMb: %v", path, err)
 	}
-	if got := memLimit / (1 << 20); got != 1024 {
-		t.Fatalf("%s: api memoryMb = %d MiB, want 1024", path, got)
+	if got := memLimit / (1 << 20); got != 2048 {
+		t.Fatalf("%s: api memoryMb = %d MiB, want 2048", path, got)
 	}
 	gomemlimitValue, err := appSpecMapValue(string(raw), "env", "GOMEMLIMIT")
 	if err != nil {
@@ -462,8 +462,8 @@ func TestSandboxBudgetFitsContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s GOMEMLIMIT: %v", path, err)
 	}
-	if got := gomemlimit / (1 << 20); got != 256 {
-		t.Fatalf("%s: GOMEMLIMIT = %d MiB, want 256", path, got)
+	if got := gomemlimit / (1 << 20); got != 512 {
+		t.Fatalf("%s: GOMEMLIMIT = %d MiB, want 512", path, got)
 	}
 	durable, err := appSpecMapValue(string(raw), "instanceEnv", "INGEST_DURABLE")
 	if err != nil {

@@ -17,7 +17,7 @@ spec:
   healthPath: /readyz
   stopTimeoutSeconds: 60
   drainSeconds: 70
-  memoryMb: 1024
+  memoryMb: 2048
   cpus: 2
   env:
     INGEST_STREAM_NAME: AGENTRAY_EVENTS
@@ -25,7 +25,7 @@ spec:
     CLICKHOUSE_DATABASE: agentray_prod
     DEFAULT_PROJECT_NAME: LoHi prod
     CLICKHOUSE_USER: agentray
-    GOMEMLIMIT: 256MiB
+    GOMEMLIMIT: 512MiB
     INGEST_DLQ_SUBJECT: agentray.events.dlq
     CLICKHOUSE_ADDR: agentray-clickhouse:9000
     DUCKDB_PATH: /data/agentray.duckdb

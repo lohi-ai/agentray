@@ -120,8 +120,10 @@ const (
 	sandboxKillGrace = 2 * time.Second
 	// sandboxMainMemoryLimit caps the trusted instance's engine memory. The
 	// container is the real bound; this keeps DuckDB from treating the whole
-	// cgroup as its budget.
-	sandboxMainMemoryLimit = "128MB"
+	// cgroup as its budget. 512 MB because the ingest replay path dead-lettered
+	// real batches at 128 MB ("failed to pin block", prod 2026-10-06) — the
+	// ceiling must cover a worst-case flush, not just steady-state reads.
+	sandboxMainMemoryLimit = "512MB"
 	// sandboxMainTempSize caps the trusted instance's spill.
 	sandboxMainTempSize = "2GB"
 )
