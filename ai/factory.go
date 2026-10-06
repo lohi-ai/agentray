@@ -18,6 +18,7 @@ func New(spec Spec) (Provider, error) {
 	if v := NormalizeOAuthVendor(vendor); v != "" {
 		vendor = v
 	}
+	if spec.BaseURL=="" && (vendor=="deepseek" || vendor=="opencode" || vendor=="opencode-zen" || vendor=="opencode-go") { spec.BaseURL=ProviderDefaultURL(vendor) }
 	id := strings.TrimSpace(spec.ID)
 	if id == "" {
 		id = vendor
@@ -48,7 +49,7 @@ func New(spec Spec) (Provider, error) {
 		inner, err = NewClient(ClientSpec{
 			Name: "google", APIKey: spec.APIKey, BaseURL: spec.BaseURL,
 		})
-	case VendorClaudeCode, VendorOpenAICodex, VendorGoogleAntigravity, VendorDevin:
+	case VendorClaudeCode, VendorOpenAICodex, VendorGoogleAntigravity, VendorDevin, VendorXaiOAuth:
 		// OAuth subscription vendors: no API key — the wire client draws a live
 		// token from the account pool per request.
 		inner, err = NewClient(ClientSpec{
@@ -135,6 +136,19 @@ func oauthModelLister(vendor string, inner protocol.LLMProvider, http HTTPDoer, 
 		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
 			return p.listAntigravityModels(ctx, http, tok)
 		}
+	case VendorXaiOAuth:
+		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
+			base := baseURL
+			if base == "" {
+				base = ProviderDefaultURL(VendorXaiOAuth)
+			}
+			raw, err := listModelsForVendor(ctx, http, "xai", base, tok.AccessToken)
+			out := make([]Model, 0, len(raw))
+			for _, m := range raw {
+				out = append(out, Model{ID: m.ID, ContextWindow: m.ContextWindow, Capabilities: m.Capabilities})
+			}
+			return out, err
+		}
 	case VendorDevin:
 		p, _ := inner.(*DevinProvider)
 		return func(ctx context.Context, tok OAuthToken) ([]Model, error) {
@@ -154,6 +168,9 @@ func injectHTTP(inner protocol.LLMProvider, client HTTPDoer) {
 		return
 	}
 	switch p := inner.(type) {
+	case *xaiOAuthProvider:
+		p.HTTP = std
+		p.StreamHTTP = std
 	case *OpenAIProvider:
 		p.HTTP = std
 	case *OpenAIResponsesProvider:

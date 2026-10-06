@@ -56,6 +56,17 @@ func (p NativeProvider) Stream(ctx context.Context, model json.RawMessage, trans
 		if selected.API == "devin-agent" && selected.Provider == VendorDevin {
 			return StreamDevinPooled(ctx, model, transcript, provider, p.Tokens)
 		}
+		if !IsOAuthVendor(selected.Provider) || selected.Provider == VendorXaiOAuth {
+			return nativeOAuthPoolStream(ctx, model, transcript, provider, p.Tokens, selected.Provider, func(ctx context.Context, model json.RawMessage, transcript TranscriptContext, opts OpenAICompletionsStreamOptions, _ OAuthToken) (*AssistantMessageEventStream, error) {
+				if selected.API == "anthropic-messages" {
+					return StreamAnthropicSimple(ctx, model, transcript, opts)
+				}
+				if selected.API == "openai-responses" {
+					return StreamOpenAIResponsesSimple(ctx, model, transcript, opts)
+				}
+				return StreamOpenAICompletionsSimple(ctx, model, transcript, opts)
+			})
+		}
 		if selected.API != "openai-codex-responses" {
 			return nil, fmt.Errorf("native Codex account pool cannot serve API %q", selected.API)
 		}

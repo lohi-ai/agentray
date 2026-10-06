@@ -26,6 +26,11 @@ func NewNativeClient(spec ClientSpec) (*NativeClient, error) {
 		vendor = alias
 	}
 	switch vendor {
+	case VendorXaiOAuth:
+		c.api, c.provider, c.endpoint = "openai-completions", vendor, strings.TrimRight(spec.BaseURL, "/")
+		if c.endpoint == "" {
+			c.endpoint = "https://api.x.ai/v1"
+		}
 	case VendorGoogleAntigravity:
 		c.api, c.provider, c.endpoint = vendor, vendor, strings.TrimRight(spec.BaseURL, "/")
 		defaults := c.endpoint == ""

@@ -98,6 +98,24 @@ func NewClient(spec ClientSpec) (protocol.LLMProvider, error) {
 			inner.BaseURL = strings.TrimRight(b, "/")
 		}
 		return newPooledProvider(VendorDevin, inner, spec.TokenSource, spec.SessionScope)
+	case VendorXaiOAuth:
+		inner := NewOpenAIProvider("", "https://api.x.ai/v1", DefaultCompat())
+		if spec.BaseURL != "" {
+			inner.BaseURL = strings.TrimRight(spec.BaseURL, "/")
+		}
+		inner.Vendor = VendorXaiOAuth
+		return newPooledProvider(VendorXaiOAuth, &xaiOAuthProvider{inner}, spec.TokenSource, spec.SessionScope)
+	case "deepseek", "opencode", "opencode-zen", "opencode-go":
+		if spec.BaseURL == "" {
+			spec.BaseURL = ProviderDefaultURL(name)
+		}
+		compat := spec.Compat
+		if compat.MaxTokensField == "" {
+			compat = DefaultCompat()
+		}
+		p := NewOpenAIProvider(spec.APIKey, spec.BaseURL, compat)
+		p.Vendor = name
+		return p, nil
 	case "google", "gemini":
 		// Gemini on Google's OpenAI-compatible surface. An explicit BaseURL
 		// overrides the default endpoint (e.g. a regional proxy).
