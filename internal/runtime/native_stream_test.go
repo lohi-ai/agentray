@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/telemetry"
+	"github.com/2found/2ai/agentcore/engine"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/telemetry"
 )
 
 func TestNativeCallbackStreamMigrationOracle(t *testing.T) {

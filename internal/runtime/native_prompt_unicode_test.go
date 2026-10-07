@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/internal/jsonjs"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/jsonjs"
 )
 
 func TestNativePromptUnicode(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // Notification is one message to deliver. Title/Body are rendered per channel

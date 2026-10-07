@@ -8,7 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
+	"github.com/2found/2ai/agentcore/plugins/spill"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

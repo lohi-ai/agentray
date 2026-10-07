@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 )
 
 // tokenBodyKind selects the token-endpoint request encoding.

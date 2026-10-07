@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

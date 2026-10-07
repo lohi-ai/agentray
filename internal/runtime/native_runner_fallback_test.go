@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/telemetry/llm"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/telemetry/llm"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
 )
 
 func TestNativeRunnerFallbackCompactionToolAndResume(t *testing.T) {

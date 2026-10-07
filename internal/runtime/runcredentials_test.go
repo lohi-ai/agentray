@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // stubResolver is a sentinel CredentialResolver used to assert the global path

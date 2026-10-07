@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
 )
 
 func equalPiInvocation(a, b json.RawMessage) bool {

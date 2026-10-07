@@ -619,10 +619,10 @@ AgentRay 瞄的是 Go `1.25`，以及容器构建里验证过的这套依赖：
 驱动 AgentRay growth loop 的那个 runtime，导出成两个可以单独 import 的
 Go 包：
 
-- [`agentcore`](agentcore/) — 与 provider 无关的 agent 循环
+- [`agentcore`](https://github.com/2found/2ai/tree/main/agentcore) — 与 provider 无关的 agent 循环
   （Anthropic，或任何 OpenAI 兼容网关），带 progressive-disclosure
   skill、tool policy、budget 闸门和 context compaction。
-- [`sandbox`](sandbox/) — workspace tool
+- [`sandbox`](https://github.com/2found/2ai/tree/main/sandbox) — workspace tool
   （`read_file`、`grep`、`glob`、`web_fetch`），让 agent 在仓库里有据可
   依。
 

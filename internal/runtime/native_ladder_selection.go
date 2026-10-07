@@ -8,10 +8,10 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/engine"
+	nativehost "github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/ai"
 )
 
 type nativeLadderSelection = ai.FallbackSelection

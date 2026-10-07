@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

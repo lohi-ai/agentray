@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func TestFormatAgentError(t *testing.T) {

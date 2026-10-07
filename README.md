@@ -1,5 +1,7 @@
 # AgentRay
 
+Shared AI packages now live in [2ai](https://github.com/2found/2ai), pinned in `go.mod`. The analytics application stays here. Private dependency access requires GitHub authentication and `GOPRIVATE=github.com/2found/*`. See [build preparation](infra/README.md).
+
 [English](README.md) · [Tiếng Việt](README.vi.md) · [中文](README.cn.md) · [日本語](README.jp.md) · [한국어](README.kr.md)
 
 **Open-source product analytics that ends in a decision, not a dashboard.**
@@ -632,11 +634,11 @@ build:
 The runtime powering AgentRay's growth loop is exported as two reusable Go
 packages you can import on their own:
 
-- [`agentcore`](agentcore/) — a provider-agnostic agent loop (Anthropic or any
+- [`agentcore`](https://github.com/2found/2ai/tree/main/agentcore) — a provider-agnostic agent loop (Anthropic or any
   OpenAI-compatible gateway), with progressive-disclosure skills, tool policies,
   budget gating, and context compaction. OpenAI model metadata can select Chat
   Completions or Responses per model without changing provider-row identity.
-- [`sandbox`](sandbox/) — portable workspace tools (`read_file`, `write_file`,
+- [`sandbox`](https://github.com/2found/2ai/tree/main/sandbox) — portable workspace tools (`read_file`, `write_file`,
   `edit_file`, `edit_lines`, `grep`, `glob`, `lsp`, rich persistent `eval`,
   `run_shell`, `web_fetch`) for grounding and safely editing a repository on a
   laptop or server sandbox.

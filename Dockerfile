@@ -6,9 +6,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
-COPY go.mod go.sum* ./
-RUN go mod download
+# infra/prepare_build.py stages the pinned private 2ai source without credentials.
+# Copy it before module resolution; its replace exists only in the build context.
 COPY . .
+RUN go mod download
 RUN CGO_ENABLED=1 GOOS=linux go build -o /out/agentray ./cmd/server
 
 FROM debian:bookworm-slim

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // longRunResult builds a run of the shape a real long task produces: thousands

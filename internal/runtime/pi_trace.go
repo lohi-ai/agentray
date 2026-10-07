@@ -3,8 +3,8 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/telemetry/llm"
 )
 
 // bindPiTrace adapts native telemetry to the host's storage/file sinks.

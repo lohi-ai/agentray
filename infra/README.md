@@ -44,3 +44,23 @@ it migrates shared PostgreSQL without HTTP, NATS ingestion or DuckDB access.
 Existing startup migrations remain idempotent for deployments outside 2server;
 per-colour DuckDB initialization stays at startup. The hook must pass before
 rollout begins, and its private output stays on the VM.
+
+## Private 2ai dependency
+
+The Go foundation is pinned in `go.mod`. On the build host, authenticate GitHub
+and set `GOPRIVATE=github.com/2found/*`. `deploy.sh` prepares a temporary context
+from tracked working-tree files and the pinned dependency source, then uploads
+that context. Git credentials never enter the context. Local module replacements
+are rejected. New source files must be staged in Git before deploying.
+
+For a local container build without deploying:
+
+```sh
+python3 infra/prepare_build.py /tmp/agentray-build-source
+docker build -t agentray-local /tmp/agentray-build-source
+```
+
+Choose a new output path; the preparer never overwrites an existing directory.
+Only the staged `go.mod` receives a local replace. The committed module remains
+version-pinned and works without sibling checkouts. Cloud Build configuration
+and runtime deployment targets are unchanged.

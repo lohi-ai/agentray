@@ -648,10 +648,10 @@ AgentRay は Go `1.25` と、コンテナ build で検証済みの依存セッ�
 AgentRay の growth loop を動かしている runtime は、単体で import できる 2 つ
 の Go パッケージとして公開している：
 
-- [`agentcore`](agentcore/) —— provider 非依存の agent ループ（Anthropic、ま
+- [`agentcore`](https://github.com/2found/2ai/tree/main/agentcore) —— provider 非依存の agent ループ（Anthropic、ま
   たは OpenAI 互換の任意の gateway）。progressive disclosure な skill、tool
   policy、budget の制御、context compaction を備える。
-- [`sandbox`](sandbox/) —— agent をリポジトリに接地させるための workspace
+- [`sandbox`](https://github.com/2found/2ai/tree/main/sandbox) —— agent をリポジトリに接地させるための workspace
   tool（`read_file`、`grep`、`glob`、`web_fetch`）。
 
 ```bash

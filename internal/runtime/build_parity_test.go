@@ -5,11 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
-	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
-	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/finishguard"
+	"github.com/2found/2ai/agentcore/plugins/spill"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
+	"github.com/2found/2ai/agentcore/plugins/todo"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

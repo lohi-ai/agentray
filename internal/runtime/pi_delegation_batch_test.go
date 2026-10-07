@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/agentcore/plugins/ask"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
+	"github.com/2found/2ai/ai"
 )
 
 type nativeBatchExtension struct {

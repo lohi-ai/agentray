@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/internal/agentcoretest"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/testing/agentcore"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 )

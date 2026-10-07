@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/internal/jsonjs"
-	"github.com/lohi-ai/agentray/telemetry"
+	"github.com/2found/2ai/agentcore/engine"
+	"github.com/2found/2ai/agentcore/plugins/ask"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/jsonjs"
+	"github.com/2found/2ai/telemetry"
 )
 
 func (a *NativeAgent) invoke(ctx context.Context, method string, params any) (json.RawMessage, error) {

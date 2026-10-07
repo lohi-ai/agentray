@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 	"net/http"
 	"net/http/httptest"
 	"strings"

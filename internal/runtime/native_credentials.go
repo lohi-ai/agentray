@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 )
 
 func (p BuildParams) nativeModelOptions(rung ModelTier, options PiModelOptions) PiModelOptions {

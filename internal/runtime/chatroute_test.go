@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	goalplugin "github.com/lohi-ai/agentray/agentcore/plugins/goal"
+	"github.com/2found/2ai/agentcore"
+	goalplugin "github.com/2found/2ai/agentcore/plugins/goal"
 )
 
 // These tests exercise native turn admission and command handling without a database.

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/ask"
 )
 
 const nativeSessionOptions = `{"initialState":{"model":{"id":"test","api":"test","provider":"test"},"tools":[{"name":"write","label":"Write","description":"Write once","parameters":{"type":"object","properties":{},"additionalProperties":false}}]}}`

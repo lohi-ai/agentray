@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/telemetry/llm"
 )
 
 // complete runs an auxiliary text request through the same native transport,

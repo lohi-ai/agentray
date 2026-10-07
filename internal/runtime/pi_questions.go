@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
 )
 
 var ErrPiQuestionPending = errors.New("Pi session is waiting for a human answer")

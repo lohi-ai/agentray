@@ -8,9 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/telemetry"
+	"github.com/2found/2ai/agentcore/engine"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/telemetry"
 )
 
 // NativeCallbackStream adapts the existing lossless host callback contract to

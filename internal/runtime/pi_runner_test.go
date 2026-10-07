@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func TestPiRunnerRejectsUnsupportedMigrationWithoutGoFallback(t *testing.T) {

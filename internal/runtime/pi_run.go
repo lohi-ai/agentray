@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/ai"
 )
 
 // PiRunConfig executes a native run. Seed history belongs in the native

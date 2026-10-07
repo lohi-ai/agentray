@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore/plugins/goal"
+	"github.com/2found/2ai/agentcore/plugins/goal"
 )
 
 // The revisable goal gate is two decisions that are only correct together, and

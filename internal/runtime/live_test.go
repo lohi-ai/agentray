@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // TestLiveRegistrySteerRoundTrip verifies a registered run's steer queue receives

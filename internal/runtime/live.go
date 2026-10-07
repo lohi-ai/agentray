@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // ErrRunStopped is the cancellation cause a user-initiated stop carries. It is

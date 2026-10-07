@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/ai"
 )
 
 // WorkspaceProvider is the redacted public view of one configured vendor

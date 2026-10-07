@@ -10,18 +10,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
-	"github.com/lohi-ai/agentray/agentcore/plugins/spill"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
-	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/advisor"
+	"github.com/2found/2ai/agentcore/plugins/ask"
+	"github.com/2found/2ai/agentcore/plugins/spill"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
+	"github.com/2found/2ai/agentcore/plugins/todo"
+	"github.com/2found/2ai/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/dataplane/usecase"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/sandbox"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/sandbox"
+	"github.com/2found/2ai/telemetry/llm"
 )
 
 // defaultRunMaxTokens caps a run's per-turn model output when the caller doesn't

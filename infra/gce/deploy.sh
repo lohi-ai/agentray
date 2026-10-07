@@ -55,8 +55,12 @@ fi
 echo "==> agentray (${ENV}) → ${TAG:-images declared in config} (web API URL: ${WEB_API_URL})"
 
 if [ "$SKIP_BUILD" = false ]; then
+  # Resolve private Go source on the authenticated host, never in Cloud Build.
+  BUILD_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/agentray-build.XXXXXX")"
+  trap 'rm -rf "$BUILD_STAGE"' EXIT
+  python3 "${SERVICE_ROOT}/infra/prepare_build.py" "${BUILD_STAGE}/source" >/dev/null
   echo "==> Cloud Build (api + web)"
-  gcloud builds submit "$SERVICE_ROOT" \
+  gcloud builds submit "${BUILD_STAGE}/source" \
     --project "$PROJECT_ID" \
     --config "${SERVICE_ROOT}/infra/cloudbuild.yaml" \
     --substitutions "_API_IMAGE=${API_IMAGE},_WEB_IMAGE=${WEB_IMAGE},_TAG=${TAG},_WEB_API_URL=${WEB_API_URL},_WEB_SITE_URL=${WEB_SITE_URL}" \

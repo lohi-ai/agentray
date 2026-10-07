@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 	runtime "github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/opcore"

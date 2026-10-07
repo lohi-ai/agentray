@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/engine"
+	nativehost "github.com/2found/2ai/agentcore/host"
 )
 
 // PiRuntimeConfig configures the native Go engine for parents, children and summaries.

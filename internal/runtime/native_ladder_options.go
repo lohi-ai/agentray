@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 )
 
 // openNativeAttempt binds provider-owned controls afresh for each attempt. The

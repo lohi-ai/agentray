@@ -24,7 +24,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // Draft is the structured result of an authoring-generation pass: a bounded

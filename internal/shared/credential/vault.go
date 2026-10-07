@@ -2,7 +2,7 @@
 // implementation with other agentcore consumers. Environment loading stays local.
 package credential
 
-import shared "github.com/lohi-ai/agentray/credential"
+import shared "github.com/2found/2ai/credential"
 
 type Vault = shared.Vault
 

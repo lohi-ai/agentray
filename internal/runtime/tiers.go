@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/ai"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

@@ -3,7 +3,7 @@ package opcore
 import (
 	"context"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // opTool adapts a Spec into an agentcore.Tool bound to one CallContext. This is

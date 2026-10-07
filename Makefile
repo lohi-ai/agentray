@@ -80,25 +80,25 @@ test-agents: ## Run the env-gated real-provider agent tests across all packages 
 	$(GO) test ./... -run 'TestReal_|RealProvider' -v -count=1
 
 test-agentcore-race: ## Race-check the kernel plus its runtime and sandbox lifecycle backends
-	$(GO) test -race ./agentcore/... ./internal/runtime ./sandbox -count=1
+	$(GO) test -race github.com/2found/2ai/agentcore/... ./internal/runtime github.com/2found/2ai/sandbox -count=1
 
 .PHONY: test-ai-parity test-agentcore-native
 test-agentcore-native: ## Check the Go agent/AI/telemetry port without a JavaScript runtime
-	$(GO) test -race ./agentcore/engine ./ai ./telemetry/... -count=1
+	$(GO) test -race github.com/2found/2ai/agentcore/engine github.com/2found/2ai/ai github.com/2found/2ai/telemetry/... -count=1
 	$(GO) test -race ./internal/runtime -count=1
 
 test-ai-parity: ## Check the native Go AI port against recorded upstream fixtures
-	$(GO) test -race ./ai -run '^TestPi' -count=1
+	$(GO) test -race github.com/2found/2ai/ai -run '^TestPi' -count=1
 
 test-session-conformance: ## Run memory + opt-in PostgreSQL session contracts (loads .env)
 	@$(LOAD_ENV) \
-	$(GO) test ./agentcore ./internal/runtime -run 'SessionStoreConformance|SessionLease|RecordSessionAnswer|ChainedAskResume' -v -count=1
+	$(GO) test github.com/2found/2ai/agentcore ./internal/runtime -run 'SessionStoreConformance|SessionLease|RecordSessionAnswer|ChainedAskResume' -v -count=1
 
 test-stress: ## Run the long-run stability / compaction stress test
-	$(GO) test ./agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
+	$(GO) test github.com/2found/2ai/agentcore/... -run TestLongRunStaysStableAcrossManyCompactions -v -count=1
 
 bench-session: ## Benchmark append snapshots and long-log reduction/window reads
-	$(GO) test ./agentcore -run '^$$' -bench 'Session(Store)?' -benchmem
+	$(GO) test github.com/2found/2ai/agentcore -run '^$$' -bench 'Session(Store)?' -benchmem
 
 check: vet test ## Vet + unit tests — the pre-commit gate
 
@@ -207,4 +207,4 @@ sandbox-setup: sandbox-build sandbox-check ## Build the sandbox images, verify, 
 
 test-sandbox: ## Run the computer_use + browser_use integration tests (needs built images; loads .env)
 	@$(LOAD_ENV) \
-	$(GO) test ./sandbox/... -run 'ComputerUseAgent|BrowserUseAgent' -v -count=1
+	$(GO) test github.com/2found/2ai/sandbox/... -run 'ComputerUseAgent|BrowserUseAgent' -v -count=1

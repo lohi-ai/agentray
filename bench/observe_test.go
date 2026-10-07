@@ -30,9 +30,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/preset"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/preset"
+	"github.com/2found/2ai/telemetry/llm"
 )
 
 // toolEvent is one executed tool call as the loop saw it.

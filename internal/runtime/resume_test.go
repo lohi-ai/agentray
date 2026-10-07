@@ -3,7 +3,7 @@ package agentruntime
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // TestCloseDanglingCallsSynthesizesResults verifies a transcript with an

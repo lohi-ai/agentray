@@ -13,8 +13,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/ask"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/ask"
 )
 
 func TestPiAskPreparationMatchesGoPlugin(t *testing.T) {

@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // protocolVersion is the MCP revision this client negotiates. It matches the

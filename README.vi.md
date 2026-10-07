@@ -1,5 +1,7 @@
 # AgentRay
 
+Các package AI dùng chung đã chuyển sang [2ai](https://github.com/2found/2ai), pin trong `go.mod`. Ứng dụng analytics ở lại repo này. Dependency private cần xác thực GitHub và `GOPRIVATE=github.com/2found/*`. Xem [chuẩn bị build](infra/README.md).
+
 [English](README.md) · [Tiếng Việt](README.vi.md) · [中文](README.cn.md) · [日本語](README.jp.md) · [한국어](README.kr.md)
 
 **Product analytics mã nguồn mở, kết thúc bằng một quyết định, không phải một dashboard.**
@@ -633,10 +635,10 @@ container:
 Runtime đang chạy growth loop của AgentRay được đóng gói thành hai Go package dùng
 lại được, bạn import riêng cũng được:
 
-- [`agentcore`](agentcore/) — một agent loop không phụ thuộc provider (Anthropic
+- [`agentcore`](https://github.com/2found/2ai/tree/main/agentcore) — một agent loop không phụ thuộc provider (Anthropic
   hay bất kỳ gateway tương thích OpenAI nào), có skill theo kiểu progressive
   disclosure (tiết lộ dần), policy cho tool, gate budget, và compaction context.
-- [`sandbox`](sandbox/) — bộ tool làm việc trong workspace (`read_file`, `grep`,
+- [`sandbox`](https://github.com/2found/2ai/tree/main/sandbox) — bộ tool làm việc trong workspace (`read_file`, `grep`,
   `glob`, `web_fetch`) để agent bám vào một repository.
 
 ```bash

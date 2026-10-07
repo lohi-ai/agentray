@@ -47,9 +47,10 @@ Persistence (`store`) lives in dataplane. The pack catalog lives in
 workloads; `app.New` injects it into store via `SetPackCatalog` so store
 never imports workloads.
 
-Public import paths `github.com/lohi-ai/agentray/agentcore` and
-`.../sandbox` stay at the module root. External importers (swatter) do not
-move.
+Shared AI, AgentCore, telemetry, credentials, sandbox tools and JSON primitives
+live in the versioned `github.com/2found/2ai` dependency. AgentRay owns the
+analytics application and its runtime adapters. Consumers import the shared
+packages from 2ai; they do not need an AgentRay checkout.
 
 ## How to add a connector
 

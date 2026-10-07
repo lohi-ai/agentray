@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // fakeTool is a minimal agentcore.Tool used to stand in for a host-global

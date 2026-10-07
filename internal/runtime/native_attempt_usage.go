@@ -3,10 +3,10 @@ package agentruntime
 import (
 	"encoding/json"
 	"errors"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	nativehost "github.com/2found/2ai/agentcore/host"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/ai"
 )
 
 func nativeUsageTerminal(raw json.RawMessage) (json.RawMessage, error) {

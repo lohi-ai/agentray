@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/telemetry/llm"
 	storage "github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

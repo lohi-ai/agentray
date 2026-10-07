@@ -3,11 +3,11 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	nativehost "github.com/2found/2ai/agentcore/host"
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func TestPiHostLifecyclePreservesExplicitToolRestriction(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

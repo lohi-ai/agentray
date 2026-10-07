@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // The control plane validates a tool selection at write time, using a context

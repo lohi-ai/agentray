@@ -3,8 +3,8 @@ package agentruntime
 import (
 	"sync"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/sandbox"
 )
 
 // RuntimeResources owns the bounded process-local state shared by every Runner

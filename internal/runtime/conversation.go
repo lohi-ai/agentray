@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	nativehost "github.com/2found/2ai/agentcore/host"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

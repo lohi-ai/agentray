@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 	"github.com/lohi-ai/agentray/internal/channels"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 	"github.com/lohi-ai/agentray/internal/oauth"
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/runtime/authoring"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // detachedRunCeiling bounds a chat run that has outlived its SSE connection (the

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func piSessionJSON(v any) json.RawMessage {

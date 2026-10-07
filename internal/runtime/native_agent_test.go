@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/ai"
-	"github.com/lohi-ai/agentray/telemetry"
+	"github.com/2found/2ai/ai"
+	"github.com/2found/2ai/telemetry"
 )
 
 func TestNativeAgentMigrationOracle(t *testing.T) {

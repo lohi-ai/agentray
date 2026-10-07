@@ -5,10 +5,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/finishguard"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/finishguard"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
+	"github.com/2found/2ai/sandbox"
 )
 
 // evidence_guard.go — the analytics analog of hermes-agent's verify-on-stop

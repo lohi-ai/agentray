@@ -19,10 +19,12 @@ class DeployTest(unittest.TestCase):
             binary = root / 'bin'
             binary.mkdir()
             log = root / 'calls'
-            for name in ('gcloud', '2server'):
+            for name in ('gcloud', '2server', 'python3'):
                 body = '#!/bin/bash\necho "' + name + ' $*" >> "$CALLS"\n'
                 if name == 'gcloud':
                     body += 'if [ "$1 $2" = "builds submit" ] && [ "$FAIL" = build ]; then exit 1; fi\n'
+                elif name == 'python3':
+                    body += 'if [ "$FAIL" = prepare ]; then exit 1; fi\nmkdir -p "$2"\n'
                 else:
                     body += '''if [ "$1" = get ] && [ "$FAIL" = preflight ]; then exit 1; fi
 if [ "$1" = deploy ] && [ "$3" = 2server/api.yaml ] && [ "$FAIL" = api ]; then exit 1; fi
@@ -44,16 +46,18 @@ if [ "$1" = deploy ] && [ "$3" = 2server/api.yaml ] && [ "$FAIL" = api ]; then e
             self.assertIn('2server deploy -f 2server/web.yaml --apply', calls)
             self.assertNotIn('--image', calls)
             self.assertNotIn('gcloud', calls)
+            self.assertNotIn('python3', calls)
 
             result, calls = run(['--env', 'prod', '--tag', 'release-test'])
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertLess(calls.index('2server get'), calls.index('gcloud builds submit'))
+            self.assertLess(calls.index('python3'), calls.index('gcloud builds submit'))
             self.assertLess(calls.index('gcloud builds submit'), calls.index('2server deploy'))
             self.assertIn('agentray-api:release-test', calls)
             self.assertIn('agentray-web:release-test', calls)
             self.assertNotIn('compute ssh', calls)
 
-            for fail in ('preflight', 'build', 'api'):
+            for fail in ('preflight', 'prepare', 'build', 'api'):
                 result, calls = run(['--env', 'prod', '--tag', 'release-test'], fail)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn('2server deploy -f 2server/web.yaml', calls)

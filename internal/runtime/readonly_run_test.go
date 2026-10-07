@@ -5,9 +5,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/agentcore/plugins/subagent"
-	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/agentcore/plugins/subagent"
+	"github.com/2found/2ai/agentcore/plugins/todo"
 )
 
 // A read-only run is the other half of the shared demo's write guard. The HTTP

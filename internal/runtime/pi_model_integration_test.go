@@ -1,7 +1,7 @@
 package agentruntime
 
 import (
-"github.com/lohi-ai/agentray/ai"
+"github.com/2found/2ai/ai"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func TestPiModelBindingDrivesNativeProviderAndRotatesKeys(t *testing.T) {

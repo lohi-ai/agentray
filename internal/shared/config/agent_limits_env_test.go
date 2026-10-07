@@ -3,7 +3,7 @@ package config
 import (
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // TestAgentCeilingEnvOverrides: an operator who exports the env var must get the

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
-	"github.com/lohi-ai/agentray/agentcore/plugins/advisor"
-	"github.com/lohi-ai/agentray/agentcore/plugins/memory"
-	"github.com/lohi-ai/agentray/agentcore/plugins/todo"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
+	"github.com/2found/2ai/agentcore/plugins/advisor"
+	"github.com/2found/2ai/agentcore/plugins/memory"
+	"github.com/2found/2ai/agentcore/plugins/todo"
+	"github.com/2found/2ai/ai"
 )
 
 func TestNativeMemoryTodoAndAdvisorShareComposedLifecycle(t *testing.T) {

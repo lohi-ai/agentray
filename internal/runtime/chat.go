@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	goalplugin "github.com/lohi-ai/agentray/agentcore/plugins/goal"
+	"github.com/2found/2ai/agentcore"
+	goalplugin "github.com/2found/2ai/agentcore/plugins/goal"
 	"github.com/lohi-ai/agentray/internal/dataplane/store"
 )
 

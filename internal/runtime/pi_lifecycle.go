@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	nativehost "github.com/lohi-ai/agentray/agentcore/host"
+	"github.com/2found/2ai/agentcore"
+	nativehost "github.com/2found/2ai/agentcore/host"
 )
 
 // Only the serial completed-turn hooks write this state. RunPi reads it after

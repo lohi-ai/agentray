@@ -1,3 +1,5 @@
+github.com/2found/2ai v0.0.0-20261007113830-7d7555740763 h1:yjgr71wejMcZUDUk9dkHTo0oSL8bRMuS8D+KGtaTQNg=
+github.com/2found/2ai v0.0.0-20261007113830-7d7555740763/go.mod h1:RvWKKnNc8MpDFGQdOtix2iIHiLcRXVxjgT6jag6xJBY=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apache/arrow-go/v18 v18.5.1 h1:yaQ6zxMGgf9YCYw4/oaeOU3AULySDlAYDOcnr4LdHdI=

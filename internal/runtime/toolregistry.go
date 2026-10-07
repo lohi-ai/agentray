@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 	"github.com/lohi-ai/agentray/internal/shared/mcpclient"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // ToolMCP is the catalog entry that connects an agent to remote Model Context

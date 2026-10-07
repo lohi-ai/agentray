@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 )
 
 func TestNativeLadderPrepareUpdatesNextEngineTurn(t *testing.T) {

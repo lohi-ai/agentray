@@ -3,8 +3,8 @@ package bench_test
 import (
 	"sort"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/telemetry/llm"
 )
 
 // Run-level rollup of facts agentcore has already finished producing.

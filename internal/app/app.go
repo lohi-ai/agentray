@@ -9,8 +9,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/telemetry/llm"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/telemetry/llm"
 	"github.com/lohi-ai/agentray/internal/dataplane/alerting"
 	"github.com/lohi-ai/agentray/internal/dataplane/connector"
 	"github.com/lohi-ai/agentray/internal/dataplane/experiments"
@@ -21,7 +21,7 @@ import (
 	"github.com/lohi-ai/agentray/internal/runtime"
 	"github.com/lohi-ai/agentray/internal/shared/config"
 	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 )

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lohi-ai/agentray/agentcore/engine"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore/engine"
+	"github.com/2found/2ai/ai"
 )
 
 type nativeAgentFixture struct {

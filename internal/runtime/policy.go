@@ -1,6 +1,6 @@
 package agentruntime
 
-import "github.com/lohi-ai/agentray/agentcore"
+import "github.com/2found/2ai/agentcore"
 
 // Scopes are the four independently-toggleable capability scopes (§3). Each maps
 // to a set of analytics tools.

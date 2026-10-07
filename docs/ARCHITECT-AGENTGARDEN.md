@@ -102,7 +102,7 @@ folders:
   order, because two interceptors bounding a tool result is a waterfall, not a
   conflict.
 
-See [agentcore/plugins/README.md](../agentcore/plugins/README.md) for the full
+See [agentcore/plugins/README.md](https://github.com/2found/2ai/blob/main/agentcore/plugins/README.md) for the full
 table; every folder carries its own README covering what the model sees, the
 token effect, the KV-cache effect, and what the plugin cannot do.
 

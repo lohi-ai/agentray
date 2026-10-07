@@ -621,10 +621,10 @@ AgentRay는 Go `1.25`와 container build에서 검증된 의존성 조합을 기
 AgentRay의 growth loop를 돌리는 runtime은 따로 import할 수 있는 재사용 Go
 package 두 개로 노출된다:
 
-- [`agentcore`](agentcore/) — provider에 종속되지 않는 agent loop(Anthropic 또는
+- [`agentcore`](https://github.com/2found/2ai/tree/main/agentcore) — provider에 종속되지 않는 agent loop(Anthropic 또는
   OpenAI 호환 gateway 아무거나). progressive-disclosure skill, tool policy,
   budget gating, context compaction을 갖췄다.
-- [`sandbox`](sandbox/) — agent를 repository에 grounding시키는 workspace tool
+- [`sandbox`](https://github.com/2found/2ai/tree/main/sandbox) — agent를 repository에 grounding시키는 workspace tool
   (`read_file`, `grep`, `glob`, `web_fetch`).
 
 ```bash

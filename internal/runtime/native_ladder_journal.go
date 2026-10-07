@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/ai"
 )
 
 // restoreJournal validates every transition, including older selections hidden

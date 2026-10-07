@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/lohi-ai/agentray/internal/shared/credential"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/sandbox"
 )
 
 // Absent config is a decline, not an error: the selection stays stored but the

@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 // ToolPrefix marks every tool sourced from a remote MCP server. It is load

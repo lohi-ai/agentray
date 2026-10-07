@@ -3,12 +3,12 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/agentcore"
+	"github.com/2found/2ai/agentcore"
 )
 
 func TestPiPayloadControlsPreserveNativeFieldsAcrossDialects(t *testing.T) {

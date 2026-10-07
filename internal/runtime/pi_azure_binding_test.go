@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/ai"
 )
 
 func TestAzureModelBindingFreezesResolvedConfiguration(t *testing.T) {

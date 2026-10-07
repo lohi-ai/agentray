@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/sandbox"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/sandbox"
 )
 
 // stubSandbox is a no-op agentcore.Sandbox for wiring tests.

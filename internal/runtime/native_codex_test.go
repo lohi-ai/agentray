@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/lohi-ai/agentray/agentcore"
-	"github.com/lohi-ai/agentray/ai"
+	"github.com/2found/2ai/agentcore"
+	"github.com/2found/2ai/ai"
 )
 
 func TestNativeCodexCredentialRefreshAndSessionCleanup(t *testing.T) {
