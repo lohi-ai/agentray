@@ -99,6 +99,12 @@ func (h *PiToolHost) ValidatePiSession(id string, durable bool) error {
 // and extension instructions. It does not execute legacy transcript-editing
 // hooks; callers integrating those hooks must preserve the native transcript.
 func (h *PiToolHost) StartPiRun(ctx context.Context, task string) (string, error) {
+	return h.StartPiRunWithLifecycle(ctx, task, nil)
+}
+
+// StartPiRunWithLifecycle is StartPiRun with an optional observer for bounded
+// setup stages. It exposes the stage, never recalled memory content.
+func (h *PiToolHost) StartPiRunWithLifecycle(ctx context.Context, task string, lifecycle func(string)) (string, error) {
 	h.gate.Lock()
 	defer h.gate.Unlock()
 	if h.closed {
@@ -116,8 +122,16 @@ func (h *PiToolHost) StartPiRun(ctx context.Context, task string) (string, error
 	ctx = piToolContext{Context: ctx, values: h.ctx}
 	var recalled []MemoryEntry
 	if h.agent.memory != nil {
+		if lifecycle != nil {
+			lifecycle("Checking relevant memory")
+		}
 		if got, err := h.agent.memory.Recall(ctx, h.agent.def.ScopeID, task, 8); err == nil {
 			recalled = got
+			if lifecycle != nil {
+				lifecycle(fmt.Sprintf("Memory context ready (%d)", len(recalled)))
+			}
+		} else if lifecycle != nil {
+			lifecycle("Memory lookup unavailable; continuing without recalled memory")
 		}
 	}
 	if err := ctx.Err(); err != nil {

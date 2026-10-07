@@ -26,6 +26,21 @@ func (t nativeReadTool) Run(context.Context, string) (string, error) {
 	return "evidence", nil
 }
 
+type nativeProgressTool struct {
+	name    string
+	partial string
+}
+
+func (t nativeProgressTool) Name() string { return t.name }
+func (t nativeProgressTool) Schema() agentcore.ToolSchema {
+	return agentcore.ToolSchema{Name: t.name, Parameters: map[string]any{"type": "object"}}
+}
+func (t nativeProgressTool) Run(context.Context, string) (string, error) { return "finished", nil }
+func (t nativeProgressTool) RunStreaming(_ context.Context, _ string, emit func(string)) (string, error) {
+	emit(t.partial)
+	return "finished", nil
+}
+
 func nativeReply(ctx context.Context, message *ai.Message) (*ai.AssistantMessageEventStream, error) {
 	stream := ai.NewAssistantMessageEventStreamFor(ctx)
 	typ := "done"
@@ -96,6 +111,43 @@ func TestPublicNativeRunFallbackToolsAndCheckpoint(t *testing.T) {
 	}
 	if primary != 1 || secondary != 3 || effects != 1 || second.Final != "finished" {
 		t.Fatal("checkpoint replayed work or forgot selection", primary, secondary, effects)
+	}
+}
+
+func TestPublicNativeRunSurfacesOnlySubagentProgressPartials(t *testing.T) {
+	calls := 0
+	provider := &ai.FallbackProvider{Candidates: []ai.FallbackCandidate{{Model: json.RawMessage(`{"id":"test"}`), Stream: func(ctx context.Context, model json.RawMessage, view ai.TranscriptContext, options map[string]any) (*ai.AssistantMessageEventStream, error) {
+		calls++
+		message := &ai.Message{Role: "assistant", StopReason: "stop", Content: ai.BlockContent(ai.ContentBlock{Type: "text", Text: "finished"})}
+		switch calls {
+		case 1:
+			message.StopReason = "toolUse"
+			message.Content = ai.BlockContent(ai.ContentBlock{Type: "toolCall", ID: "child", Name: "spawn_subagent", Arguments: json.RawMessage(`{}`)})
+		case 2:
+			message.StopReason = "toolUse"
+			message.Content = ai.BlockContent(ai.ContentBlock{Type: "toolCall", ID: "other", Name: "other_stream", Arguments: json.RawMessage(`{}`)})
+		}
+		return nativeReply(ctx, message)
+	}}}}
+	tools := agentcore.NewToolSet(
+		nativeProgressTool{name: "spawn_subagent", partial: "[sub-agent] running web_search"},
+		nativeProgressTool{name: "other_stream", partial: "private tool result"},
+	)
+	a, err := agentcore.New(agentcore.Config{NativeProvider: provider, Model: "test", Tools: tools, Policy: agentcore.NewAllowList("spawn_subagent", "other_stream")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []string
+	result, err := a.RunNative(context.Background(), agentcore.NativeRun{Input: []agentcore.Message{{Role: agentcore.RoleUser, Content: "delegate"}}, Sink: func(ev agentcore.StreamEvent) {
+		if ev.Type == agentcore.StreamToolExecUpdate {
+			notes = append(notes, ev.Note)
+		}
+	}})
+	if err != nil || result.Final != "finished" {
+		t.Fatalf("run: result=%+v err=%v", result, err)
+	}
+	if len(notes) != 1 || notes[0] != "[sub-agent] running web_search" {
+		t.Fatalf("public progress notes = %#v, want only the safe subagent lifecycle note", notes)
 	}
 }
 

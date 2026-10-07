@@ -580,7 +580,7 @@ nó — được ghi ở [`docs/redesign/strategy.md`](docs/redesign/strategy.md
 ## Deploy
 
 `./infra/gce/deploy.sh --env prod` build image API và web, rồi gọi trực tiếp
-`2server deploy -f` cho từng app. Config công khai nằm ở [`2server/`](2server/README.md),
+`2srv deploy -f` cho từng app. Config công khai nằm ở [`2server/`](2server/README.md),
 giá trị secret nằm trên VM. Dev trên VM Lohi đã ngừng sử dụng. Xem
 [`infra/README.md`](infra/README.md) để build, override image và test deploy script.
 

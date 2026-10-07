@@ -567,7 +567,7 @@ SELECT 的正则算不上租户边界。
 ## 部署
 
 `./infra/gce/deploy.sh --env prod` 构建 API 和 web 镜像，然后分别执行
-`2server deploy -f`。公开配置位于 [`2server/`](2server/README.md)，secret 值保留在
+`2srv deploy -f`。公开配置位于 [`2server/`](2server/README.md)，secret 值保留在
 VM 上。Lohi VM 的 dev 部署已停用。构建、镜像覆盖和脚本测试见
 [`infra/README.md`](infra/README.md)。
 

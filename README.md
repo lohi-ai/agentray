@@ -577,7 +577,7 @@ as-built data path, capture → store → analytics → agent, is
 ## Deployment
 
 `./infra/gce/deploy.sh --env prod` builds the API and web images, then calls
-`2server deploy -f` for each app. Production config is explicit in
+`2srv deploy -f` for each app. Production config is explicit in
 [`2server/`](2server/README.md); secret values remain on the VM. Dev on the Lohi
 VM is retired. See [`infra/README.md`](infra/README.md) for build, image override,
 standalone checkout and script verification commands.

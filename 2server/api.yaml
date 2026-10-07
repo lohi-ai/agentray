@@ -22,12 +22,9 @@ spec:
   env:
     INGEST_STREAM_NAME: AGENTRAY_EVENTS
     INGEST_SUBJECT: agentray.events.ingest.prod
-    CLICKHOUSE_DATABASE: agentray_prod
     DEFAULT_PROJECT_NAME: LoHi prod
-    CLICKHOUSE_USER: agentray
     GOMEMLIMIT: 512MiB
     INGEST_DLQ_SUBJECT: agentray.events.dlq
-    CLICKHOUSE_ADDR: agentray-clickhouse:9000
     DUCKDB_PATH: /data/agentray.duckdb
     ALLOWED_ORIGINS: https://agentray.lohi2.com
     HTTP_ADDR: ":8080"

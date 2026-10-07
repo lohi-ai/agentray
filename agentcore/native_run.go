@@ -31,8 +31,11 @@ type NativeRun struct {
 	Input       []Message
 	Task        string
 	Sink        StreamSink
-	Compaction  *nativehost.CompactionPolicy
-	Telemetry   telemetry.Context
+	// Lifecycle receives bounded setup steps that happen before the provider
+	// loop starts, such as recalling relevant memory.
+	Lifecycle  func(string)
+	Compaction *nativehost.CompactionPolicy
+	Telemetry  telemetry.Context
 }
 
 type nativeQuestion struct {
@@ -180,7 +183,7 @@ func (a *Agent) runNative(ctx context.Context, input NativeRun) (result RunResul
 		result.CommandResults[name] = raw
 	}
 
-	system, err := h.StartPiRun(ctx, input.Task)
+	system, err := h.StartPiRunWithLifecycle(ctx, input.Task, input.Lifecycle)
 	if err != nil {
 		return result, err
 	}
@@ -615,6 +618,7 @@ func (a *Agent) runNative(ctx context.Context, input NativeRun) (result RunResul
 				return nil
 			}
 			stream.Type = StreamMessageStart
+			stream.Turn = result.Turns
 		case "message_update":
 			if event.AssistantMessageEvent.Type != "text_delta" {
 				return nil
@@ -648,6 +652,23 @@ func (a *Agent) runNative(ctx context.Context, input NativeRun) (result RunResul
 			ordinal++
 			stream.Type = StreamToolExecStart
 			stream.Tool = &ToolTrace{CallID: event.ToolCallID, Tool: event.ToolName, Args: string(event.Args)}
+		case "tool_execution_update":
+			// spawn_subagent emits short lifecycle notes as streaming partials.
+			// Those are useful to a live viewer; other tools' partial output may
+			// contain arbitrary result data and stays private to AgentCore.
+			if event.ToolName != "spawn_subagent" || event.PartialResult == nil || event.PartialResult.Content == nil {
+				return nil
+			}
+			raw, err := json.Marshal(event.PartialResult.Content)
+			if err != nil {
+				return nil
+			}
+			note, _, _, err := nativehost.ProjectContent(raw)
+			if err != nil || note == "" {
+				return nil
+			}
+			stream.Type = StreamToolExecUpdate
+			stream.Note = note
 		case "tool_execution_end":
 			stream.Type = StreamToolExecEnd
 			var audit PiToolOutcome

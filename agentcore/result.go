@@ -99,13 +99,13 @@ type CardPoint struct {
 
 // StreamEvent is one increment surfaced to a live viewer (the SSE chat endpoint)
 // while a run is in flight. Callbacks fire from the run goroutine, in order.
-// Token/Tool are emitted by the core loop; Progress/Card are emitted by a
-// consumer wrapping the loop (the core never sets them).
+// Token/Tool/ToolExecUpdate are emitted by the core loop; Progress/Card are
+// emitted by a consumer wrapping the loop (the core never sets them).
 type StreamEvent struct {
 	Type     StreamEventType
 	Token    string          // set when Type == StreamToken
 	Tool     *ToolTrace      // set when Type == StreamTool
-	Note     string          // set when Type == StreamProgress
+	Note     string          // set for StreamProgress and textual tool updates
 	Card     *ResultCard     // set when Type == StreamCard
 	Question json.RawMessage // set when Type == StreamQuestion (the parked call's args)
 	Turn     int

@@ -19,7 +19,7 @@ make test-deploy
 ```
 
 The script validates both files and checks the connected target before building.
-It owns Cloud Build and image publication, then calls `2server deploy -f` directly.
+It owns Cloud Build and image publication, then calls `2srv deploy -f` directly.
 It works in a standalone AgentRay checkout: no parent Lohi helper is required.
 Public settings and secret declarations live in the app files. The VM retains
 secret values. The API runs its existing database migrations at startup.

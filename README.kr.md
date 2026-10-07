@@ -568,7 +568,7 @@ DuckDB를 고른 결정 자체는 — [`storage-evaluation/`](storage-evaluation
 ## 배포
 
 `./infra/gce/deploy.sh --env prod`가 API와 web 이미지를 빌드한 뒤 각 앱에
-`2server deploy -f`를 실행한다. 공개 설정은 [`2server/`](2server/README.md)에,
+`2srv deploy -f`를 실행한다. 공개 설정은 [`2server/`](2server/README.md)에,
 secret 값은 VM에 보관한다. Lohi VM의 dev 배포는 종료되었다. 빌드와 배포
 스크립트 검증 방법은 [`infra/README.md`](infra/README.md)를 참고한다.
 

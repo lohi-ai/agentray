@@ -15,6 +15,33 @@ type piBatchTestExtension struct {
 	run func(context.Context, []ToolCall) BatchDecision
 }
 
+type piLifecycleMemory struct{}
+
+func (piLifecycleMemory) Recall(context.Context, string, string, int) ([]MemoryEntry, error) {
+	return []MemoryEntry{{Content: "private memory"}}, nil
+}
+func (piLifecycleMemory) Remember(context.Context, MemoryEntry) error { return nil }
+
+func TestStartPiRunLifecycleReportsMemoryWithoutContent(t *testing.T) {
+	host, err := piHostAgent(t, Config{Memory: piLifecycleMemory{}}).OpenPiTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	var stages []string
+	if _, err := host.StartPiRunWithLifecycle(context.Background(), "task", func(stage string) {
+		stages = append(stages, stage)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stages, []string{"Checking relevant memory", "Memory context ready (1)"}) {
+		t.Fatalf("lifecycle stages = %v", stages)
+	}
+	if strings.Contains(strings.Join(stages, " "), "private memory") {
+		t.Fatal("lifecycle leaked recalled memory content")
+	}
+}
+
 func (piBatchTestExtension) Name() string { return "batch-test" }
 func (e piBatchTestExtension) BeginRun(context.Context, RunInfo) (Extension, error) {
 	return e, nil

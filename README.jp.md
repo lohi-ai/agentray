@@ -593,7 +593,7 @@ DuckDB を選んだ判断そのもの —— [`storage-evaluation/`](storage-eva
 ## デプロイ
 
 `./infra/gce/deploy.sh --env prod` で API と web のイメージをビルドし、
-各アプリに `2server deploy -f` を実行する。公開設定は
+各アプリに `2srv deploy -f` を実行する。公開設定は
 [`2server/`](2server/README.md)、secret の値は VM に保存する。Lohi VM の dev
 デプロイは廃止済み。ビルド、イメージの上書き、スクリプトの検証方法は
 [`infra/README.md`](infra/README.md) を参照する。

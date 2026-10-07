@@ -1,20 +1,21 @@
 # AgentRay deployment configuration
 
 Run these commands from the AgentRay checkout with 2server CLI 0.2.0 or newer.
+Use a release containing `2srv`; older installations can use the `2server` alias.
 `api.yaml` and `web.yaml` each declare a complete production workload. 2server
 generates Compose/Caddy; existing physical volume bindings remain on the VM.
 The API declares logical volumeMounts and instanceEnv for its NATS durable.
 Development AgentRay on the Lohi VM is retired.
 
 ```bash
-2server validate -f 2server/api.yaml
-2server plan -f 2server/api.yaml
-2server deploy -f 2server/api.yaml --apply
-2server deploy -f 2server/web.yaml --apply
+2srv validate -f 2server/api.yaml
+2srv plan -f 2server/api.yaml
+2srv deploy -f 2server/api.yaml --apply
+2srv deploy -f 2server/web.yaml --apply
 
 # Optional override for a freshly built image; the YAML stays unchanged.
-2server deploy -f 2server/api.yaml --image REGISTRY/IMAGE@sha256:DIGEST --apply
-2server rollback -f 2server/api.yaml --apply
+2srv deploy -f 2server/api.yaml --image REGISTRY/IMAGE@sha256:DIGEST --apply
+2srv rollback -f 2server/api.yaml --apply
 ```
 
 The CLI discovers the nearest private `.2server/connection.yaml` (legacy JSON
@@ -25,8 +26,8 @@ dotenv is implicitly used for a deployment.
 Secret names and references are in `api.yaml`. Import values from a private file:
 
 ```bash
-2server secret set --app agentray-api --env-file /private/agentray.env --apply
-2server secret list --app agentray-api
+2srv secret set --app agentray-api --env-file /private/agentray.env --apply
+2srv secret list --app agentray-api
 ```
 
 Changing a stored secret takes effect on the next deployment. Keep the encryption
