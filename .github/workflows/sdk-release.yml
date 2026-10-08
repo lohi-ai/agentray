@@ -114,7 +114,7 @@ jobs:
           if npm view "$PACKAGE_NAME@$VERSION" version > /tmp/registry-version.txt 2> /tmp/registry-error.txt; then
             echo 'Already published to npm'
           elif grep -q E404 /tmp/registry-error.txt; then
-            npm publish dist/*.tgz --ignore-scripts --provenance --access public --tag "$NPM_TAG"
+            npm publish ./dist/*.tgz --ignore-scripts --provenance --access public --tag "$NPM_TAG"
           else
             cat /tmp/registry-error.txt >&2
             exit 1
