@@ -1,15 +1,6 @@
-// Bumps one SDK's manifest, commits it, and creates the release tag.
-//
-//   node sdk/scripts/cut-release.mjs browser patch
-//   node sdk/scripts/cut-release.mjs python 0.2.0
-//
-// It deliberately does NOT push. Pushing the tag is what triggers publication
-// (.github/workflows/sdk-release.yml), so it stays a separate, deliberate act;
-// the command to run is printed at the end.
-//
-// `npm version` is not used for the tagging half because it writes a tag named
-// `v<version>`, which collides between the two npm packages and with the
-// product's own v-tags. Here the tag names the package: `browser-v0.2.0`.
+// Bumps and commits one SDK's reviewed source version; main CI checks once,
+// creates its package-specific tag and distributes the verified artifacts.
+// This command never pushes and no longer creates a local release tag.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
@@ -24,7 +15,7 @@ const PACKAGES = {
 const [pkg, bump] = process.argv.slice(2);
 if (!PACKAGES[pkg] || !bump) {
   console.error('usage: cut-release.mjs <browser|server|python> <patch|minor|major|x.y.z>');
-  console.error('(swift releases from lohi-ai/agentray-swift: git tag 0.2.0 && git push origin 0.2.0)');
+  console.error('(swift releases from lohi-ai/agentray-swift: update VERSION and push main)');
   process.exit(2);
 }
 
@@ -74,7 +65,7 @@ if (kind === 'npm') {
   }
 }
 
-// --- write, verify, commit, tag -------------------------------------------
+// --- write, verify, commit -------------------------------------------
 console.log(`${pkg}: ${current} -> ${next}`);
 
 if (kind === 'npm') {
@@ -97,17 +88,4 @@ if (changed.length) {
 // Resolve the tag against the tree it will actually build, before creating it.
 execFileSync('node', ['sdk/scripts/resolve-tag.mjs', tag], { stdio: 'inherit' });
 
-execFileSync('git', ['tag', '-a', tag, '-m', `${pkg} SDK ${next}`], { stdio: 'inherit' });
-
-console.log(`
-tagged ${tag}. Nothing is published yet.
-
-  git push origin main ${tag}
-
-Push release tags ONE AT A TIME. GitHub creates no workflow runs when more than
-three tags arrive in a single push — the tags land and nothing happens.
-
-That tag push runs .github/workflows/sdk-release.yml: it rebuilds and re-verifies
-the tagged tree, creates the GitHub Release with the artefact attached, and then
-publishes to the registry if the token for it is configured.
-`);
+console.log(`\nPrepared ${tag}. Nothing is published yet.\n\n  git push origin main\n\nMain CI verifies the exact commit once, creates the immutable tag after checks,\nthen publishes those same artifacts, documentation and download instructions.\nAn unchanged source version runs checks without creating another release.\n`);

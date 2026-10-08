@@ -11,34 +11,47 @@
 # published, not just that a build command exited 0.
 #
 # Those assertions live in sdk/scripts/ rather than inline here, because
-# .github/workflows/sdk-release.yml runs the same ones before it publishes. A
+# sdk-release.yml calls this workflow and publishes its verified artifacts. A
 # release gate that is weaker than the PR gate is not a gate.
 name: sdk
 
 on:
   push:
     # Branches only. A bare `on: push` also fires for tag pushes, which would
-    # duplicate every check here — sdk-release.yml re-runs all of them against
-    # the tagged tree before it publishes anything.
-    branches: ['**']
+    # duplicate every check here — sdk-release.yml owns main and tag checks.
+    branches-ignore: [main]
     paths: ['sdk/**', '.github/workflows/sdk.yml', '.github/workflows/sdk-release.yml']
   pull_request:
     paths: ['sdk/**', '.github/workflows/sdk.yml', '.github/workflows/sdk-release.yml']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      pkg:
+        default: all
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   npm:
+    if: inputs.pkg != 'python'
     name: ${{ matrix.pkg }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pkg: [browser, server]
+        pkg: ${{ fromJSON((inputs.pkg == 'browser' && '["browser"]') || (inputs.pkg == 'server' && '["server"]') || '["browser","server"]') }}
     defaults:
       run:
         working-directory: sdk/${{ matrix.pkg }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -50,32 +63,35 @@ jobs:
       - run: npm run build
       - name: the tarball contains the built entrypoints
         run: node ../scripts/verify-npm-tarball.mjs
-
-  cdn-bundle:
-    name: browser <script> bundle
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/browser
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: sdk/browser/package-lock.json
-      - run: npm ci
-      - run: npm run build
       - name: the global attaches and captures
+        if: matrix.pkg == 'browser'
         run: node ../scripts/verify-cdn-bundle.mjs
+      - name: Pack once and verify a clean consumer
+        run: |
+          npm pack --ignore-scripts
+          node ../scripts/verify-consumer-install.mjs ./*.tgz
+      - name: Include browser script distribution
+        if: matrix.pkg == 'browser'
+        run: cp dist/index.global.js "agentray-browser-$(node -p 'require("./package.json").version').min.js"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-${{ matrix.pkg }}-${{ github.run_id }}
+          path: |
+            sdk/${{ matrix.pkg }}/*.tgz
+            sdk/${{ matrix.pkg }}/*.min.js
+          if-no-files-found: error
+          overwrite: true
 
   python:
+    if: inputs.pkg == '' || inputs.pkg == 'all' || inputs.pkg == 'python'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: sdk/python
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -94,6 +110,13 @@ jobs:
           /tmp/verify/bin/pip install dist/*.whl
           /tmp/verify/bin/python -c "import agentray; assert agentray.DEFAULT_PLATFORM == 'server'; print('import ok')"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-python-${{ github.run_id }}
+          path: sdk/python/dist/*
+          if-no-files-found: error
+          overwrite: true
+
   # GitHub's macOS runners still ship bash 3.2, which parses some constructs
   # differently from the bash 5 on the Linux runners — a heredoc inside a command
   # substitution most notably. That difference took down the first Swift release
@@ -105,6 +128,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - run: pip3 install --quiet --break-system-packages pyyaml || pip3 install --quiet pyyaml
       - run: python3 sdk/scripts/check-workflow-shell.py
 
@@ -116,9 +141,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - run: if [ -f sdk/scripts/release-plan.test.mjs ]; then node --test sdk/scripts/release-plan.test.mjs sdk/scripts/publish-release.test.mjs; fi
       - name: the current manifests would release cleanly
         run: |
           for pkg in browser server python; do

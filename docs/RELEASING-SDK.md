@@ -28,55 +28,48 @@ the tag.
 make sdk-release SDK_PKG=browser SDK_BUMP=minor    # patch | minor | major | x.y.z
 ```
 
-That bumps the manifest, runs the package's full check, commits, and creates the
-tag `browser-v<version>`. It deliberately **does not push**, because the tag push
-is what publishes. When you are ready:
+That checks the package, bumps and commits its manifest/lockfile, and validates
+its package-specific version. It does not create a local tag or push. Write the
+new version's changelog first, then publish the reviewed source change:
 
 ```bash
-git push origin main browser-v0.2.0
+git push origin main
 ```
 
-Tags are `<browser|server|python>-v<semver>`. A bare `v0.2.0` is a *product*
-tag and is deliberately not matched by the release workflow — with four
-independently versioned packages it would be ambiguous.
+Tags remain `<browser|server|python>-v<semver>`. SDK versions are independent;
+a bare product `v…` tag does not release an SDK. A prerelease is marked on
+GitHub and uses npm's `next` dist-tag.
 
-**Push release tags one at a time.** GitHub creates no workflow runs at all when
-more than three tags arrive in a single push — no error, no run, the tags simply
-land and nothing happens. All four v0.1.0 tags were pushed together on
-2026-08-23 and published nothing; the recovery is the manual trigger below, with
-*dry run* unchecked, which is why that input exists.
+## One verification and release run
 
-`sdk/scripts/resolve-tag.mjs` is the single parser for those tags, and it refuses
-a tag whose version disagrees with the manifest it claims to release. It runs in
-three places: when you cut the tag, on every PR that touches `sdk/`
-(the `tag-contract` job), and as the first job of the release itself. Publishing
-`0.2.0` from a tree that says `0.1.0` is not a mistake a registry lets you take
-back.
+`.github/workflows/sdk-release.yml` owns main and SDK tag pushes:
 
-## What the tag push does
+1. Read each manifest and npm lockfile, reject version drift/downgrades, and
+   select only versions without a completed release. Never invent a version.
+2. Call `sdk.yml` once for the exact commit. It typechecks/tests/builds, inspects
+   tarball/wheel contents, verifies clean consumers, and tests the browser global
+   in the same build. PRs call the same read-only checks.
+3. After all checks pass, create immutable tags and download the verified
+   tarballs, browser bundle, wheel and sdist from that run. No second build or
+   publish hook runs.
+4. Add versioned documentation, `DOWNLOADS.md` and checksums. Attach every asset
+   to a draft, then publish the complete GitHub Release and optionally npm/PyPI.
 
-`.github/workflows/sdk-release.yml`:
+Main pushes without a version bump still run checks and skip release jobs.
+GitHub's bot-created tags do not launch another run: distribution is part of the
+original main workflow. Human tag pushes use the same pipeline.
 
-1. **Resolves the tag** → package, directory, version, prerelease, npm dist-tag.
-   A prerelease (`browser-v0.2.0-rc.1`) is marked as one on GitHub and published
-   under the `next` dist-tag, so it never becomes what `npm i` installs.
-2. **Rebuilds and re-verifies the tagged tree** — the same typecheck, tests, and
-   artefact assertions the PR gate runs, plus an install of the packed tarball
-   into an empty project. A release gate weaker than the PR gate is not a gate.
-3. **Creates the GitHub Release** with the artefacts attached and install
-   instructions in the body.
-4. **Publishes to the registry**, if its secret is set.
-
-To exercise all of that without publishing anything, run the workflow manually:
-**Actions → sdk-release → Run workflow**, give it a tag, leave *dry run* checked.
-
-The same manual trigger, with *dry run* **unchecked**, is how you publish a tag
-that is already pushed — after a run failed on something outside the artefact, or
-after a batched tag push created no runs at all:
+For recovery or verification, dispatch the current workflow on `main` with an
+existing tag. Leave `dry_run=true` to verify without publishing:
 
 ```bash
-gh workflow run sdk-release.yml --ref browser-v0.1.0 -f tag=browser-v0.1.0 -f dry_run=false
+gh workflow run sdk-release.yml --ref main -f tag=browser-v0.2.0 -f dry_run=false
 ```
+
+An unpublished tag/draft can resume only at its original commit. A published
+release's files are immutable; an explicit registry retry downloads those
+original assets instead of replacing them with a rebuild. This also supports
+legacy releases that predate checksum manifests. Never move a published tag.
 
 ## Secrets, and what is missing without them
 
@@ -119,7 +112,7 @@ no auth to install from.
 ## Verifying by hand
 
 Every package's `prepublishOnly` runs typecheck → test → build, so a broken tree
-cannot be published by hand either. Run the checks anyway before you tag — a
+cannot be published by hand either. Run the checks anyway before pushing the version change — a
 failure is cheaper to read outside `npm publish`:
 
 ```bash
@@ -182,15 +175,11 @@ cd sdk/swift
 cd ../.. && git add sdk/swift && git commit -m 'bump swift SDK'
 ```
 
-To release it, tag **bare semver** in that repository — not `swift-v0.2.0`, which
-SwiftPM would not read as a version:
-
-```bash
-cd sdk/swift && git tag 0.2.0 && git push origin 0.2.0
-```
-
-Its `release.yml` then rebuilds the tagged tree, resolves the new tag by URL the
-way a consumer would, and creates the GitHub Release.
+To release Swift, update `VERSION` in that repository and push `main`. Its
+workflow builds/tests once, creates the **bare SemVer** tag SwiftPM reads,
+resolves a consumer by URL, and publishes source/docs/download instructions.
+An unchanged version still checks without creating another tag. PR checks and
+release checks call the same read-only workflow. See its README for recovery.
 
 ## Version policy
 

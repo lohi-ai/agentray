@@ -155,12 +155,12 @@ sdk-check-swift: ## AgentRay (SwiftPM) — submodule: lohi-ai/agentray-swift
 # second step silently while the registry token is absent. Full runbook in
 # docs/RELEASING-SDK.md.
 #
-# Swift is not here: tag bare semver in lohi-ai/agentray-swift and push it.
+# Swift is not here: update VERSION in lohi-ai/agentray-swift and push main.
 SDK_BUMP ?= patch
 # browser and server share one check target; python has its own.
 SDK_SUITE = $(if $(filter $(SDK_PKG),browser server),npm,$(SDK_PKG))
 
-sdk-release: ## Bump + tag one SDK: make sdk-release SDK_PKG=browser SDK_BUMP=minor
+sdk-release: ## Prepare one SDK version for main CI: make sdk-release SDK_PKG=browser SDK_BUMP=minor
 	@test -n "$(filter $(SDK_PKG),browser server python)" \
 	  || { echo "set SDK_PKG=browser|server|python (got '$(SDK_PKG)'); swift releases from lohi-ai/agentray-swift"; exit 1; }
 	@$(MAKE) sdk-check-$(SDK_SUITE)

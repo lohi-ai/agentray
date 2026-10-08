@@ -1,291 +1,136 @@
-# Publishes one SDK, from one tag.
-#
-# GitHub is the primary package host: every release lands as a GitHub Release
-# with the real artefact attached, which is installable immediately and needs no
-# registry account, no scope claim, and no auth. Registry publication (npm,
-# PyPI) is a second step on the same tag, and it is *skipped, not failed*, when
-# the corresponding secret is absent — so this pipeline is live today and starts
-# publishing to npm the moment `@agentray` is claimed and NPM_TOKEN is set.
-#
-# The four SDKs version independently, so the tag names the package:
-#
-#   browser-v0.2.0   @agentray/browser  -> GitHub Release + npm
-#   server-v0.2.0    @agentray/server   -> GitHub Release + npm
-#   python-v0.2.0    agentray           -> GitHub Release + PyPI
-#
-# A bare `v0.2.0` is a product tag and is deliberately not matched here.
-#
-# The Swift SDK is not here. It is its own repository (lohi-ai/agentray-swift,
-# carried as a submodule at sdk/swift) and releases itself, because SwiftPM
-# resolves a package from a repository *root* and its versions from that repo's
-# tags. Releasing it from here meant pushing to another repository, which meant a
-# credential broad enough to push anywhere; running its CI where it lives means
-# the built-in GITHUB_TOKEN is enough.
+# One main run checks SDKs once, then tags/publishes only changed versions.
+# Manual retries preserve existing public assets and can finish registry upload.
 name: sdk-release
-
 on:
   push:
-    tags:
-      - 'browser-v*'
-      - 'server-v*'
-      - 'python-v*'
+    branches: [main]
+    tags: ['browser-v*', 'server-v*', 'python-v*']
+    paths: ['sdk/**', '.github/workflows/sdk*.yml', 'docs/RELEASING-SDK.md']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build, e.g. browser-v0.1.0'
+        description: Existing SDK tag to resume
         required: true
         type: string
       dry_run:
-        description: 'Build and verify everything, publish nothing'
+        description: Verify without creating tags or publishing
         type: boolean
         default: true
-
-# One release per tag at a time. Never cancel in progress: a half-published
-# release is worse than a slow one.
-concurrency:
-  group: sdk-release-${{ github.event.inputs.tag || github.ref_name }}
-  cancel-in-progress: false
-
 permissions:
-  contents: write   # create the GitHub Release and upload assets
-  id-token: write   # npm provenance / PyPI trusted publishing
-
+  contents: read
+concurrency:
+  group: sdk-release
+  cancel-in-progress: false
 jobs:
-  meta:
-    name: resolve ${{ github.event.inputs.tag || github.ref_name }}
+  plan:
     runs-on: ubuntu-latest
     outputs:
-      pkg: ${{ steps.r.outputs.pkg }}
-      dir: ${{ steps.r.outputs.dir }}
-      name: ${{ steps.r.outputs.name }}
-      version: ${{ steps.r.outputs.version }}
-      tag: ${{ steps.r.outputs.tag }}
-      prerelease: ${{ steps.r.outputs.prerelease }}
-      npm_tag: ${{ steps.r.outputs.npmTag }}
-      ref: ${{ steps.r.outputs.ref }}
-      dry_run: ${{ steps.r.outputs.dryRun }}
+      commit: ${{ steps.plan.outputs.commit }}
+      pkg: ${{ steps.plan.outputs.pkg }}
+      release: ${{ steps.plan.outputs.release }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+      - name: Preserve workflow policy for legacy tag retries
+        run: |
+          cp sdk/scripts/release-plan.mjs "$RUNNER_TEMP/release-plan.mjs"
+          cp sdk/scripts/release-plan.test.mjs "$RUNNER_TEMP/release-plan.test.mjs"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # Fails the whole release if the tag is malformed, names no known package,
-      # or claims a version the checked-out manifest does not.
-      - id: r
-        run: |
-          # pipefail matters here: without it a failing resolve-tag would exit 0
-          # through tee, and the release would proceed on an empty resolved.json.
-          set -euo pipefail
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          node sdk/scripts/resolve-tag.mjs "$TAG" | tee resolved.json
-          node -e '
-            const o = require("./resolved.json");
-            const out = require("fs");
-            for (const [k, v] of Object.entries(o)) out.appendFileSync(process.env.GITHUB_OUTPUT, `${k}=${v}\n`);
-            out.appendFileSync(process.env.GITHUB_OUTPUT, `ref=${o.tag}\n`);
-            out.appendFileSync(process.env.GITHUB_OUTPUT, `dryRun=${process.env.DRY_RUN === "true"}\n`);
-          '
+      - run: node --test "$RUNNER_TEMP/release-plan.test.mjs"
+      - id: plan
+        run: node "$RUNNER_TEMP/release-plan.mjs"
         env:
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
-      - name: summary
-        run: |
-          echo "### ${{ steps.r.outputs.name }} ${{ steps.r.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| | |" >> $GITHUB_STEP_SUMMARY
-          echo "| --- | --- |" >> $GITHUB_STEP_SUMMARY
-          echo "| tag | \`${{ steps.r.outputs.tag }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| source | \`${{ steps.r.outputs.dir }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| prerelease | ${{ steps.r.outputs.prerelease }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| dry run | ${{ steps.r.outputs.dryRun }} |" >> $GITHUB_STEP_SUMMARY
-
-  # ---------------------------------------------------------------- npm ----
-  npm:
-    name: ${{ needs.meta.outputs.name }} ${{ needs.meta.outputs.version }}
-    needs: meta
-    if: needs.meta.outputs.pkg == 'browser' || needs.meta.outputs.pkg == 'server'
+          RELEASE_REF_TYPE: ${{ github.event_name == 'workflow_dispatch' && 'tag' || github.ref_type }}
+          RELEASE_REF_NAME: ${{ inputs.tag || github.ref_name }}
+          RETRY_PUBLISHED: ${{ github.event_name == 'workflow_dispatch' }}
+          GH_TOKEN: ${{ github.token }}
+  verify:
+    needs: plan
+    uses: ./.github/workflows/sdk.yml
+    with:
+      ref: ${{ needs.plan.outputs.commit }}
+      pkg: ${{ needs.plan.outputs.pkg }}
+  distribute:
+    needs: [plan, verify]
+    if: needs.plan.outputs.release == 'true' && inputs.dry_run != true
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       GH_TOKEN: ${{ github.token }}
-      TAG: ${{ needs.meta.outputs.tag }}
+      TAG: ${{ matrix.release.tag }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.meta.outputs.ref }}
+          ref: ${{ needs.plan.outputs.commit }}
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ${{ needs.meta.outputs.dir }}/package-lock.json
           registry-url: https://registry.npmjs.org
-
-      # The release gate is the PR gate, run again against the exact tagged tree.
-      - run: npm ci
-        working-directory: ${{ needs.meta.outputs.dir }}
-      - run: npm run typecheck
-        working-directory: ${{ needs.meta.outputs.dir }}
-      - run: npm test
-        working-directory: ${{ needs.meta.outputs.dir }}
-      - run: npm run build
-        working-directory: ${{ needs.meta.outputs.dir }}
-      - name: the tarball contains the built entrypoints
-        run: node ../scripts/verify-npm-tarball.mjs
-        working-directory: ${{ needs.meta.outputs.dir }}
-      - name: the global attaches and captures
-        if: needs.meta.outputs.pkg == 'browser'
-        run: node ../scripts/verify-cdn-bundle.mjs
-        working-directory: ${{ needs.meta.outputs.dir }}
-
-      - name: pack
-        id: pack
-        working-directory: ${{ needs.meta.outputs.dir }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-${{ matrix.release.pkg }}-${{ github.run_id }}
+          path: dist
+      - name: Create immutable tag after all verification passes
+        if: matrix.release.createTag
         run: |
-          TARBALL=$(npm pack --json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].filename")
-          echo "tarball=$TARBALL" >> $GITHUB_OUTPUT
-          ls -la "$TARBALL"
-
-      # Installing the packed tarball into an empty project is the closest thing
-      # to being the first user. It catches a broken `exports` map or a missing
-      # type declaration that every in-repo test happily walks around.
-      - name: the tarball installs and imports from an empty project
-        working-directory: ${{ needs.meta.outputs.dir }}
-        run: node ../scripts/verify-consumer-install.mjs "${{ steps.pack.outputs.tarball }}"
-
-      - name: GitHub Release
-        if: needs.meta.outputs.dry_run != 'true'
-        working-directory: ${{ needs.meta.outputs.dir }}
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+      - name: Publish complete release, documentation and download index
         run: |
-          ASSETS=("${{ steps.pack.outputs.tarball }}")
-          # The <script> bundle is a first-class install path, so it ships as its
-          # own asset rather than only inside the tarball.
-          if [ "${{ needs.meta.outputs.pkg }}" = "browser" ]; then
-            cp dist/index.global.js "agentray-browser-${{ needs.meta.outputs.version }}.min.js"
-            ASSETS+=("agentray-browser-${{ needs.meta.outputs.version }}.min.js")
-          fi
-
-          NOTES_FILE="${RUNNER_TEMP:-/tmp}/release-notes.md"
-          cat > "$NOTES_FILE" <<EOF
-          \`${{ needs.meta.outputs.name }}\` ${{ needs.meta.outputs.version }} — built from \`${{ needs.meta.outputs.dir }}\` at \`${{ github.sha }}\`.
-
-          **Install from this release** (no registry account needed):
-
-          \`\`\`bash
-          npm install https://github.com/${{ github.repository }}/releases/download/$TAG/${{ steps.pack.outputs.tarball }}
-          \`\`\`
-
-          **Install from npm** (once \`@agentray\` is published):
-
-          \`\`\`bash
-          npm install ${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }}
-          \`\`\`
-          EOF
-
-          gh release create "$TAG" "${ASSETS[@]}" \
-            --title "${{ needs.meta.outputs.name }} ${{ needs.meta.outputs.version }}" \
-            --notes-file "$NOTES_FILE" \
-            ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
-            || gh release upload "$TAG" "${ASSETS[@]}" --clobber
-
-      # Skipped, not failed, while the scope is unclaimed. The GitHub Release
-      # above is the shipping artefact until NPM_TOKEN exists.
-      - name: npm publish
-        if: needs.meta.outputs.dry_run != 'true' && env.NPM_TOKEN != ''
-        working-directory: ${{ needs.meta.outputs.dir }}
+          git show "$CONTROL_SHA:sdk/scripts/publish-release.mjs" > "$RUNNER_TEMP/publish-release.mjs"
+          node "$RUNNER_TEMP/publish-release.mjs"
+        env:
+          CONTROL_SHA: ${{ github.workflow_sha }}
+          RELEASE_PLAN: ${{ toJSON(matrix.release) }}
+      - name: Publish verified tarball to npm
+        if: matrix.release.kind == 'npm' && env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_NAME: ${{ matrix.release.name }}
+          VERSION: ${{ matrix.release.version }}
+          NPM_TAG: ${{ matrix.release.npmTag }}
         run: |
           set -euo pipefail
-          # Re-running a tag is the documented recovery once a token is added
-          # (docs/RELEASING-SDK.md), so this has to be idempotent. npm refuses to
-          # republish a version, which would turn a no-op re-run into a red build.
-          if npm view "${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }}" version >/dev/null 2>&1; then
-            echo "::notice::${{ needs.meta.outputs.name }}@${{ needs.meta.outputs.version }} is already on npm — nothing to publish"
+          if npm view "$PACKAGE_NAME@$VERSION" version > /tmp/registry-version.txt 2> /tmp/registry-error.txt; then
+            echo 'Already published to npm'
+          elif grep -q E404 /tmp/registry-error.txt; then
+            npm publish dist/*.tgz --ignore-scripts --provenance --access public --tag "$NPM_TAG"
           else
-            npm publish --provenance --access public --tag "${{ needs.meta.outputs.npm_tag }}"
+            cat /tmp/registry-error.txt >&2
+            exit 1
           fi
-
-      - name: npm publish skipped
-        if: needs.meta.outputs.dry_run != 'true' && env.NPM_TOKEN == ''
-        run: |
-          echo "::notice::NPM_TOKEN is not set — published to GitHub Releases only."
-          echo "Claim the \`@agentray\` npm scope, add NPM_TOKEN to repository secrets, and re-run this workflow with the same tag." >> $GITHUB_STEP_SUMMARY
-
-  # ------------------------------------------------------------- python ----
-  python:
-    name: agentray ${{ needs.meta.outputs.version }} (PyPI)
-    needs: meta
-    if: needs.meta.outputs.pkg == 'python'
-    runs-on: ubuntu-latest
-    env:
-      PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-      GH_TOKEN: ${{ github.token }}
-      TAG: ${{ needs.meta.outputs.tag }}
-    defaults:
-      run:
-        working-directory: sdk/python
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.meta.outputs.ref }}
       - uses: actions/setup-python@v5
+        if: matrix.release.kind == 'pypi' && env.PYPI_TOKEN != ''
         with:
           python-version: '3.9'
-      # The client imports urllib3 — the package's own declared dependency. Install
-      # from pyproject rather than naming it here, so the two cannot drift.
-      - run: pip install -e .
-      - run: python tests/test_client.py
-      - run: pip install build twine
-      - run: python -m build
-      - run: twine check dist/*
-      - name: the wheel contains the package, not just metadata
-        run: python ../scripts/verify-python-wheel.py
-      - name: the built wheel imports from a clean environment
-        run: |
-          python -m venv /tmp/verify
-          /tmp/verify/bin/pip install dist/*.whl
-          /tmp/verify/bin/python -c "import agentray; assert agentray.DEFAULT_PLATFORM == 'server'; print('import ok')"
-
-      - name: GitHub Release
-        if: needs.meta.outputs.dry_run != 'true'
-        run: |
-          WHEEL=$(ls dist/*.whl)
-          SDIST=$(ls dist/*.tar.gz)
-          NOTES_FILE="${RUNNER_TEMP:-/tmp}/release-notes.md"
-          cat > "$NOTES_FILE" <<EOF
-          \`agentray\` ${{ needs.meta.outputs.version }} — built from \`sdk/python\` at \`${{ github.sha }}\`.
-
-          **Install from this release** (no registry account needed):
-
-          \`\`\`bash
-          pip install https://github.com/${{ github.repository }}/releases/download/$TAG/$(basename "$WHEEL")
-          \`\`\`
-
-          **Install from PyPI** (once \`agentray\` is published):
-
-          \`\`\`bash
-          pip install agentray==${{ needs.meta.outputs.version }}
-          \`\`\`
-          EOF
-          gh release create "$TAG" "$WHEEL" "$SDIST" \
-            --title "agentray ${{ needs.meta.outputs.version }} (Python)" \
-            --notes-file "$NOTES_FILE" \
-            ${{ needs.meta.outputs.prerelease == 'true' && '--prerelease' || '' }} \
-            || gh release upload "$TAG" "$WHEEL" "$SDIST" --clobber
-
-      - name: PyPI publish
-        if: needs.meta.outputs.dry_run != 'true' && env.PYPI_TOKEN != ''
+      - name: Publish verified wheel and sdist to PyPI
+        if: matrix.release.kind == 'pypi' && env.PYPI_TOKEN != ''
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        # --skip-existing for the same reason as the npm check above: a re-run of
-        # an already-published version is a no-op, not a failure. It only skips
-        # on "file already exists" — every other upload error still fails.
-        run: twine upload --skip-existing dist/*
-
-      - name: PyPI publish skipped
-        if: needs.meta.outputs.dry_run != 'true' && env.PYPI_TOKEN == ''
         run: |
-          echo "::notice::PYPI_TOKEN is not set — published to GitHub Releases only."
-          echo "Claim \`agentray\` on PyPI, add a project-scoped PYPI_TOKEN to repository secrets, and re-run this workflow with the same tag." >> $GITHUB_STEP_SUMMARY
+          pip install twine
+          twine upload --skip-existing dist/*.whl dist/agentray-[0-9]*.tar.gz
+      - name: Registry configuration summary
+        if: (matrix.release.kind == 'npm' && env.NPM_TOKEN == '') || (matrix.release.kind == 'pypi' && env.PYPI_TOKEN == '')
+        run: echo 'Published to GitHub Releases. Add the package registry token and dispatch this tag to finish optional npm/PyPI publication.' >> "$GITHUB_STEP_SUMMARY"
