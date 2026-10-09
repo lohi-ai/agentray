@@ -6,7 +6,7 @@ requires:
 kind: App
 spec:
   kind: service
-  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web@sha256:c6d692b91adcb1c5dd78137aab8511d72c39efe692f3d75db26b2b4cb3a649fb
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-web:latest
   replicas: 1
   port: 3200
   healthPath: /

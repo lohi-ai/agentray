@@ -3,6 +3,7 @@ steps:
     id: api
     args:
       - '--destination=${_API_IMAGE}:${_TAG}'
+      - '--destination=${_API_IMAGE}:latest'
       - '--cache=true'
       - '--cache-ttl=168h'
       - '--context=.'
@@ -13,6 +14,7 @@ steps:
     waitFor: ['-']
     args:
       - '--destination=${_WEB_IMAGE}:${_TAG}'
+      - '--destination=${_WEB_IMAGE}:latest'
       - '--cache=true'
       - '--cache-ttl=168h'
       - '--context=dir:///workspace/web'

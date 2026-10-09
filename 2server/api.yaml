@@ -6,7 +6,7 @@ requires:
 kind: App
 spec:
   kind: service
-  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api@sha256:b139b084ed204e35c02b670141ed2e6306ae31db8231a7a552de69da469ac1b6
+  image: asia-southeast1-docker.pkg.dev/lohi-dev-lohi/docker/agentray-api:latest
   preDeploy:
     command:
       - agentray

@@ -7,6 +7,12 @@ generates Compose/Caddy; existing physical volume bindings remain on the VM.
 The API declares logical volumeMounts and instanceEnv for its NATS durable.
 Development AgentRay on the Lohi VM is retired.
 
+Both source images stay on `:latest`. Cloud Build publishes each unique release
+tag and `:latest` from the same build. The wrapper deploys the unique tag using
+`--image`, leaving YAML unchanged. Direct CLI deployment and plain `--skip-build`
+use the latest published build, even if rollout failed. API/web rollout is not
+atomic; each image's `latest` may advance independently if a build fails partway.
+
 ```bash
 2srv validate -f 2server/api.yaml
 2srv plan -f 2server/api.yaml
