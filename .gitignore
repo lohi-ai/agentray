@@ -44,3 +44,6 @@ __pycache__/
 # worktrees/ (2.9 GB and growing). It is local machinery, never source — the
 # ticket branches it checks out are the reviewable artefacts.
 /.babysit/
+
+# Next.js generated; flips between .next/ and .next/dev/ by mode
+/web/next-env.d.ts
